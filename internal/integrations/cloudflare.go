@@ -1,0 +1,281 @@
+package integrations
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const ManagedRecordPrefix = "cdn-platform:"
+
+type DNSRecord struct {
+	ID      string `json:"id,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Name    string `json:"name"`
+	Content string `json:"content"`
+	Comment string `json:"comment"`
+	TTL     int    `json:"ttl"`
+	Proxied bool   `json:"proxied"`
+}
+
+type DNSProvider interface {
+	Reconcile(ctx context.Context, zoneID, owner string, desired []DNSRecord) error
+}
+
+type CloudflareDNS struct {
+	BaseURL string
+	Token   func() (string, error)
+	Client  *http.Client
+}
+
+func (c CloudflareDNS) Reconcile(ctx context.Context, zoneID, owner string, desired []DNSRecord) error {
+	if strings.TrimSpace(zoneID) == "" {
+		return fmt.Errorf("Cloudflare zone ID is required")
+	}
+	if strings.TrimSpace(owner) == "" {
+		return fmt.Errorf("DNS record owner is required")
+	}
+	token, err := c.Token()
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return fmt.Errorf("Cloudflare API token is empty")
+	}
+	existing, err := c.listRecords(ctx, zoneID, token, "")
+	if err != nil {
+		return err
+	}
+	wanted := make(map[string]DNSRecord, len(desired))
+	for _, record := range desired {
+		if record.Name == "" || record.Content == "" || !strings.HasPrefix(record.Comment, ManagedRecordPrefix) {
+			return fmt.Errorf("invalid managed DNS record")
+		}
+		if record.TTL == 0 {
+			record.TTL = 60
+		}
+		record.Proxied = false // This project uses Cloudflare as authoritative DNS only.
+		wanted[recordKey(record)] = record
+	}
+	managed := make(map[string]DNSRecord)
+	ownerPrefix := ManagedRecordPrefix + owner + ";"
+	for _, record := range existing {
+		if recordIsA(record) && strings.HasPrefix(record.Comment, ownerPrefix) {
+			managed[recordKey(record)] = record
+		}
+	}
+	for key, desiredRecord := range wanted {
+		for _, existingRecord := range existing {
+			if canonicalRecordName(existingRecord.Name) == canonicalRecordName(desiredRecord.Name) && (!recordIsA(existingRecord) || !strings.HasPrefix(existingRecord.Comment, ownerPrefix)) {
+				return fmt.Errorf("refusing to manage DNS name %s because record %s (%s) is not owned by %s", desiredRecord.Name, existingRecord.ID, recordTypeLabel(existingRecord), owner)
+			}
+		}
+		if _, found := managed[key]; found {
+			continue
+		}
+		if err := c.createRecord(ctx, zoneID, token, desiredRecord); err != nil {
+			return err
+		}
+	}
+	for key, existingRecord := range managed {
+		if _, found := wanted[key]; found {
+			continue
+		}
+		if err := c.deleteRecord(ctx, zoneID, token, existingRecord.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func recordKey(record DNSRecord) string {
+	return canonicalRecordName(record.Name) + "\x00" + record.Content + "\x00" + record.Comment
+}
+
+func canonicalRecordName(name string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+}
+
+func recordIsA(record DNSRecord) bool {
+	return record.Type == "" || strings.EqualFold(record.Type, "A")
+}
+
+func recordTypeLabel(record DNSRecord) string {
+	if record.Type == "" {
+		return "A"
+	}
+	return record.Type
+}
+
+func (c CloudflareDNS) listRecords(ctx context.Context, zoneID, token, recordType string) ([]DNSRecord, error) {
+	var all []DNSRecord
+	for page := 1; ; page++ {
+		values := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		if recordType != "" {
+			values.Set("type", recordType)
+		}
+		endpoint := c.baseURL() + "/zones/" + url.PathEscape(zoneID) + "/dns_records?" + values.Encode()
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return nil, err
+		}
+		response, err := c.doWithRetry(ctx, request, token)
+		if err != nil {
+			return nil, err
+		}
+		var payload cloudflareResponse[[]DNSRecord]
+		decodeErr := json.NewDecoder(response.Body).Decode(&payload)
+		response.Body.Close()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if !payload.Success {
+			return nil, fmt.Errorf("Cloudflare list DNS records: %s", payload.message())
+		}
+		all = append(all, payload.Result...)
+		if payload.ResultInfo == nil || payload.ResultInfo.TotalPages <= page || len(payload.Result) == 0 {
+			return all, nil
+		}
+	}
+}
+
+func (c CloudflareDNS) createRecord(ctx context.Context, zoneID, token string, record DNSRecord) error {
+	body, err := json.Marshal(struct {
+		Type string `json:"type"`
+		DNSRecord
+	}{Type: "A", DNSRecord: record})
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/zones/"+url.PathEscape(zoneID)+"/dns_records", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	response, err := c.doWithRetry(ctx, request, token)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	var payload cloudflareResponse[json.RawMessage]
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if !payload.Success {
+		return fmt.Errorf("Cloudflare create DNS record: %s", payload.message())
+	}
+	return nil
+}
+
+func (c CloudflareDNS) deleteRecord(ctx context.Context, zoneID, token, recordID string) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL()+"/zones/"+url.PathEscape(zoneID)+"/dns_records/"+url.PathEscape(recordID), nil)
+	if err != nil {
+		return err
+	}
+	response, err := c.doWithRetry(ctx, request, token)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	var payload cloudflareResponse[json.RawMessage]
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if !payload.Success {
+		return fmt.Errorf("Cloudflare delete DNS record: %s", payload.message())
+	}
+	return nil
+}
+
+func (c CloudflareDNS) do(request *http.Request, token string) (*http.Response, error) {
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Content-Type", "application/json")
+	client := c.Client
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4<<10))
+		response.Body.Close()
+		return nil, fmt.Errorf("Cloudflare API %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	return response, nil
+}
+
+func (c CloudflareDNS) doWithRetry(ctx context.Context, request *http.Request, token string) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < 4; attempt++ {
+		clone := request.Clone(ctx)
+		if request.GetBody != nil {
+			body, err := request.GetBody()
+			if err != nil {
+				return nil, err
+			}
+			clone.Body = body
+		}
+		response, err := c.do(clone, token)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !isRetryableCloudflareError(err) || attempt == 3 {
+			break
+		}
+		backoff := time.Duration(1<<attempt) * 250 * time.Millisecond
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+	}
+	return nil, lastErr
+}
+
+func isRetryableCloudflareError(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, " 429 ") || strings.Contains(message, " 500 ") || strings.Contains(message, " 502 ") || strings.Contains(message, " 503 ") || strings.Contains(message, " 504 ")
+}
+
+func (c CloudflareDNS) baseURL() string {
+	if c.BaseURL != "" {
+		return strings.TrimRight(c.BaseURL, "/")
+	}
+	return "https://api.cloudflare.com/client/v4"
+}
+
+type cloudflareResponse[T any] struct {
+	Success    bool `json:"success"`
+	Result     T    `json:"result"`
+	ResultInfo *struct {
+		TotalPages int `json:"total_pages"`
+	} `json:"result_info"`
+	Errors []struct {
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+func (r cloudflareResponse[T]) message() string {
+	parts := make([]string, 0, len(r.Errors))
+	for _, error := range r.Errors {
+		if error.Message != "" {
+			parts = append(parts, error.Message)
+		}
+	}
+	if len(parts) == 0 {
+		return "unknown Cloudflare error"
+	}
+	return strings.Join(parts, "; ")
+}

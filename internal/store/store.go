@@ -1,0 +1,1457 @@
+package store
+
+import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"cdn-platform/internal/domain"
+	"github.com/google/uuid"
+	_ "modernc.org/sqlite"
+)
+
+var (
+	ErrNotFound      = errors.New("not found")
+	ErrTokenInvalid  = errors.New("enrollment token is invalid or expired")
+	ErrCacheDisabled = errors.New("site cache is disabled in passthrough mode")
+)
+
+type Store struct {
+	db *sql.DB
+}
+
+func Open(path string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, fmt.Errorf("create data directory: %w", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, err
+	}
+	// A single controller process has a small write rate. One connection keeps SQLite's
+	// connection-scoped foreign-key and busy-timeout settings consistent.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	for _, pragma := range []string{"PRAGMA busy_timeout = 5000", "PRAGMA foreign_keys = ON", "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL"} {
+		if _, err := db.Exec(pragma); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("configure sqlite: %w", err)
+		}
+	}
+	s := &Store{db: db}
+	if err := s.Migrate(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+func (s *Store) Migrate() error {
+	_, err := s.db.Exec(`
+CREATE TABLE IF NOT EXISTS admin_users (
+  id TEXT PRIMARY KEY,
+  password_hash TEXT NOT NULL,
+  totp_secret TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  token_hash TEXT NOT NULL UNIQUE,
+  csrf_token TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS nodes (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  public_ipv4 TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  cert_fingerprint TEXT,
+  last_heartbeat_at TEXT,
+  applied_version INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS enrollment_tokens (
+  token_hash TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sites (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  zone_id TEXT NOT NULL,
+  domains_json TEXT NOT NULL,
+  node_ids_json TEXT NOT NULL,
+  primary_origin_json TEXT NOT NULL,
+  backup_origin_json TEXT,
+  stream_paths_json TEXT NOT NULL DEFAULT '[]',
+	passthrough INTEGER NOT NULL DEFAULT 0,
+  cache_generation INTEGER NOT NULL DEFAULT 1,
+  config_version INTEGER NOT NULL DEFAULT 1,
+  published INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS site_domains (
+  domain_name TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS certificates (
+  site_id TEXT PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+  certificate_ciphertext BLOB NOT NULL,
+  private_key_ciphertext BLOB NOT NULL,
+  not_after TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_states (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  nginx_config TEXT NOT NULL,
+  public_ports_json TEXT NOT NULL DEFAULT '[]',
+  certificate_ciphertext BLOB,
+  private_key_ciphertext BLOB,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS deployment_tasks (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  site_id TEXT,
+  status TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  deadline_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS publish_task_nodes (
+  task_id TEXT NOT NULL REFERENCES deployment_tasks(id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  target_version INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  error_code TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '',
+  port_conflicts_json TEXT NOT NULL DEFAULT '[]',
+  reported_at TEXT,
+  PRIMARY KEY(task_id, node_id)
+);
+CREATE TABLE IF NOT EXISTS dns_bindings (
+  id TEXT PRIMARY KEY,
+  site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  domain_name TEXT NOT NULL,
+  provider_record_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(site_id, node_id, domain_name)
+);
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id TEXT PRIMARY KEY,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  resource_type TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  remote_addr TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS recovery_codes (
+  code_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS secrets (
+  name TEXT PRIMARY KEY,
+  ciphertext BLOB NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_health (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  consecutive_successes INTEGER NOT NULL DEFAULT 0,
+  dns_eligible INTEGER NOT NULL DEFAULT 0,
+  last_checked_at TEXT,
+  last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON deployment_tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_publish_task_nodes_node ON publish_task_nodes(node_id, status);
+CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+`)
+	if err != nil {
+		return err
+	}
+	// Existing v1 databases may predate the published column.
+	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN published INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN stream_paths_json TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN passthrough INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN applied_version INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE deployment_tasks ADD COLUMN deadline_at TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN public_ports_json TEXT NOT NULL DEFAULT '[]'`)
+	// Publish tasks created before edge confirmation existed have neither a
+	// deadline nor target rows. They cannot be resumed safely after upgrade, so
+	// make the required manual retry visible before enforcing the new active
+	// task uniqueness constraint.
+	if _, err := s.db.Exec(`UPDATE deployment_tasks
+		SET status = ?, detail = ?, updated_at = ?
+		WHERE kind = 'publish_site' AND status IN (?, ?, ?) AND deadline_at IS NULL`,
+		domain.TaskFailed, "publish confirmation interrupted by control-plane upgrade; retry Publish", stamp(now()),
+		domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying); err != nil {
+		return fmt.Errorf("migrate legacy publish tasks: %w", err)
+	}
+	// A certificate worker lives only for the controller process lifetime. Any
+	// active task found while opening the database belongs to an earlier process
+	// and must be retried explicitly rather than replayed against the ACME API.
+	if _, err := s.FailActiveCertificateTasks("certificate issuance interrupted by control-plane restart; retry Issue TLS"); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_certificate_site
+		ON deployment_tasks(site_id)
+		WHERE kind IN ('issue_certificate', 'renew_certificate') AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
+		return fmt.Errorf("create active certificate task index: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_publish_site
+		ON deployment_tasks(site_id)
+		WHERE kind = 'publish_site' AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
+		return fmt.Errorf("create active publish task index: %w", err)
+	}
+	return s.backfillSiteDomains()
+}
+
+func (s *Store) backfillSiteDomains() error {
+	rows, err := s.db.Query(`SELECT id, domains_json FROM sites`)
+	if err != nil {
+		return err
+	}
+	type existingSite struct {
+		id      string
+		domains []string
+	}
+	var sites []existingSite
+	for rows.Next() {
+		var siteID, encoded string
+		if err := rows.Scan(&siteID, &encoded); err != nil {
+			rows.Close()
+			return err
+		}
+		var domains []string
+		if err := json.Unmarshal([]byte(encoded), &domains); err != nil {
+			rows.Close()
+			return fmt.Errorf("decode domains for site %s: %w", siteID, err)
+		}
+		sites = append(sites, existingSite{id: siteID, domains: domains})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, site := range sites {
+		for _, domainName := range site.domains {
+			var owner string
+			err := s.db.QueryRow(`SELECT site_id FROM site_domains WHERE domain_name = ?`, domainName).Scan(&owner)
+			if errors.Is(err, sql.ErrNoRows) {
+				if _, err := s.db.Exec(`INSERT INTO site_domains(domain_name, site_id) VALUES (?, ?)`, domainName, site.id); err != nil {
+					return err
+				}
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if owner != site.id {
+				return fmt.Errorf("domain %s belongs to multiple existing sites", domainName)
+			}
+		}
+	}
+	return nil
+}
+
+func now() time.Time           { return time.Now().UTC().Round(0) }
+func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
+func parseTime(value string) (time.Time, error) { return time.Parse(time.RFC3339Nano, value) }
+
+func hashToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+func (s *Store) HasAdmin() (bool, error) {
+	var count int
+	err := s.db.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) CreateInitialAdmin(passwordHash, totpSecret string) error {
+	if passwordHash == "" || totpSecret == "" {
+		return errors.New("password hash and totp secret are required")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var count int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM admin_users").Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return errors.New("an admin account already exists")
+	}
+	ts := stamp(now())
+	_, err = tx.Exec("INSERT INTO admin_users(id, password_hash, totp_secret, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", "admin", passwordHash, totpSecret, ts, ts)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ReplacePassword(userID, passwordHash string) error {
+	result, err := s.db.Exec(`UPDATE admin_users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, stamp(now()), userID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ReplaceRecoveryCodes(userID string, hashes []string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM recovery_codes WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	for _, hash := range hashes {
+		if _, err := tx.Exec(`INSERT INTO recovery_codes(code_hash, user_id, created_at) VALUES (?, ?, ?)`, hash, userID, stamp(now())); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ConsumeRecoveryCode(codeHash string) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var userID string
+	var usedAt sql.NullString
+	err = tx.QueryRow(`SELECT user_id, used_at FROM recovery_codes WHERE code_hash = ?`, codeHash).Scan(&userID, &usedAt)
+	if errors.Is(err, sql.ErrNoRows) || usedAt.Valid {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	result, err := tx.Exec(`UPDATE recovery_codes SET used_at = ? WHERE code_hash = ? AND used_at IS NULL`, stamp(now()), codeHash)
+	if err != nil {
+		return "", err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return "", ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return userID, nil
+}
+
+type Admin struct {
+	ID           string
+	PasswordHash string
+	TOTPSecret   string
+}
+
+func (s *Store) Admin() (Admin, error) {
+	var admin Admin
+	err := s.db.QueryRow("SELECT id, password_hash, totp_secret FROM admin_users LIMIT 1").Scan(&admin.ID, &admin.PasswordHash, &admin.TOTPSecret)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Admin{}, ErrNotFound
+	}
+	return admin, err
+}
+
+func (s *Store) CreateSession(userID, token, csrf string, expiresAt time.Time) error {
+	_, err := s.db.Exec("INSERT INTO sessions(id, user_id, token_hash, csrf_token, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)", uuid.NewString(), userID, hashToken(token), csrf, stamp(expiresAt), stamp(now()))
+	return err
+}
+
+type Session struct {
+	UserID    string
+	CSRFToken string
+	ExpiresAt time.Time
+}
+
+func (s *Store) Session(token string) (Session, error) {
+	var session Session
+	var expiresAt string
+	err := s.db.QueryRow("SELECT user_id, csrf_token, expires_at FROM sessions WHERE token_hash = ?", hashToken(token)).Scan(&session.UserID, &session.CSRFToken, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Session{}, ErrNotFound
+	}
+	if err != nil {
+		return Session{}, err
+	}
+	session.ExpiresAt, err = parseTime(expiresAt)
+	if err != nil {
+		return Session{}, err
+	}
+	if !session.ExpiresAt.After(now()) {
+		_ = s.DeleteSession(token)
+		return Session{}, ErrNotFound
+	}
+	return session, nil
+}
+
+func (s *Store) DeleteSession(token string) error {
+	_, err := s.db.Exec("DELETE FROM sessions WHERE token_hash = ?", hashToken(token))
+	return err
+}
+
+func (s *Store) CreateNode(name, publicIPv4 string) (domain.Node, error) {
+	if strings.TrimSpace(name) == "" {
+		return domain.Node{}, errors.New("node name is required")
+	}
+	parsed := net.ParseIP(strings.TrimSpace(publicIPv4))
+	if parsed == nil || parsed.To4() == nil || parsed.IsUnspecified() || parsed.IsLoopback() || parsed.IsLinkLocalUnicast() || parsed.IsMulticast() || parsed.IsPrivate() {
+		return domain.Node{}, errors.New("a valid public IPv4 address is required")
+	}
+	created := now()
+	node := domain.Node{ID: uuid.NewString(), Name: strings.TrimSpace(name), PublicIPv4: parsed.String(), Status: domain.NodePending, CreatedAt: created, UpdatedAt: created}
+	_, err := s.db.Exec(`INSERT INTO nodes(id, name, public_ipv4, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, node.ID, node.Name, node.PublicIPv4, node.Status, stamp(created), stamp(created))
+	if err != nil {
+		return domain.Node{}, fmt.Errorf("create node: %w", err)
+	}
+	return node, nil
+}
+
+func (s *Store) GetNode(id string) (domain.Node, error) {
+	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
+}
+
+func (s *Store) ListNodes() ([]domain.Node, error) {
+	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	nodes := make([]domain.Node, 0)
+	for rows.Next() {
+		node, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		nodes = append(nodes, node)
+	}
+	return nodes, rows.Err()
+}
+
+type scanner interface{ Scan(...any) error }
+
+func scanNode(row scanner) (domain.Node, error) {
+	var node domain.Node
+	var heartbeat sql.NullString
+	var createdAt, updatedAt string
+	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Node{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.Node{}, err
+	}
+	node.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	node.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	if heartbeat.Valid {
+		value, err := parseTime(heartbeat.String)
+		if err != nil {
+			return domain.Node{}, err
+		}
+		node.LastHeartbeatAt = &value
+	}
+	return node, nil
+}
+
+func (s *Store) CreateEnrollmentToken(nodeID, token string, expiresAt time.Time) error {
+	node, err := s.GetNode(nodeID)
+	if err != nil {
+		return err
+	}
+	if node.Status == domain.NodeRevoked {
+		return errors.New("cannot enroll a revoked node")
+	}
+	_, err = s.db.Exec(`INSERT INTO enrollment_tokens(token_hash, node_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, hashToken(token), nodeID, stamp(expiresAt), stamp(now()))
+	return err
+}
+
+func (s *Store) ConsumeEnrollmentToken(token string) (string, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var nodeID, expiresAt string
+	var nodeStatus domain.NodeStatus
+	var usedAt sql.NullString
+	err = tx.QueryRow(`SELECT enrollment_tokens.node_id, enrollment_tokens.expires_at, enrollment_tokens.used_at, nodes.status FROM enrollment_tokens JOIN nodes ON nodes.id = enrollment_tokens.node_id WHERE enrollment_tokens.token_hash = ?`, hashToken(token)).Scan(&nodeID, &expiresAt, &usedAt, &nodeStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrTokenInvalid
+	}
+	if err != nil {
+		return "", err
+	}
+	expires, err := parseTime(expiresAt)
+	if err != nil || nodeStatus == domain.NodeRevoked || usedAt.Valid || !expires.After(now()) {
+		return "", ErrTokenInvalid
+	}
+	result, err := tx.Exec(`UPDATE enrollment_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`, stamp(now()), hashToken(token))
+	if err != nil {
+		return "", err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil || changed != 1 {
+		return "", ErrTokenInvalid
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return nodeID, nil
+}
+
+func (s *Store) SetNodeCertificate(nodeID, fingerprint string) error {
+	result, err := s.db.Exec(`UPDATE nodes SET cert_fingerprint = ?, updated_at = ? WHERE id = ? AND status != ?`, fingerprint, stamp(now()), nodeID, domain.NodeRevoked)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) NodeIDByFingerprint(fingerprint string) (string, error) {
+	var nodeID string
+	err := s.db.QueryRow(`SELECT id FROM nodes WHERE cert_fingerprint = ? AND status != ?`, fingerprint, domain.NodeRevoked).Scan(&nodeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return nodeID, err
+}
+
+func (s *Store) Heartbeat(nodeID string, appliedVersion int64, lastError string, report *domain.ApplyReport) error {
+	// Record a structured apply result before advancing applied_version. The
+	// latter is a compatibility signal for old agents, and a concurrent health
+	// reconciliation could otherwise consume it first and replace the richer
+	// report with a generic confirmation.
+	if report != nil {
+		if err := s.RecordPublishApply(nodeID, *report); err != nil {
+			return err
+		}
+	}
+	status := domain.NodeActive
+	result, err := s.db.Exec(`UPDATE nodes SET status = CASE WHEN status = ? THEN ? ELSE status END, last_heartbeat_at = ?, applied_version = CASE WHEN ? > applied_version THEN ? ELSE applied_version END, last_error = ?, updated_at = ? WHERE id = ?`, domain.NodePending, status, stamp(now()), appliedVersion, appliedVersion, lastError, stamp(now()), nodeID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrNotFound
+	}
+	return s.ReconcilePublishTasks()
+}
+
+type NodeHealth struct {
+	NodeID               string
+	ConsecutiveFailures  int
+	ConsecutiveSuccesses int
+	DNSEligible          bool
+	LastCheckedAt        *time.Time
+	LastError            string
+}
+
+func (s *Store) RecordNodeHealth(nodeID string, healthy bool, lastError string) (NodeHealth, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return NodeHealth{}, err
+	}
+	defer tx.Rollback()
+	var health NodeHealth
+	var checked sql.NullString
+	err = tx.QueryRow(`SELECT node_id, consecutive_failures, consecutive_successes, dns_eligible, last_checked_at, last_error FROM node_health WHERE node_id = ?`, nodeID).Scan(&health.NodeID, &health.ConsecutiveFailures, &health.ConsecutiveSuccesses, &health.DNSEligible, &checked, &health.LastError)
+	if errors.Is(err, sql.ErrNoRows) {
+		health.NodeID = nodeID
+		health.LastError = ""
+	} else if err != nil {
+		return NodeHealth{}, err
+	}
+	if healthy {
+		health.ConsecutiveSuccesses++
+		health.ConsecutiveFailures = 0
+		health.LastError = ""
+		if health.ConsecutiveSuccesses >= 5 {
+			health.DNSEligible = true
+		}
+	} else {
+		health.ConsecutiveFailures++
+		health.ConsecutiveSuccesses = 0
+		health.LastError = lastError
+		if health.ConsecutiveFailures >= 3 {
+			health.DNSEligible = false
+		}
+	}
+	checkedAt := now()
+	_, err = tx.Exec(`INSERT INTO node_health(node_id, consecutive_failures, consecutive_successes, dns_eligible, last_checked_at, last_error) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(node_id) DO UPDATE SET consecutive_failures=excluded.consecutive_failures, consecutive_successes=excluded.consecutive_successes, dns_eligible=excluded.dns_eligible, last_checked_at=excluded.last_checked_at, last_error=excluded.last_error`, nodeID, health.ConsecutiveFailures, health.ConsecutiveSuccesses, boolInt(health.DNSEligible), stamp(checkedAt), health.LastError)
+	if err != nil {
+		return NodeHealth{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return NodeHealth{}, err
+	}
+	health.LastCheckedAt = &checkedAt
+	return health, nil
+}
+
+func (s *Store) NodeHealth(nodeID string) (NodeHealth, error) {
+	var health NodeHealth
+	var checked sql.NullString
+	err := s.db.QueryRow(`SELECT node_id, consecutive_failures, consecutive_successes, dns_eligible, last_checked_at, last_error FROM node_health WHERE node_id = ?`, nodeID).Scan(&health.NodeID, &health.ConsecutiveFailures, &health.ConsecutiveSuccesses, &health.DNSEligible, &checked, &health.LastError)
+	if errors.Is(err, sql.ErrNoRows) {
+		return NodeHealth{NodeID: nodeID}, nil
+	}
+	if err != nil {
+		return NodeHealth{}, err
+	}
+	if checked.Valid {
+		parsed, err := parseTime(checked.String)
+		if err != nil {
+			return NodeHealth{}, err
+		}
+		health.LastCheckedAt = &parsed
+	}
+	return health, nil
+}
+
+func (s *Store) SetSecret(name string, ciphertext []byte) error {
+	if strings.TrimSpace(name) == "" || len(ciphertext) == 0 {
+		return errors.New("secret name and ciphertext are required")
+	}
+	_, err := s.db.Exec(`INSERT INTO secrets(name, ciphertext, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, updated_at=excluded.updated_at`, name, ciphertext, stamp(now()))
+	return err
+}
+
+func (s *Store) Secret(name string) ([]byte, error) {
+	var ciphertext []byte
+	err := s.db.QueryRow(`SELECT ciphertext FROM secrets WHERE name = ?`, name).Scan(&ciphertext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return ciphertext, err
+}
+
+func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
+	if status != domain.NodeActive && status != domain.NodeDraining && status != domain.NodeRevoked && status != domain.NodePending {
+		return errors.New("invalid node status")
+	}
+	if status == domain.NodeRevoked {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		result, err := tx.Exec(`UPDATE nodes SET status = ?, cert_fingerprint = NULL, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return ErrNotFound
+		}
+		if _, err := tx.Exec(`DELETE FROM enrollment_tokens WHERE node_id = ? AND used_at IS NULL`, nodeID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	result, err := s.db.Exec(`UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CreateSite(site domain.Site, zoneID string) (domain.Site, error) {
+	if strings.TrimSpace(zoneID) == "" {
+		return domain.Site{}, errors.New("Cloudflare zone ID is required")
+	}
+	if err := domain.NormalizeAndValidateSite(&site); err != nil {
+		return domain.Site{}, err
+	}
+	created := now()
+	site.ID = uuid.NewString()
+	site.ZoneID = zoneID
+	site.CacheGeneration = 1
+	site.ConfigVersion = 1
+	site.Published = false
+	site.CreatedAt = created
+	site.UpdatedAt = created
+	return site, s.insertSite(site, zoneID)
+}
+
+func (s *Store) insertSite(site domain.Site, zoneID string) error {
+	domains, err := json.Marshal(site.Domains)
+	if err != nil {
+		return err
+	}
+	nodes, err := json.Marshal(site.Nodes)
+	if err != nil {
+		return err
+	}
+	primary, err := json.Marshal(site.PrimaryOrigin)
+	if err != nil {
+		return err
+	}
+	var backup any
+	if site.BackupOrigin != nil {
+		backup, err = json.Marshal(site.BackupOrigin)
+		if err != nil {
+			return err
+		}
+	}
+	streamPaths, err := json.Marshal(site.StreamPaths)
+	if err != nil {
+		return err
+	}
+	if err := s.validateSiteNodes(site.Nodes); err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, cache_generation, config_version, published, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.CreatedAt), stamp(site.UpdatedAt))
+	if err != nil {
+		return err
+	}
+	if err := claimDomains(tx, site.ID, site.Domains); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) GetSite(id string) (domain.Site, string, error) {
+	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites WHERE id = ?`, id))
+}
+
+func (s *Store) ListSites() ([]domain.Site, error) {
+	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sites := make([]domain.Site, 0)
+	for rows.Next() {
+		site, _, err := scanSite(rows)
+		if err != nil {
+			return nil, err
+		}
+		sites = append(sites, site)
+	}
+	return sites, rows.Err()
+}
+
+func scanSite(row scanner) (domain.Site, string, error) {
+	var site domain.Site
+	var zoneID, domains, nodes, primary, streamPaths string
+	var backup sql.NullString
+	var passthrough, published, enabled int
+	var createdAt, updatedAt string
+	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.Site{}, "", ErrNotFound
+	}
+	if err != nil {
+		return domain.Site{}, "", err
+	}
+	site.ZoneID = zoneID
+	if err := json.Unmarshal([]byte(domains), &site.Domains); err != nil {
+		return domain.Site{}, "", err
+	}
+	if err := json.Unmarshal([]byte(nodes), &site.Nodes); err != nil {
+		return domain.Site{}, "", err
+	}
+	if err := json.Unmarshal([]byte(primary), &site.PrimaryOrigin); err != nil {
+		return domain.Site{}, "", err
+	}
+	if backup.Valid {
+		var value domain.Origin
+		if err := json.Unmarshal([]byte(backup.String), &value); err != nil {
+			return domain.Site{}, "", err
+		}
+		site.BackupOrigin = &value
+	}
+	if err := json.Unmarshal([]byte(streamPaths), &site.StreamPaths); err != nil {
+		return domain.Site{}, "", err
+	}
+	var parseErr error
+	site.CreatedAt, parseErr = parseTime(createdAt)
+	if parseErr != nil {
+		return domain.Site{}, "", parseErr
+	}
+	site.UpdatedAt, parseErr = parseTime(updatedAt)
+	if parseErr != nil {
+		return domain.Site{}, "", parseErr
+	}
+	site.Passthrough = passthrough != 0
+	site.Published = published != 0
+	site.Enabled = enabled != 0
+	return site, zoneID, nil
+}
+
+func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error) {
+	current, currentZoneID, err := s.GetSite(site.ID)
+	if err != nil {
+		return domain.Site{}, err
+	}
+	if strings.TrimSpace(zoneID) == "" {
+		return domain.Site{}, errors.New("Cloudflare zone ID is required")
+	}
+	if zoneID != currentZoneID {
+		return domain.Site{}, errors.New("Cloudflare zone ID cannot be changed after site creation; create a new site instead")
+	}
+	site.ZoneID = currentZoneID
+	if err := domain.NormalizeAndValidateSite(&site); err != nil {
+		return domain.Site{}, err
+	}
+	site.CacheGeneration = current.CacheGeneration
+	if site.Passthrough != current.Passthrough {
+		site.CacheGeneration++
+	}
+	site.ConfigVersion = current.ConfigVersion + 1
+	// Changing any site input requires a new desired-state publication before DNS may change.
+	site.Published = false
+	site.CreatedAt = current.CreatedAt
+	site.UpdatedAt = now()
+	domains, _ := json.Marshal(site.Domains)
+	nodes, _ := json.Marshal(site.Nodes)
+	primary, _ := json.Marshal(site.PrimaryOrigin)
+	streamPaths, _ := json.Marshal(site.StreamPaths)
+	var backup any
+	if site.BackupOrigin != nil {
+		backup, _ = json.Marshal(site.BackupOrigin)
+	}
+	if err := s.validateSiteNodes(site.Nodes); err != nil {
+		return domain.Site{}, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return domain.Site{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM site_domains WHERE site_id = ?`, site.ID); err != nil {
+		return domain.Site{}, err
+	}
+	if err := claimDomains(tx, site.ID, site.Domains); err != nil {
+		return domain.Site{}, err
+	}
+	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, cache_generation=?, config_version=?, published=?, enabled=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.UpdatedAt), site.ID)
+	if err != nil {
+		return domain.Site{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Site{}, err
+	}
+	return site, nil
+}
+
+func (s *Store) validateSiteNodes(nodeIDs []string) error {
+	for _, nodeID := range nodeIDs {
+		node, err := s.GetNode(nodeID)
+		if err != nil {
+			return fmt.Errorf("site node %s: %w", nodeID, err)
+		}
+		if node.Status == domain.NodeRevoked {
+			return fmt.Errorf("site node %s is revoked", node.Name)
+		}
+	}
+	return nil
+}
+
+func claimDomains(tx *sql.Tx, siteID string, domains []string) error {
+	for _, domainName := range domains {
+		if _, err := tx.Exec(`INSERT INTO site_domains(domain_name, site_id) VALUES (?, ?)`, domainName, siteID); err != nil {
+			return fmt.Errorf("domain %s is already assigned to another site: %w", domainName, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) MarkSitePublished(siteID string) (domain.Site, error) {
+	result, err := s.db.Exec(`UPDATE sites SET published = 1, updated_at = ? WHERE id = ?`, stamp(now()), siteID)
+	if err != nil {
+		return domain.Site{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return domain.Site{}, err
+	}
+	if changed != 1 {
+		return domain.Site{}, ErrNotFound
+	}
+	site, _, err := s.GetSite(siteID)
+	return site, err
+}
+
+func (s *Store) InvalidateSiteCache(siteID string) (domain.Site, error) {
+	site, _, err := s.GetSite(siteID)
+	if err != nil {
+		return domain.Site{}, err
+	}
+	if site.Passthrough {
+		return domain.Site{}, ErrCacheDisabled
+	}
+	result, err := s.db.Exec(`UPDATE sites SET cache_generation = cache_generation + 1, config_version = config_version + 1, updated_at = ? WHERE id = ?`, stamp(now()), siteID)
+	if err != nil {
+		return domain.Site{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return domain.Site{}, err
+	}
+	if changed != 1 {
+		return domain.Site{}, ErrNotFound
+	}
+	site, _, err = s.GetSite(siteID)
+	return site, err
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func (s *Store) CreateTask(kind, siteID, detail string) (domain.DeploymentTask, error) {
+	created := now()
+	task := domain.DeploymentTask{ID: uuid.NewString(), Kind: kind, SiteID: siteID, Status: domain.TaskQueued, Detail: detail, CreatedAt: created, UpdatedAt: created}
+	_, err := s.db.Exec(`INSERT INTO deployment_tasks(id, kind, site_id, status, detail, deadline_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`, task.ID, task.Kind, task.SiteID, task.Status, task.Detail, stamp(task.CreatedAt), stamp(task.UpdatedAt))
+	return task, err
+}
+
+// CreateOrGetActivePublishTask makes repeated Publish clicks idempotent while
+// an existing publication is still waiting for its edge confirmations.
+func (s *Store) CreateOrGetActivePublishTask(siteID string, deadline time.Time) (domain.DeploymentTask, bool, error) {
+	if strings.TrimSpace(siteID) == "" {
+		return domain.DeploymentTask{}, false, errors.New("site ID is required")
+	}
+	if err := s.ReconcilePublishTasks(); err != nil {
+		return domain.DeploymentTask{}, false, err
+	}
+	for range 2 {
+		created := now()
+		task := domain.DeploymentTask{ID: uuid.NewString(), Kind: "publish_site", SiteID: siteID, Status: domain.TaskQueued, Detail: "building node configurations", DeadlineAt: &deadline, CreatedAt: created, UpdatedAt: created}
+		result, err := s.db.Exec(`INSERT OR IGNORE INTO deployment_tasks(id, kind, site_id, status, detail, deadline_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, task.ID, task.Kind, task.SiteID, task.Status, task.Detail, stamp(deadline), stamp(task.CreatedAt), stamp(task.UpdatedAt))
+		if err != nil {
+			return domain.DeploymentTask{}, false, err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return domain.DeploymentTask{}, false, err
+		}
+		if changed == 1 {
+			return task, true, nil
+		}
+		existing, err := s.ActivePublishTask(siteID)
+		if err == nil {
+			return existing, false, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return domain.DeploymentTask{}, false, err
+		}
+	}
+	return domain.DeploymentTask{}, false, errors.New("publish task changed while being queued; retry request")
+}
+
+// CreateOrGetActiveCertificateTask atomically prevents more than one DNS-01
+// issuance from running for a site. The partial unique index is the durable
+// concurrency guard; INSERT OR IGNORE makes repeated UI requests idempotent.
+func (s *Store) CreateOrGetActiveCertificateTask(kind, siteID, detail string) (domain.DeploymentTask, bool, error) {
+	if strings.TrimSpace(siteID) == "" {
+		return domain.DeploymentTask{}, false, errors.New("site ID is required")
+	}
+	if kind != "issue_certificate" && kind != "renew_certificate" {
+		return domain.DeploymentTask{}, false, errors.New("invalid certificate task kind")
+	}
+	for range 2 {
+		created := now()
+		task := domain.DeploymentTask{
+			ID:        uuid.NewString(),
+			Kind:      kind,
+			SiteID:    siteID,
+			Status:    domain.TaskQueued,
+			Detail:    detail,
+			CreatedAt: created,
+			UpdatedAt: created,
+		}
+		result, err := s.db.Exec(`INSERT OR IGNORE INTO deployment_tasks(id, kind, site_id, status, detail, deadline_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)`, task.ID, task.Kind, task.SiteID, task.Status, task.Detail, stamp(task.CreatedAt), stamp(task.UpdatedAt))
+		if err != nil {
+			return domain.DeploymentTask{}, false, err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return domain.DeploymentTask{}, false, err
+		}
+		if changed == 1 {
+			return task, true, nil
+		}
+		existing, err := s.ActiveCertificateTask(siteID)
+		if err == nil {
+			return existing, false, nil
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return domain.DeploymentTask{}, false, err
+		}
+		// The conflicting task completed between INSERT OR IGNORE and the
+		// lookup. Retry once so the caller gets a new task rather than a spurious
+		// not-found error.
+	}
+	return domain.DeploymentTask{}, false, errors.New("certificate task changed while being queued; retry request")
+}
+
+func (s *Store) UpdateTask(id string, status domain.TaskStatus, detail string) error {
+	result, err := s.db.Exec(`UPDATE deployment_tasks SET status = ?, detail = ?, updated_at = ? WHERE id = ?`, status, detail, stamp(now()), id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) GetTask(id string) (domain.DeploymentTask, error) {
+	return scanTask(s.db.QueryRow(`SELECT id, kind, site_id, status, detail, deadline_at, created_at, updated_at FROM deployment_tasks WHERE id = ?`, id))
+}
+
+func (s *Store) ActiveCertificateTask(siteID string) (domain.DeploymentTask, error) {
+	return scanTask(s.db.QueryRow(`SELECT id, kind, site_id, status, detail, deadline_at, created_at, updated_at
+		FROM deployment_tasks
+		WHERE site_id = ? AND kind IN ('issue_certificate', 'renew_certificate') AND status IN (?, ?, ?)
+		ORDER BY created_at DESC LIMIT 1`, siteID, domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying))
+}
+
+func (s *Store) LatestCertificateTask(siteID string) (domain.DeploymentTask, error) {
+	return scanTask(s.db.QueryRow(`SELECT id, kind, site_id, status, detail, deadline_at, created_at, updated_at
+		FROM deployment_tasks
+		WHERE site_id = ? AND kind IN ('issue_certificate', 'renew_certificate')
+		ORDER BY created_at DESC LIMIT 1`, siteID))
+}
+
+func (s *Store) ActivePublishTask(siteID string) (domain.DeploymentTask, error) {
+	return scanTask(s.db.QueryRow(`SELECT id, kind, site_id, status, detail, deadline_at, created_at, updated_at
+		FROM deployment_tasks
+		WHERE site_id = ? AND kind = 'publish_site' AND status IN (?, ?, ?)
+		ORDER BY created_at DESC LIMIT 1`, siteID, domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying))
+}
+
+func (s *Store) LatestPublishTask(siteID string) (domain.DeploymentTask, error) {
+	return scanTask(s.db.QueryRow(`SELECT id, kind, site_id, status, detail, deadline_at, created_at, updated_at
+		FROM deployment_tasks
+		WHERE site_id = ? AND kind = 'publish_site'
+		ORDER BY created_at DESC LIMIT 1`, siteID))
+}
+
+type PublishTaskNode struct {
+	NodeID        string
+	TargetVersion int64
+}
+
+func (s *Store) CreatePublishTaskNodes(taskID string, targets []PublishTaskNode) error {
+	if len(targets) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, target := range targets {
+		if target.NodeID == "" || target.TargetVersion < 1 {
+			return errors.New("invalid publish task node target")
+		}
+		if _, err := tx.Exec(`INSERT INTO publish_task_nodes(task_id, node_id, target_version, status) VALUES (?, ?, ?, ?)`, taskID, target.NodeID, target.TargetVersion, domain.PublishNodePending); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) RecordPublishApply(nodeID string, report domain.ApplyReport) error {
+	if report.Version < 1 || (report.Status != domain.ApplySucceeded && report.Status != domain.ApplyFailed) {
+		return errors.New("invalid edge apply report")
+	}
+	conflicts, err := json.Marshal(report.PortConflicts)
+	if err != nil {
+		return err
+	}
+	status := domain.PublishNodeFailed
+	if report.Status == domain.ApplySucceeded {
+		status = domain.PublishNodeSucceeded
+	}
+	_, err = s.db.Exec(`UPDATE publish_task_nodes
+		SET status = ?, error_code = ?, detail = ?, port_conflicts_json = ?, reported_at = ?
+		WHERE node_id = ? AND target_version <= ? AND status = ?
+		  AND task_id IN (SELECT id FROM deployment_tasks WHERE kind = 'publish_site' AND status IN (?, ?, ?))`,
+		status, report.Code, report.Detail, string(conflicts), stamp(now()), nodeID, report.Version, domain.PublishNodePending,
+		domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying)
+	return err
+}
+
+// ReconcilePublishTasks advances edge-confirmed publication jobs. It also
+// accepts an applied_version heartbeat from a pre-reporting agent, which keeps
+// rollout compatibility while newer agents provide structured failure detail.
+func (s *Store) ReconcilePublishTasks() error {
+	rows, err := s.db.Query(`SELECT id, deadline_at FROM deployment_tasks
+		WHERE kind = 'publish_site' AND status IN (?, ?, ?)
+		ORDER BY created_at`, domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying)
+	if err != nil {
+		return err
+	}
+	type activeTask struct {
+		id       string
+		deadline sql.NullString
+	}
+	var tasks []activeTask
+	for rows.Next() {
+		var task activeTask
+		if err := rows.Scan(&task.id, &task.deadline); err != nil {
+			rows.Close()
+			return err
+		}
+		tasks = append(tasks, task)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if err := s.reconcilePublishTask(task.id, task.deadline); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) reconcilePublishTask(taskID string, deadline sql.NullString) error {
+	// Older agents do not send an apply report, but their durable applied
+	// version proves that the desired configuration was loaded successfully.
+	if _, err := s.db.Exec(`UPDATE publish_task_nodes
+		SET status = ?, error_code = '', detail = 'edge confirmed applied version', port_conflicts_json = '[]', reported_at = ?
+		WHERE task_id = ? AND status = ?
+		  AND EXISTS (SELECT 1 FROM nodes WHERE nodes.id = publish_task_nodes.node_id AND nodes.applied_version >= publish_task_nodes.target_version)`,
+		domain.PublishNodeSucceeded, stamp(now()), taskID, domain.PublishNodePending); err != nil {
+		return err
+	}
+
+	var total, pending, succeeded, failed int
+	if err := s.db.QueryRow(`SELECT COUNT(*),
+		COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status = ? THEN 1 ELSE 0 END), 0),
+		COALESCE(SUM(CASE WHEN status IN (?, ?) THEN 1 ELSE 0 END), 0)
+		FROM publish_task_nodes WHERE task_id = ?`,
+		domain.PublishNodePending, domain.PublishNodeSucceeded, domain.PublishNodeFailed, domain.PublishNodeTimedOut, taskID).Scan(&total, &pending, &succeeded, &failed); err != nil {
+		return err
+	}
+	if total == 0 {
+		if deadline.Valid {
+			parsed, err := parseTime(deadline.String)
+			if err != nil {
+				return err
+			}
+			if !parsed.After(now()) {
+				return s.UpdateTask(taskID, domain.TaskFailed, "publish task did not create edge confirmation targets; retry Publish")
+			}
+		}
+		return nil
+	}
+	expired := true
+	if deadline.Valid {
+		parsed, err := parseTime(deadline.String)
+		if err != nil {
+			return err
+		}
+		expired = !parsed.After(now())
+	}
+	if pending > 0 && !expired {
+		return nil
+	}
+	if pending > 0 {
+		if _, err := s.db.Exec(`UPDATE publish_task_nodes SET status = ?, error_code = 'confirmation_timeout', detail = 'edge did not confirm the target configuration before the publish deadline' WHERE task_id = ? AND status = ?`, domain.PublishNodeTimedOut, taskID, domain.PublishNodePending); err != nil {
+			return err
+		}
+		failed += pending
+		pending = 0
+	}
+	status := domain.TaskFailed
+	detail := fmt.Sprintf("%d edge node(s) did not apply the configuration", failed)
+	if succeeded == total {
+		status = domain.TaskSucceeded
+		detail = fmt.Sprintf("configuration applied by %d active edge node(s)", succeeded)
+	} else if succeeded > 0 {
+		status = domain.TaskPartial
+		detail = fmt.Sprintf("configuration applied by %d of %d active edge node(s)", succeeded, total)
+	}
+	return s.UpdateTask(taskID, status, detail)
+}
+
+func (s *Store) PublishStatus(siteID string) (domain.PublishStatus, error) {
+	if err := s.ReconcilePublishTasks(); err != nil {
+		return domain.PublishStatus{}, err
+	}
+	task, err := s.LatestPublishTask(siteID)
+	if errors.Is(err, ErrNotFound) {
+		return domain.PublishStatus{}, nil
+	}
+	if err != nil {
+		return domain.PublishStatus{}, err
+	}
+	rows, err := s.db.Query(`SELECT publish_task_nodes.node_id, nodes.name, publish_task_nodes.target_version,
+		publish_task_nodes.status, publish_task_nodes.error_code, publish_task_nodes.detail,
+		publish_task_nodes.port_conflicts_json, publish_task_nodes.reported_at
+		FROM publish_task_nodes JOIN nodes ON nodes.id = publish_task_nodes.node_id
+		WHERE publish_task_nodes.task_id = ? ORDER BY nodes.name`, task.ID)
+	if err != nil {
+		return domain.PublishStatus{}, err
+	}
+	defer rows.Close()
+	result := domain.PublishStatus{Task: &task, Nodes: make([]domain.PublishNodeResult, 0)}
+	for rows.Next() {
+		var node domain.PublishNodeResult
+		var conflicts string
+		var reportedAt sql.NullString
+		if err := rows.Scan(&node.NodeID, &node.NodeName, &node.TargetVersion, &node.Status, &node.ErrorCode, &node.Detail, &conflicts, &reportedAt); err != nil {
+			return domain.PublishStatus{}, err
+		}
+		if err := json.Unmarshal([]byte(conflicts), &node.PortConflicts); err != nil {
+			return domain.PublishStatus{}, fmt.Errorf("decode publish port conflicts: %w", err)
+		}
+		if reportedAt.Valid {
+			value, err := parseTime(reportedAt.String)
+			if err != nil {
+				return domain.PublishStatus{}, err
+			}
+			node.ReportedAt = &value
+		}
+		result.Nodes = append(result.Nodes, node)
+	}
+	return result, rows.Err()
+}
+
+// HasSuccessfulPublishAfter reports whether a successful publication completed
+// after the supplied certificate task completed. It is used for presentation
+// status only; agents still report their own applied configuration version.
+func (s *Store) HasSuccessfulPublishAfter(siteID string, after time.Time) (bool, error) {
+	var exists int
+	err := s.db.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM deployment_tasks
+		WHERE site_id = ? AND kind = 'publish_site' AND status = ? AND updated_at > ?
+	)`, siteID, domain.TaskSucceeded, stamp(after)).Scan(&exists)
+	return exists != 0, err
+}
+
+// FailActiveCertificateTasks is used during shutdown and startup recovery so
+// canceled work is visible and never silently replayed after a restart.
+func (s *Store) FailActiveCertificateTasks(detail string) (int64, error) {
+	result, err := s.db.Exec(`UPDATE deployment_tasks
+		SET status = ?, detail = ?, updated_at = ?
+		WHERE kind IN ('issue_certificate', 'renew_certificate') AND status IN (?, ?, ?)`,
+		domain.TaskFailed, detail, stamp(now()), domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func scanTask(row scanner) (domain.DeploymentTask, error) {
+	var task domain.DeploymentTask
+	var deadlineAt sql.NullString
+	var createdAt, updatedAt string
+	err := row.Scan(&task.ID, &task.Kind, &task.SiteID, &task.Status, &task.Detail, &deadlineAt, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.DeploymentTask{}, ErrNotFound
+	}
+	if err != nil {
+		return domain.DeploymentTask{}, err
+	}
+	if deadlineAt.Valid {
+		deadline, err := parseTime(deadlineAt.String)
+		if err != nil {
+			return domain.DeploymentTask{}, err
+		}
+		task.DeadlineAt = &deadline
+	}
+	task.CreatedAt, err = parseTime(createdAt)
+	if err != nil {
+		return domain.DeploymentTask{}, err
+	}
+	task.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return domain.DeploymentTask{}, err
+	}
+	return task, nil
+}
+
+func (s *Store) SaveNodeState(nodeID string, state domain.DesiredState, certificatesCiphertext []byte) error {
+	return s.SaveNodeStates([]NodeStateUpdate{{NodeID: nodeID, State: state, CertificatesCiphertext: certificatesCiphertext}})
+}
+
+type NodeStateUpdate struct {
+	NodeID                 string
+	State                  domain.DesiredState
+	CertificatesCiphertext []byte
+}
+
+func (s *Store) SaveNodeStates(updates []NodeStateUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	updatedAt := stamp(now())
+	for _, update := range updates {
+		if update.NodeID == "" {
+			return errors.New("node state is missing a node ID")
+		}
+		ports, err := json.Marshal(update.State.PublicPorts)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO node_states(node_id, version, nginx_config, public_ports_json, certificate_ciphertext, private_key_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(node_id) DO UPDATE SET version=excluded.version, nginx_config=excluded.nginx_config, public_ports_json=excluded.public_ports_json, certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=NULL, updated_at=excluded.updated_at`, update.NodeID, update.State.Version, update.State.NginxConfig, string(ports), update.CertificatesCiphertext, updatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) NodeState(nodeID string) (domain.DesiredState, []byte, error) {
+	var state domain.DesiredState
+	var certificates []byte
+	var ports string
+	err := s.db.QueryRow(`SELECT version, nginx_config, public_ports_json, certificate_ciphertext FROM node_states WHERE node_id = ?`, nodeID).Scan(&state.Version, &state.NginxConfig, &ports, &certificates)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.DesiredState{}, nil, ErrNotFound
+	}
+	if err != nil {
+		return domain.DesiredState{}, nil, err
+	}
+	if err := json.Unmarshal([]byte(ports), &state.PublicPorts); err != nil {
+		return domain.DesiredState{}, nil, fmt.Errorf("decode desired public ports: %w", err)
+	}
+	return state, certificates, nil
+}
+
+func (s *Store) DesiredVersion(nodeID string) (int64, error) {
+	var version int64
+	err := s.db.QueryRow(`SELECT version FROM node_states WHERE node_id = ?`, nodeID).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return version, err
+}
+
+func (s *Store) SaveCertificate(siteID string, certificateCiphertext, keyCiphertext []byte, notAfter *time.Time) error {
+	var expires any
+	if notAfter != nil {
+		expires = stamp(*notAfter)
+	}
+	_, err := s.db.Exec(`INSERT INTO certificates(site_id, certificate_ciphertext, private_key_ciphertext, not_after, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(site_id) DO UPDATE SET certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=excluded.private_key_ciphertext, not_after=excluded.not_after, updated_at=excluded.updated_at`, siteID, certificateCiphertext, keyCiphertext, expires, stamp(now()))
+	return err
+}
+
+func (s *Store) Certificate(siteID string) ([]byte, []byte, *time.Time, error) {
+	var cert, key []byte
+	var notAfter sql.NullString
+	err := s.db.QueryRow(`SELECT certificate_ciphertext, private_key_ciphertext, not_after FROM certificates WHERE site_id = ?`, siteID).Scan(&cert, &key, &notAfter)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if !notAfter.Valid {
+		return cert, key, nil, nil
+	}
+	parsed, err := parseTime(notAfter.String)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return cert, key, &parsed, nil
+}
+
+func (s *Store) Audit(actor, action, resourceType, resourceID, remoteAddr, detail string) error {
+	_, err := s.db.Exec(`INSERT INTO audit_logs(id, actor, action, resource_type, resource_id, remote_addr, detail, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, uuid.NewString(), actor, action, resourceType, resourceID, remoteAddr, detail, stamp(now()))
+	return err
+}

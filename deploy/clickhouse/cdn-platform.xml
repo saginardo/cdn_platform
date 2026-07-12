@@ -1,0 +1,16 @@
+<clickhouse>
+  <logger>
+    <level>warning</level>
+  </logger>
+  <!-- Keep ClickHouse private to the control host. -->
+  <listen_host>127.0.0.1</listen_host>
+  <listen_host>::1</listen_host>
+  <!-- Suitable for the 4 GiB control VPS; adjust before higher traffic. -->
+  <max_server_memory_usage>1200000000</max_server_memory_usage>
+  <profiles>
+    <default>
+      <max_memory_usage>512000000</max_memory_usage>
+      <max_execution_time>30</max_execution_time>
+    </default>
+  </profiles>
+</clickhouse>

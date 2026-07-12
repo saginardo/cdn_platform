@@ -1,0 +1,6 @@
+[Unit]
+Description=Sync CDN control TLS source material
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/cdn-platform/sync-control-tls.sh

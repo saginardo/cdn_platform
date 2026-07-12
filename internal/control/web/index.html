@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>CDN Platform 控制台</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div><span class="brand">CDN Platform</span><span class="tag">控制面</span></div>
+        <button id="logout" class="secondary hidden" title="退出登录">退出登录</button>
+      </header>
+
+      <section id="setup-panel" class="auth-panel hidden">
+        <h1>初始化控制面</h1>
+        <p>创建唯一的管理员账户。请将 TOTP 密钥和恢复代码离线保存。</p>
+        <form id="setup-form">
+          <label>密码 <input id="setup-password" type="password" minlength="12" required autocomplete="new-password"></label>
+          <label>确认密码 <input id="setup-password-confirm" type="password" minlength="12" required autocomplete="new-password"></label>
+          <button type="submit">初始化</button>
+        </form>
+        <pre id="setup-result" class="secret hidden"></pre>
+      </section>
+
+      <section id="login-panel" class="auth-panel hidden">
+        <h1>登录</h1>
+        <form id="login-form">
+          <label>密码 <input id="login-password" type="password" required autocomplete="current-password"></label>
+          <label>TOTP 验证码 <input id="login-totp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"></label>
+          <label>恢复代码 <input id="login-recovery" autocomplete="off"></label>
+          <button type="submit">登录</button>
+        </form>
+      </section>
+
+      <section id="app" class="hidden">
+        <div id="notice" role="status"></div>
+        <nav>
+          <button class="nav active" data-view="overview">概览</button>
+          <button class="nav" data-view="nodes">节点</button>
+          <button class="nav" data-view="sites">站点</button>
+        </nav>
+
+        <section id="overview" class="view">
+          <h1>概览</h1>
+          <div class="metric-grid">
+            <article><span id="node-count">0</span><small>节点总数</small></article>
+            <article><span id="active-node-count">0</span><small>运行中节点</small></article>
+            <article><span id="site-count">0</span><small>站点总数</small></article>
+          </div>
+          <section class="overview-table">
+            <div class="section-heading"><h2>最近 24 小时流量</h2></div>
+            <div class="table-wrap"><table><thead><tr><th>站点</th><th>请求数</th><th>传输量</th><th>5xx</th><th>缓存命中率</th></tr></thead><tbody id="traffic-table"></tbody></table></div>
+          </section>
+          <p class="muted">DNS 变更只会包含健康且处于运行中的边缘节点。控制面不可用时，现有流量仍会按照节点最后一次验证通过的 Nginx 配置继续处理。</p>
+        </section>
+
+        <section id="nodes" class="view hidden">
+          <div class="section-heading"><h1>节点</h1><button id="show-node-form">添加节点</button></div>
+          <form id="node-form" class="form-grid hidden">
+            <label>名称 <input id="node-name" required placeholder="sg-edge-01"></label>
+            <label>公网 IPv4 <input id="node-ip" required placeholder="203.0.113.10"></label>
+            <div><button type="submit">创建节点</button><button type="button" class="secondary cancel">取消</button></div>
+          </form>
+          <div id="node-command" class="secret hidden"></div>
+          <div class="table-wrap"><table><thead><tr><th>名称</th><th>节点 ID</th><th>IPv4</th><th>状态</th><th>心跳</th><th>操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
+        </section>
+
+        <section id="sites" class="view hidden">
+          <div class="section-heading site-heading">
+            <div class="heading-copy"><h1>站点</h1><p id="site-list-meta" class="section-meta">0 个站点</p></div>
+            <button id="show-site-form">添加站点</button>
+          </div>
+          <form id="site-form" class="form-grid site-form hidden">
+            <input id="site-id" type="hidden">
+            <label>名称 <input id="site-name" required placeholder="example-site"></label>
+            <label>Cloudflare 区域 ID <input id="site-zone" required></label>
+            <label>域名 <input id="site-domains" required placeholder="www.example.com, static.example.com"></label>
+            <fieldset class="node-assignment"><legend>已分配节点</legend><div id="site-node-selector"></div></fieldset>
+            <label>主源站 URL <input id="site-primary-url" required placeholder="https://origin.example.com"></label>
+            <label>主源站 Host 头 <input id="site-primary-host" placeholder="origin.example.com"></label>
+            <label>备用源站 URL <input id="site-backup-url" placeholder="https://backup.example.com"></label>
+            <label>备用源站 Host 头 <input id="site-backup-host" placeholder="backup.example.com"></label>
+            <label>流式路径（WebSocket / SSE）<input id="site-stream-paths" placeholder="/ws, /events"></label>
+            <label class="checkbox-label"><input id="site-passthrough" type="checkbox"> 透传模式（仅 HTTP(S)，禁用 Nginx 缓存）</label>
+            <label class="checkbox-label"><input id="site-enabled" type="checkbox" checked> 启用流量</label>
+            <div class="form-actions"><button id="site-submit" type="submit">创建站点</button><button type="button" class="secondary cancel">取消</button></div>
+          </form>
+          <div id="site-allowlist" class="secret hidden"></div>
+          <div id="site-table" class="site-list" aria-live="polite"></div>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

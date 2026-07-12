@@ -1,0 +1,20 @@
+[Unit]
+Description=CDN Platform edge agent
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/cdn-platform/edge.env
+ExecStart=/usr/local/bin/cdn-edge-agent
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/var/lib/cdn-platform /var/log/cdn-platform /etc/cdn-platform /etc/nginx/conf.d
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

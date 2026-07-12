@@ -1,0 +1,41 @@
+# Local configuration and credentials
+.env
+.env.*
+*.env
+!*.env.example
+
+# Control-plane state and local databases
+data/
+state/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+
+# TLS material generated or copied for local testing
+certs/
+tls/
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# Generated binaries, release bundles, coverage, and logs
+bin/
+dist/
+release/
+coverage/
+*.coverprofile
+*.log
+cdn-control
+cdn-edge-agent
+
+# Local tooling files
+.DS_Store
+.idea/
+.vscode/

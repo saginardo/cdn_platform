@@ -1,0 +1,13 @@
+[Unit]
+Description=CDN Platform encrypted control-plane backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=/etc/cdn-platform/backup.env
+ExecStart=/usr/local/lib/cdn-platform/backup.sh
+Nice=10
+IOSchedulingClass=idle

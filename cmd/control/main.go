@@ -87,7 +87,12 @@ func main() {
 		fatal("TRUSTED_PROXY_CIDRS: " + err.Error())
 	}
 	controlURL := env("CONTROL_PUBLIC_URL", "https://control.example.invalid")
-	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Issuer: issuer, CertificateManager: certificateManager, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: os.Getenv("EDGE_BINARY_SHA256"), EdgeBinaryPath: os.Getenv("EDGE_BINARY_PATH"), SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
+	edgeBinaryPath := os.Getenv("EDGE_BINARY_PATH")
+	edgeBinarySHA256, err := control.ResolveEdgeBinarySHA256(edgeBinaryPath, os.Getenv("EDGE_BINARY_SHA256"))
+	if err != nil {
+		fatal(err.Error())
+	}
+	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Issuer: issuer, CertificateManager: certificateManager, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	healthManager := &control.HealthManager{Server: server}
@@ -95,8 +100,18 @@ func main() {
 	defer certificateManager.Stop()
 	go healthManager.Run(ctx)
 	go certificateManager.Run(ctx)
+	certificatePath, privateKeyPath := os.Getenv("CONTROL_TLS_CERT"), os.Getenv("CONTROL_TLS_KEY")
+	if certificatePath == "" || privateKeyPath == "" {
+		fatal("CONTROL_TLS_CERT and CONTROL_TLS_KEY are required")
+	}
+	certificate, err := control.NewReloadingCertificate(certificatePath, privateKeyPath)
+	if err != nil {
+		fatal(err.Error())
+	}
 	listen := env("CONTROL_LISTEN", ":443")
-	httpServer := &http.Server{Addr: listen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, TLSConfig: server.TLSConfig()}
+	tlsConfig := server.TLSConfig()
+	tlsConfig.GetCertificate = certificate.GetCertificate
+	httpServer := &http.Server{Addr: listen, Handler: server.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, TLSConfig: tlsConfig}
 	go func() {
 		<-ctx.Done()
 		certificateManager.Stop()
@@ -104,12 +119,8 @@ func main() {
 		defer cancel()
 		_ = httpServer.Shutdown(shutdownCtx)
 	}()
-	certificatePath, privateKeyPath := os.Getenv("CONTROL_TLS_CERT"), os.Getenv("CONTROL_TLS_KEY")
-	if certificatePath == "" || privateKeyPath == "" {
-		fatal("CONTROL_TLS_CERT and CONTROL_TLS_KEY are required")
-	}
 	logger.Info("control plane listening", "address", listen)
-	if err := httpServer.ListenAndServeTLS(certificatePath, privateKeyPath); err != nil && err != http.ErrServerClosed {
+	if err := httpServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 		fatal(err.Error())
 	}
 }

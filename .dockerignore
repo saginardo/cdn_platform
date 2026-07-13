@@ -1,0 +1,10 @@
+.git
+.agents
+.codex
+.env
+dist
+backup
+data
+logs
+config/*.env
+config/*password*

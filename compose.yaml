@@ -1,0 +1,130 @@
+name: cdn-platform
+
+x-control-image: &control-image
+  image: cdn-platform-control:local
+  build:
+    context: ${CDN_SOURCE_DIR:-.}
+    dockerfile: Dockerfile
+
+x-control-environment: &control-environment
+  env_file:
+    - ./config/control.env
+  environment:
+    TZ: Asia/Shanghai
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.6.1.1193
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    ports:
+      - "127.0.0.1:8123:8123"
+    volumes:
+      - ./data/clickhouse:/var/lib/clickhouse
+      - ./logs/clickhouse:/var/log/clickhouse-server
+      - ./backup/staging/clickhouse:/var/lib/clickhouse/backups
+      - ${CDN_SOURCE_DIR:-.}/deploy/compose/clickhouse.xml:/etc/clickhouse-server/config.d/cdn-platform.xml:ro
+      - ${CDN_SOURCE_DIR:-.}/deploy/clickhouse/cdn-platform-users.xml:/etc/clickhouse-server/users.d/cdn-platform.xml:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 2m
+    security_opt:
+      - no-new-privileges:true
+
+  control-cert-bootstrap:
+    <<: [*control-image, *control-environment]
+    entrypoint: ["/usr/local/lib/cdn-platform/compose-certbot.sh"]
+    command: ["issue"]
+    user: "10001:10001"
+    environment:
+      TZ: Asia/Shanghai
+      CERTBOT_CREDENTIALS_PATH: /tmp/cloudflare.ini
+    volumes:
+      - ./data/control-tls:/var/lib/cdn-control-tls
+      - ./logs/certbot-control:/var/log/cdn-control-tls
+    tmpfs:
+      - /tmp:mode=0700,uid=10001,gid=10001
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  control:
+    <<: [*control-image, *control-environment]
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      control-cert-bootstrap:
+        condition: service_completed_successfully
+    read_only: true
+    tmpfs:
+      - /tmp:mode=0700,uid=10001,gid=10001
+    volumes:
+      - ./data/control:/var/lib/cdn-platform
+      - ./data/control-tls:/var/lib/cdn-control-tls:ro
+      - ./logs/certbot-sites:/var/log/cdn-platform/certbot
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--insecure", "https://127.0.0.1:8443/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  control-cert-renew:
+    <<: [*control-image, *control-environment]
+    entrypoint: ["/usr/local/lib/cdn-platform/compose-certbot.sh"]
+    command: ["loop"]
+    user: "10001:10001"
+    environment:
+      TZ: Asia/Shanghai
+      CERTBOT_CREDENTIALS_PATH: /tmp/cloudflare.ini
+    depends_on:
+      control-cert-bootstrap:
+        condition: service_completed_successfully
+    volumes:
+      - ./data/control-tls:/var/lib/cdn-control-tls
+      - ./logs/certbot-control:/var/log/cdn-control-tls
+    tmpfs:
+      - /tmp:mode=0700,uid=10001,gid=10001
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  backup:
+    <<: *control-image
+    profiles: ["backup"]
+    entrypoint: ["/usr/local/lib/cdn-platform/compose-backup-loop.sh"]
+    user: "0:0"
+    network_mode: host
+    env_file:
+      - ./config/backup.env
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data/control:/var/lib/cdn-platform:ro
+      - ./data/control-tls:/var/lib/cdn-control-tls:ro
+      - ./backup/staging:/backup/staging
+      - ./config:/deployment/config:ro
+      - ./compose.yaml:/deployment/compose.yaml:ro
+      - ${CDN_SOURCE_DIR:-.}/Dockerfile:/deployment/Dockerfile:ro
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true

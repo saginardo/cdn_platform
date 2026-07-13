@@ -30,8 +30,8 @@ internal/edge        Enrollment, mTLS polling, atomic apply, local log queue
 internal/nginx       Generated Nginx cache and origin configuration
 internal/integrations Cloudflare, Certbot, SMTP adapters
 internal/logstore    ClickHouse access-log and aggregate storage
-deploy/              systemd units and environment templates
-scripts/             Debian installation and backup scripts
+deploy/              Compose, edge systemd, and environment templates
+scripts/             Compose control-plane and Debian edge helpers
 ```
 
 ## Build and test
@@ -49,25 +49,25 @@ go test ./...
 
 ## Control-plane installation
 
-Build a Linux AMD64 release on a trusted build host, publish `cdn-edge-agent-linux-amd64` over HTTPS, then copy the repository assets and `cdn-control-linux-amd64` to the control VPS. On a fresh Debian 12 control VPS, run:
+Docker Compose is the supported deployment for the control plane and ClickHouse. It keeps configuration, SQLite, the internal CA, certificate state, ClickHouse data, logs, and backup staging below `/srv/cdn-platform`. The existing public reverse proxy can remain separate; the controller still terminates TLS on its direct port for edge mTLS. See [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md) for installation, backup, and restore instructions.
+
+On a fresh Debian 12 control VPS with Docker Engine and Docker Compose, run from a trusted checkout:
 
 ```bash
-sudo ./scripts/install-control.sh ./cdn-control-linux-amd64
-sudo cp deploy/examples/control.env.example /etc/cdn-platform/control.env
-sudo cp deploy/examples/backup.env.example /etc/cdn-platform/backup.env
-sudo chmod 0600 /etc/cdn-platform/*.env
-sudo /usr/local/bin/cdn-control keygen
+sudo ./scripts/install-control-compose.sh /srv/cdn-platform
+sudoedit /srv/cdn-platform/config/control.env
+cd /srv/cdn-platform
+sudo docker compose config --quiet
+sudo docker compose build control
+sudo docker compose run --rm --no-deps control keygen
 ```
 
-Put the generated key in `CONTROL_ENCRYPTION_KEY`. Use a Cloudflare API token scoped only to the zones this system manages, with `Zone:Read` and `DNS:Edit`. Install a publicly trusted certificate for `CONTROL_PUBLIC_URL` before starting the service, then:
+Put the generated key in `CONTROL_ENCRYPTION_KEY`. Use a Cloudflare API token scoped only to the zones this system manages, with `Zone:Read` and `DNS:Edit`. Configure `CONTROL_TLS_DOMAIN`, `CONTROL_PUBLIC_URL`, `EDGE_CONTROL_URL`, and `ACME_EMAIL`, then start the stack:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now clickhouse-server cdn-control cdn-backup.timer
-sudo systemctl status cdn-control
+sudo docker compose up -d
+sudo docker compose ps
 ```
-
-On a constrained control VPS, install with `INSTALL_CLICKHOUSE=0 sudo ./scripts/install-control.sh ...` and set `CLICKHOUSE_DISABLED=1` in `control.env`. The controller remains fully functional, but access-log collection and aggregate metrics are disabled until ClickHouse is enabled.
 
 The bundled ClickHouse configuration is tuned for the 2-core, 4 GiB control host: it limits the background scheduler and disables high-volume internal profiling tables such as `system.metric_log` and `system.trace_log`. CDN access logs, minute aggregates, query diagnostics, part diagnostics, errors, and asynchronous-insert diagnostics remain enabled. User-level ClickHouse limits and profiler switches are installed separately under `users.d`.
 
@@ -78,8 +78,6 @@ Firewall policy on the control VPS:
 - ClickHouse port 8123 bound to localhost unless you deliberately use a separate log node.
 
 When a conventional HTTPS reverse proxy terminates the management UI, do not send edge mTLS through that proxy. Bind the controller to a second direct TLS port, set `EDGE_CONTROL_URL` to that port, and keep `CONTROL_PUBLIC_URL` on the proxy's standard HTTPS port. Set `TRUSTED_PROXY_CIDRS` to the proxy's loopback or private address so setup restrictions, audits, and login rate limits use its `X-Real-IP` header safely.
-
-If the reverse proxy owns the public certificate, stage its certificate and key under `/etc/cdn-platform` before starting the controller. The optional `cdn-control-tls-sync.timer` runs the configured synchronization every 15 minutes and restarts the controller only after the source material changes.
 
 Open `https://control.example.com/`, initialize the single administrator, add the TOTP secret to an authenticator, and store the returned recovery codes offline. The setup route becomes unavailable after the first account is created.
 
@@ -127,22 +125,7 @@ The desired failure window is about 2-5 minutes: a node needs three 15-second fa
 
 ## Backup and restore
 
-Configure S3-compatible restic credentials in `/etc/cdn-platform/backup.env` and a 0600 restic password file. The daily timer retains 7 daily, 4 weekly, and 6 monthly encrypted backups.
-
-To restore onto a replacement control VPS:
-
-```bash
-sudo systemctl stop cdn-control
-sudo restic restore latest --target /tmp/cdn-restore
-sudo install -o cdn-platform -g cdn-platform -m 0600 /tmp/cdn-restore/var/lib/cdn-platform/backup-staging/control.db /var/lib/cdn-platform/control.db
-sudo tar -xzf /tmp/cdn-restore/var/lib/cdn-platform/backup-staging/control-secrets.tar.gz -C /var/lib/cdn-platform
-sudo install -m 0600 /tmp/cdn-restore/etc/cdn-platform/control.env /etc/cdn-platform/control.env
-sudo tar -xzf /tmp/cdn-restore/var/lib/cdn-platform/backup-staging/control-tls.tar.gz -C /
-sudo chown -R cdn-platform:cdn-platform /var/lib/cdn-platform
-sudo systemctl start cdn-control
-```
-
-The TLS archive restores the exact `CONTROL_TLS_SOURCE_CERT` and `CONTROL_TLS_SOURCE_KEY` paths from the snapshot, including certificate targets behind symbolic links. Keep the same `CONTROL_ENCRYPTION_KEY`, restore the internal CA, verify Cloudflare records, and confirm agents can still authenticate. Raw ClickHouse logs are intentionally not included in this recovery set.
+The Compose backup workflow uses SQLite's online backup API and a native ClickHouse backup, then writes the complete recovery set to encrypted Restic storage. It retains 7 daily, 4 weekly, and 6 monthly snapshots. Configuration and restore steps are documented in [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md).
 
 ## Capacity and next limits
 

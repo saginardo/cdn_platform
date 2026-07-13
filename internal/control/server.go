@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"embed"
@@ -16,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -98,6 +100,28 @@ func (s *Server) TLSConfig() *tls.Config {
 		pool.AddCert(s.CA.Certificate)
 	}
 	return &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
+}
+
+func ResolveEdgeBinarySHA256(path, configured string) (string, error) {
+	configured = strings.ToLower(strings.TrimSpace(configured))
+	if path == "" {
+		if configured == "" {
+			return "", nil
+		}
+		if !validSHA256Digest(configured) {
+			return "", errors.New("EDGE_BINARY_SHA256 must be a 64-character hexadecimal digest")
+		}
+		return configured, nil
+	}
+	contents, err := os.ReadFile(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("read EDGE_BINARY_PATH: %w", err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(contents))
+	if configured != "" && configured != digest {
+		return "", fmt.Errorf("EDGE_BINARY_SHA256 does not match EDGE_BINARY_PATH: got %s, want %s", configured, digest)
+	}
+	return digest, nil
 }
 
 func (s *Server) health(response http.ResponseWriter, request *http.Request) {

@@ -69,6 +69,8 @@ sudo systemctl status cdn-control
 
 On a constrained control VPS, install with `INSTALL_CLICKHOUSE=0 sudo ./scripts/install-control.sh ...` and set `CLICKHOUSE_DISABLED=1` in `control.env`. The controller remains fully functional, but access-log collection and aggregate metrics are disabled until ClickHouse is enabled.
 
+The bundled ClickHouse configuration is tuned for the 2-core, 4 GiB control host: it limits the background scheduler and disables high-volume internal profiling tables such as `system.metric_log` and `system.trace_log`. CDN access logs, minute aggregates, query diagnostics, part diagnostics, errors, and asynchronous-insert diagnostics remain enabled. User-level ClickHouse limits and profiler switches are installed separately under `users.d`.
+
 Firewall policy on the control VPS:
 
 - TCP 443 from administrators and edge nodes.

@@ -38,6 +38,8 @@ install -m 0644 deploy/systemd/cdn-control-tls-sync.timer /etc/systemd/system/cd
 if [[ "${INSTALL_CLICKHOUSE:-1}" != "0" ]]; then
   install -d -m 0755 /etc/clickhouse-server/config.d
   install -m 0644 deploy/clickhouse/cdn-platform.xml /etc/clickhouse-server/config.d/cdn-platform.xml
+  install -d -m 0755 /etc/clickhouse-server/users.d
+  install -m 0644 deploy/clickhouse/cdn-platform-users.xml /etc/clickhouse-server/users.d/cdn-platform.xml
 fi
 if [[ ! -e /etc/cdn-platform/control.env ]]; then
   install -m 0600 /dev/null /etc/cdn-platform/control.env

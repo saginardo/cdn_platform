@@ -9,7 +9,7 @@ let publishPollTimer = null;
 const nodeStatusLabels = {
   pending: '待激活',
   active: '运行中',
-  draining: '排空中',
+  draining: '暂停中',
   revoked: '已撤销',
 };
 const taskStatusLabels = {
@@ -28,6 +28,7 @@ const split = (value) => value.split(',').map((item) => item.trim()).filter(Bool
 const certificateTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const publishTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const nodeStatusLabel = (status) => nodeStatusLabels[status] || status;
+const nodeStatusActionLabel = (status) => status === 'draining' ? '启用调度' : status === 'revoked' ? '启用' : '撤销';
 const taskStatusLabel = (status) => taskStatusLabels[status] || status;
 
 async function request(path, options = {}) {
@@ -49,7 +50,7 @@ async function refresh() {
   byId('active-node-count').textContent = numberFormatter.format(nodes.filter((node) => node.status === 'active').length);
   byId('site-count').textContent = numberFormatter.format(sites.length);
   byId('site-list-meta').textContent = `${numberFormatter.format(sites.length)} 个站点 · ${numberFormatter.format(sites.filter((site) => site.enabled && site.published).length)} 个已发布`;
-  byId('node-table').innerHTML = nodes.map((node) => `<tr><td>${escapeHTML(node.name)}</td><td><code>${escapeHTML(node.id)}</code></td><td><code>${escapeHTML(node.public_ipv4)}</code></td><td><span class="status ${node.status}">${escapeHTML(nodeStatusLabel(node.status))}</span></td><td>${node.last_heartbeat_at ? formatDateTime(node.last_heartbeat_at) : '从未上报'}</td><td class="actions">${node.status !== 'revoked' ? `<button class="small enroll" data-id="${node.id}">获取部署命令</button>` : ''} ${node.status === 'active' ? `<button class="small secondary node-status" data-id="${node.id}" data-status="draining">排空</button>` : ''} <button class="small ${node.status === 'revoked' ? 'secondary' : 'danger'} node-status" data-id="${node.id}" data-status="${node.status === 'revoked' || node.status === 'draining' ? 'active' : 'revoked'}">${node.status === 'revoked' || node.status === 'draining' ? '启用' : '撤销'}</button></td></tr>`).join('');
+  byId('node-table').innerHTML = nodes.map((node) => `<tr><td>${escapeHTML(node.name)}</td><td><code>${escapeHTML(node.id)}</code></td><td><code>${escapeHTML(node.public_ipv4)}</code></td><td><span class="status ${node.status}">${escapeHTML(nodeStatusLabel(node.status))}</span></td><td>${node.last_heartbeat_at ? formatDateTime(node.last_heartbeat_at) : '从未上报'}</td><td class="actions">${node.status !== 'revoked' ? `<button class="small enroll" data-id="${node.id}">获取部署命令</button>` : ''} ${node.status === 'active' ? `<button class="small secondary node-status" data-id="${node.id}" data-status="draining">暂停调度</button>` : ''} <button class="small ${node.status === 'revoked' ? 'secondary' : 'danger'} node-status" data-id="${node.id}" data-status="${node.status === 'revoked' || node.status === 'draining' ? 'active' : 'revoked'}">${nodeStatusActionLabel(node.status)}</button></td></tr>`).join('');
   renderSites();
   renderNodeSelector(selectedNodeIDs());
   void refreshTraffic();

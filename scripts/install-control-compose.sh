@@ -20,7 +20,7 @@ install -d -o 101 -g 101 -m 0750 "$root/data/clickhouse" "$root/logs/clickhouse"
 chown -R 101:101 "$root/backup/staging/clickhouse"
 
 rm -rf "$source_dir/cmd" "$source_dir/internal" "$source_dir/deploy" "$source_dir/docs" "$source_dir/scripts"
-cp -a cmd internal deploy docs scripts go.mod go.sum Dockerfile .dockerignore LICENSE README.md "$source_dir/"
+cp -a cmd internal deploy docs scripts go.mod go.sum Dockerfile .dockerignore AGENTS.md LICENSE README.md "$source_dir/"
 install -m 0644 compose.yaml "$root/compose.yaml"
 printf 'CDN_SOURCE_DIR=./app\n' >"$root/.env"
 chmod 0644 "$root/.env"

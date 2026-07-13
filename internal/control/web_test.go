@@ -41,7 +41,9 @@ func TestEmbeddedConsoleLocalizesStatusLabelsWithoutChangingStatusValues(t *test
 	script := string(contents)
 	for _, expected := range []string{
 		"active: '运行中'",
-		"draining: '排空中'",
+		"draining: '暂停中'",
+		"'启用调度'",
+		">暂停调度</button>",
 		"succeeded: '成功'",
 		"rolled_back: '已回滚'",
 		`data-status="draining"`,

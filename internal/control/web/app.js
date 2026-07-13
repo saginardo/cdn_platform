@@ -5,12 +5,19 @@ let tlsStatuses = new Map();
 let publishStatuses = new Map();
 let certificatePollTimer = null;
 let publishPollTimer = null;
+let uninstallPollTimer = null;
+let uninstallNodeID = '';
+let uninstallNodeName = '';
+let uninstallCommand = '';
+let uninstallActionPending = false;
 
 const nodeStatusLabels = {
   pending: '待激活',
   active: '运行中',
   draining: '暂停中',
-  revoked: '已撤销',
+  revoked: '已撤销授权',
+  uninstalling: '卸载中',
+  uninstalled: '已卸载',
 };
 const taskStatusLabels = {
   queued: '排队中',
@@ -28,7 +35,6 @@ const split = (value) => value.split(',').map((item) => item.trim()).filter(Bool
 const certificateTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const publishTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const nodeStatusLabel = (status) => nodeStatusLabels[status] || status;
-const nodeStatusActionLabel = (status) => status === 'draining' ? '启用调度' : status === 'revoked' ? '启用' : '撤销';
 const taskStatusLabel = (status) => taskStatusLabels[status] || status;
 
 async function request(path, options = {}) {
@@ -36,7 +42,12 @@ async function request(path, options = {}) {
   if (csrf && options.method && options.method !== 'GET') headers['X-CSRF-Token'] = csrf;
   const response = await fetch(path, { ...options, headers });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `请求失败（HTTP ${response.status}）`);
+  if (!response.ok) {
+    const error = new Error(data.error || `请求失败（HTTP ${response.status}）`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
   return data;
 }
 
@@ -50,11 +61,41 @@ async function refresh() {
   byId('active-node-count').textContent = numberFormatter.format(nodes.filter((node) => node.status === 'active').length);
   byId('site-count').textContent = numberFormatter.format(sites.length);
   byId('site-list-meta').textContent = `${numberFormatter.format(sites.length)} 个站点 · ${numberFormatter.format(sites.filter((site) => site.enabled && site.published).length)} 个已发布`;
-  byId('node-table').innerHTML = nodes.map((node) => `<tr><td>${escapeHTML(node.name)}</td><td><code>${escapeHTML(node.id)}</code></td><td><code>${escapeHTML(node.public_ipv4)}</code></td><td><span class="status ${node.status}">${escapeHTML(nodeStatusLabel(node.status))}</span></td><td>${node.last_heartbeat_at ? formatDateTime(node.last_heartbeat_at) : '从未上报'}</td><td class="actions">${node.status !== 'revoked' ? `<button class="small enroll" data-id="${node.id}">获取部署命令</button>` : ''} ${node.status === 'active' ? `<button class="small secondary node-status" data-id="${node.id}" data-status="draining">暂停调度</button>` : ''} <button class="small ${node.status === 'revoked' ? 'secondary' : 'danger'} node-status" data-id="${node.id}" data-status="${node.status === 'revoked' || node.status === 'draining' ? 'active' : 'revoked'}">${nodeStatusActionLabel(node.status)}</button></td></tr>`).join('');
+  byId('node-table').innerHTML = nodes.map(renderNodeRow).join('');
   renderSites();
   renderNodeSelector(selectedNodeIDs());
   void refreshTraffic();
   await Promise.all([refreshTLSStatuses(), refreshPublishStatuses()]);
+}
+
+function renderNodeRow(node) {
+  return `<tr><td>${escapeHTML(node.name)}</td><td><code>${escapeHTML(node.id)}</code></td><td><code>${escapeHTML(node.public_ipv4)}</code></td><td><span class="status ${escapeHTML(node.status)}">${escapeHTML(nodeStatusLabel(node.status))}</span></td><td>${node.last_heartbeat_at ? formatDateTime(node.last_heartbeat_at) : '从未上报'}</td><td class="actions">${renderNodeActions(node)}</td></tr>`;
+}
+
+function renderNodeActions(node) {
+  const actions = [];
+  if (['pending', 'active', 'draining'].includes(node.status)) {
+    actions.push(`<button class="small enroll" data-id="${node.id}">获取部署命令</button>`);
+  }
+  if (node.status === 'active') {
+    actions.push(`<button class="small secondary node-status" data-id="${node.id}" data-status="draining">暂停调度</button>`);
+  }
+  if (node.status === 'draining') {
+    actions.push(`<button class="small secondary node-status" data-id="${node.id}" data-status="active">启用调度</button>`);
+  }
+  if (node.status === 'revoked') {
+    actions.push(`<button class="small secondary node-status" data-id="${node.id}" data-status="active">恢复并启用调度</button>`);
+  }
+  if (['pending', 'active', 'draining'].includes(node.status)) {
+    actions.push(`<button class="small danger node-status" data-id="${node.id}" data-status="revoked">撤销授权</button>`);
+  }
+  if (['active', 'draining', 'revoked', 'uninstalling'].includes(node.status)) {
+    actions.push(`<button class="small secondary node-uninstall" data-id="${node.id}">${node.status === 'uninstalling' ? '查看卸载' : '卸载节点'}</button>`);
+  }
+  if (node.status === 'pending' || node.status === 'uninstalled') {
+    actions.push(`<button class="small ${node.status === 'uninstalled' ? 'danger' : 'secondary'} node-delete" data-id="${node.id}">删除记录</button>`);
+  }
+  return actions.join(' ');
 }
 
 function renderSites() {
@@ -199,7 +240,167 @@ function selectedNodeIDs() {
 
 function renderNodeSelector(selected = []) {
   const selectedSet = new Set(selected);
-  byId('site-node-selector').innerHTML = nodes.filter((node) => node.status !== 'revoked').map((node) => `<label class="node-option"><input type="checkbox" value="${node.id}" ${selectedSet.has(node.id) ? 'checked' : ''}>${escapeHTML(node.name)} <code>${escapeHTML(node.public_ipv4)}</code></label>`).join('') || '<span class="muted">请先创建待激活或运行中的节点。</span>';
+  byId('site-node-selector').innerHTML = nodes.filter((node) => !['revoked', 'uninstalling', 'uninstalled'].includes(node.status)).map((node) => `<label class="node-option"><input type="checkbox" value="${node.id}" ${selectedSet.has(node.id) ? 'checked' : ''}>${escapeHTML(node.name)} <code>${escapeHTML(node.public_ipv4)}</code></label>`).join('') || '<span class="muted">请先创建待激活或运行中的节点。</span>';
+}
+
+function uninstallBlockerText(blocker) {
+  const site = blocker.site_name ? `站点「${blocker.site_name}」` : '站点';
+  if (blocker.code === 'still_assigned') return `${site}仍分配了此节点，请先移除并保存。`;
+  if (blocker.code === 'site_not_published') return `${site}移除节点后尚未重新发布。`;
+  if (blocker.code === 'no_active_node') return `${site}没有其他运行中节点，请先分配并发布替代节点，或停用站点。`;
+  return blocker.detail || '卸载前置条件尚未满足。';
+}
+
+function uninstallStateText(status) {
+  const node = status.node;
+  const job = status.job;
+  if (node.status === 'uninstalled') {
+    return job?.forced ? '已强制标记为卸载完成，边缘节点清理未经过回调验证。' : '边缘节点已回调确认卸载完成。';
+  }
+  if (!job || job.status === 'canceled') {
+    if (node.status === 'active') return '请先暂停调度或撤销授权，再开始卸载准备。';
+    if (node.status === 'pending') return '只有从未注册过的待激活节点可以直接删除记录。';
+    return job?.status === 'canceled' ? '卸载流程已取消；节点保持暂停或撤销，托管 DNS 会在重新启用调度后由健康检查恢复。' : '准备后会移除该节点的托管 DNS 记录，并检查站点迁移状态。';
+  }
+  if (job.status === 'preparing' && status.can_generate_command) return '前置条件已满足，可生成一次性卸载命令，或在节点失联时强制完成。';
+  if (job.status === 'preparing') return '正在等待 DNS 缓存过期，并检查站点迁移状态。';
+  if (job.status === 'ready') return '前置条件已满足，可生成 30 分钟有效的一次性卸载命令。';
+  if (job.status === 'running') return '边缘节点正在执行清理，完成后会自动回调控制面。';
+  if (job.status === 'failed') return `边缘节点卸载失败：${job.detail || '未提供错误详情'}`;
+  if (job.status === 'succeeded') return '边缘节点已回调确认卸载完成。';
+  if (job.status === 'forced') return '已强制标记为卸载完成，边缘节点清理未经过回调验证。';
+  return job.status;
+}
+
+function resetUninstallControls() {
+  ['pause-node-for-uninstall', 'prepare-node-uninstall', 'generate-node-uninstall-command', 'cancel-node-uninstall', 'force-node-uninstall', 'delete-node-record', 'node-uninstall-confirm-wrap'].forEach(hide);
+  hide('node-uninstall-blockers');
+  hide('node-uninstall-countdown');
+  hide('node-uninstall-scope');
+  hide('node-uninstall-token-expiry');
+}
+
+function setUninstallError(message = '') {
+  byId('node-uninstall-error').textContent = message;
+  if (message) show('node-uninstall-error'); else hide('node-uninstall-error');
+}
+
+function setUninstallBusy(busy) {
+  uninstallActionPending = busy;
+  ['pause-node-for-uninstall', 'prepare-node-uninstall', 'generate-node-uninstall-command', 'cancel-node-uninstall', 'force-node-uninstall', 'delete-node-record'].forEach((id) => { byId(id).disabled = busy; });
+}
+
+function renderNodeUninstall(status) {
+  resetUninstallControls();
+  setUninstallError();
+  uninstallNodeName = status.node.name;
+  byId('node-uninstall-meta').textContent = `${status.node.name} · ${status.node.public_ipv4} · ${nodeStatusLabel(status.node.status)}`;
+  byId('node-uninstall-confirm-label').textContent = `输入「${status.node.name}」以确认`;
+  byId('node-uninstall-state').textContent = uninstallStateText(status);
+  if (status.node.status !== 'pending') show('node-uninstall-scope');
+
+  const blockers = status.blockers || [];
+  if (blockers.length) {
+    byId('node-uninstall-blockers').innerHTML = blockers.map((blocker) => `<li>${escapeHTML(uninstallBlockerText(blocker))}</li>`).join('');
+    show('node-uninstall-blockers');
+  }
+  if (status.ready_in_seconds > 0) {
+    byId('node-uninstall-countdown').textContent = `DNS 安全等待剩余 ${numberFormatter.format(status.ready_in_seconds)} 秒`;
+    show('node-uninstall-countdown');
+  }
+  if (uninstallCommand) {
+    byId('node-uninstall-command').textContent = uninstallCommand;
+    show('node-uninstall-command');
+    if (status.job?.token_expires_at) {
+      byId('node-uninstall-token-expiry').textContent = `命令有效期至 ${formatDateTime(status.job.token_expires_at)}`;
+      show('node-uninstall-token-expiry');
+    }
+  } else {
+    hide('node-uninstall-command');
+  }
+
+  const jobStatus = status.job?.status;
+  byId('generate-node-uninstall-command').textContent = uninstallCommand ? '重新生成卸载命令' : '生成卸载命令';
+  if (!status.job && status.node.status === 'active') show('pause-node-for-uninstall');
+  if ((!status.job || jobStatus === 'canceled') && ['draining', 'revoked'].includes(status.node.status)) show('prepare-node-uninstall');
+  if (status.can_generate_command) show('generate-node-uninstall-command');
+  if (['preparing', 'ready', 'failed'].includes(jobStatus)) show('cancel-node-uninstall');
+  if (['preparing', 'ready', 'running', 'failed'].includes(jobStatus) && blockers.length === 0 && status.ready_in_seconds === 0) {
+    show('force-node-uninstall');
+    show('node-uninstall-confirm-wrap');
+  }
+  if (status.node.status === 'uninstalled' || status.node.status === 'pending') {
+    show('delete-node-record');
+    show('node-uninstall-confirm-wrap');
+  }
+
+  window.clearTimeout(uninstallPollTimer);
+  uninstallPollTimer = null;
+  if (jobStatus === 'running' || status.ready_in_seconds > 0) {
+    uninstallPollTimer = window.setTimeout(() => loadNodeUninstallStatus().catch((error) => setUninstallError(error.message)), 2000);
+  }
+}
+
+async function loadNodeUninstallStatus() {
+  if (!uninstallNodeID) return;
+  const nodeID = uninstallNodeID;
+  const status = await request(`/api/nodes/${nodeID}/uninstall`);
+  if (nodeID !== uninstallNodeID) return;
+  renderNodeUninstall(status);
+}
+
+async function openNodeUninstall(nodeID) {
+  uninstallNodeID = nodeID;
+  uninstallNodeName = '';
+  uninstallCommand = '';
+  byId('node-uninstall-confirm').value = '';
+  byId('node-uninstall-state').textContent = '正在读取卸载状态…';
+  resetUninstallControls();
+  setUninstallError();
+  hide('node-uninstall-command');
+  const dialog = byId('node-uninstall-dialog');
+  if (!dialog.open) dialog.showModal();
+  try {
+    await loadNodeUninstallStatus();
+  } catch (error) {
+    closeNodeUninstall();
+    notice(error.message);
+  }
+}
+
+function closeNodeUninstall() {
+  window.clearTimeout(uninstallPollTimer);
+  uninstallPollTimer = null;
+  uninstallNodeID = '';
+  uninstallNodeName = '';
+  uninstallCommand = '';
+  const dialog = byId('node-uninstall-dialog');
+  if (dialog.open) dialog.close();
+}
+
+async function runNodeUninstallAction(path, options, successMessage) {
+  if (uninstallActionPending || !uninstallNodeID) return;
+  const nodeID = uninstallNodeID;
+  window.clearTimeout(uninstallPollTimer);
+  uninstallPollTimer = null;
+  setUninstallBusy(true);
+  setUninstallError();
+  try {
+    const status = await request(path, options);
+    if (nodeID === uninstallNodeID) {
+      if (status.uninstall_command) uninstallCommand = status.uninstall_command;
+      renderNodeUninstall(status);
+    }
+    await refresh();
+    if (nodeID === uninstallNodeID) notice(successMessage, true);
+  } catch (error) {
+    if (nodeID === uninstallNodeID) {
+      if (error.data?.uninstall) renderNodeUninstall(error.data.uninstall);
+      setUninstallError(error.message);
+    }
+  } finally {
+    setUninstallBusy(false);
+  }
 }
 
 async function refreshTraffic() {
@@ -265,7 +466,7 @@ byId('login-form').addEventListener('submit', async (event) => {
   } catch (error) { notice(error.message); }
 });
 
-byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); csrf = ''; hide('app'); hide('logout'); show('login-panel'); } });
+byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); closeNodeUninstall(); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); csrf = ''; hide('app'); hide('logout'); show('login-panel'); } });
 
 document.querySelectorAll('.nav').forEach((button) => button.addEventListener('click', () => {
   document.querySelectorAll('.nav').forEach((item) => item.classList.remove('active')); button.classList.add('active');
@@ -275,6 +476,65 @@ document.querySelectorAll('.nav').forEach((button) => button.addEventListener('c
 byId('show-node-form').addEventListener('click', () => show('node-form'));
 byId('show-site-form').addEventListener('click', () => resetSiteForm());
 document.querySelectorAll('.cancel').forEach((button) => button.addEventListener('click', () => { button.closest('form').classList.add('hidden'); if (button.closest('form').id === 'site-form') resetSiteForm(false); }));
+
+byId('close-node-uninstall').addEventListener('click', closeNodeUninstall);
+byId('node-uninstall-dialog').addEventListener('close', () => {
+  window.clearTimeout(uninstallPollTimer);
+  uninstallPollTimer = null;
+  uninstallNodeID = '';
+  uninstallNodeName = '';
+  uninstallCommand = '';
+});
+byId('prepare-node-uninstall').addEventListener('click', async () => {
+  uninstallCommand = '';
+  await runNodeUninstallAction(`/api/nodes/${uninstallNodeID}/uninstall`, { method: 'POST' }, '卸载准备已开始');
+});
+byId('pause-node-for-uninstall').addEventListener('click', async () => {
+  if (uninstallActionPending || !uninstallNodeID) return;
+  const nodeID = uninstallNodeID;
+  setUninstallBusy(true);
+  setUninstallError();
+  try {
+    await request(`/api/nodes/${nodeID}/status`, { method: 'POST', body: JSON.stringify({ status: 'draining' }) });
+    await refresh();
+    if (nodeID === uninstallNodeID) {
+      await loadNodeUninstallStatus();
+      notice('节点已暂停调度', true);
+    }
+  } catch (error) {
+    if (nodeID === uninstallNodeID) setUninstallError(error.message);
+  } finally {
+    setUninstallBusy(false);
+  }
+});
+byId('generate-node-uninstall-command').addEventListener('click', async () => {
+  await runNodeUninstallAction(`/api/nodes/${uninstallNodeID}/uninstall/command`, { method: 'POST' }, '一次性卸载命令已生成');
+});
+byId('cancel-node-uninstall').addEventListener('click', async () => {
+  uninstallCommand = '';
+  await runNodeUninstallAction(`/api/nodes/${uninstallNodeID}/uninstall`, { method: 'DELETE' }, '卸载流程已取消');
+});
+byId('force-node-uninstall').addEventListener('click', async () => {
+  if (byId('node-uninstall-confirm').value !== uninstallNodeName) return setUninstallError('请输入完整且完全一致的节点名称。');
+  await runNodeUninstallAction(`/api/nodes/${uninstallNodeID}/uninstall/force-complete`, { method: 'POST', body: JSON.stringify({ confirmation: byId('node-uninstall-confirm').value }) }, '节点已强制标记为卸载完成');
+});
+byId('delete-node-record').addEventListener('click', async () => {
+  if (byId('node-uninstall-confirm').value !== uninstallNodeName) return setUninstallError('请输入完整且完全一致的节点名称。');
+  if (uninstallActionPending || !uninstallNodeID) return;
+  const nodeID = uninstallNodeID;
+  setUninstallBusy(true);
+  setUninstallError();
+  try {
+    await request(`/api/nodes/${nodeID}`, { method: 'DELETE', body: JSON.stringify({ confirmation: byId('node-uninstall-confirm').value }) });
+    if (nodeID === uninstallNodeID) closeNodeUninstall();
+    await refresh();
+    notice('节点记录已删除', true);
+  } catch (error) {
+    if (nodeID === uninstallNodeID) setUninstallError(error.message);
+  } finally {
+    setUninstallBusy(false);
+  }
+});
 
 byId('node-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -328,6 +588,7 @@ document.addEventListener('click', async (event) => {
   try {
     if (button.classList.contains('enroll')) { const result = await request(`/api/nodes/${button.dataset.id}/enrollment-token`, { method: 'POST' }); byId('node-command').textContent = result.install_command; show('node-command'); }
     if (button.classList.contains('node-status')) { await request(`/api/nodes/${button.dataset.id}/status`, { method: 'POST', body: JSON.stringify({ status: button.dataset.status }) }); await refresh(); }
+    if (button.classList.contains('node-uninstall') || button.classList.contains('node-delete')) await openNodeUninstall(button.dataset.id);
     if (button.classList.contains('publish')) { const task = await request(`/api/sites/${button.dataset.id}/publish`, { method: 'POST' }); await refresh(); notice(`发布任务 ${task.id}：${taskStatusLabel(task.status)}`, true); }
     if (button.classList.contains('invalidate')) { const task = await request(`/api/sites/${button.dataset.id}/invalidate-cache`, { method: 'POST' }); await refresh(); notice(`缓存已刷新，任务 ${task.id}`, true); }
     if (button.classList.contains('certificate')) { const task = await request(`/api/sites/${button.dataset.id}/certificate`, { method: 'POST' }); tlsStatuses.set(button.dataset.id, { certificate_task: task, published_after_certificate: false }); renderSites(); scheduleCertificatePoll(); notice(`TLS 任务 ${task.id}：${taskStatusLabel(task.status)}`, true); }

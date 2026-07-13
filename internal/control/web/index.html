@@ -65,6 +65,31 @@
           </form>
           <div id="node-command" class="secret hidden"></div>
           <div class="table-wrap"><table><thead><tr><th>名称</th><th>节点 ID</th><th>IPv4</th><th>状态</th><th>心跳</th><th>操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
+
+          <dialog id="node-uninstall-dialog" aria-labelledby="node-uninstall-title">
+            <div class="dialog-header">
+              <div><h2 id="node-uninstall-title">卸载节点</h2><p id="node-uninstall-meta" class="section-meta"></p></div>
+              <button id="close-node-uninstall" type="button" class="secondary" aria-label="关闭">关闭</button>
+            </div>
+            <div id="node-uninstall-state" class="uninstall-state"></div>
+            <div id="node-uninstall-scope" class="uninstall-scope hidden"><strong>远端清理范围</strong><span>边缘代理、平台配置、数据、日志、缓存及平台 Nginx 配置；保留 Nginx 本身和其他配置。</span></div>
+            <p id="node-uninstall-error" class="dialog-error hidden" role="alert"></p>
+            <ul id="node-uninstall-blockers" class="uninstall-blockers hidden"></ul>
+            <p id="node-uninstall-countdown" class="muted hidden"></p>
+            <pre id="node-uninstall-command" class="secret hidden"></pre>
+            <p id="node-uninstall-token-expiry" class="muted hidden"></p>
+            <label id="node-uninstall-confirm-wrap" class="confirmation hidden"><span id="node-uninstall-confirm-label">输入节点名称以确认</span>
+              <input id="node-uninstall-confirm" autocomplete="off">
+            </label>
+            <div class="dialog-actions">
+              <button id="pause-node-for-uninstall" type="button" class="secondary hidden">暂停调度</button>
+              <button id="prepare-node-uninstall" type="button" class="danger hidden">开始卸载准备</button>
+              <button id="generate-node-uninstall-command" type="button" class="danger hidden">生成卸载命令</button>
+              <button id="cancel-node-uninstall" type="button" class="secondary hidden">取消卸载</button>
+              <button id="force-node-uninstall" type="button" class="danger hidden">强制完成（不清理远端）</button>
+              <button id="delete-node-record" type="button" class="danger hidden">删除记录</button>
+            </div>
+          </dialog>
         </section>
 
         <section id="sites" class="view hidden">

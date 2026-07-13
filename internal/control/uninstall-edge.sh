@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+CONTROL_URL=""
+TOKEN=""
+ROOT_PREFIX="${CDN_PLATFORM_UNINSTALL_ROOT:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --control-url) CONTROL_URL="$2"; shift 2 ;;
+    --token) TOKEN="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ -n "$ROOT_PREFIX" ]]; then
+  ROOT_PREFIX="${ROOT_PREFIX%/}"
+  if [[ "$ROOT_PREFIX" != /* || "$ROOT_PREFIX" == "/" ]]; then
+    echo "CDN_PLATFORM_UNINSTALL_ROOT must be an absolute non-root path" >&2
+    exit 2
+  fi
+elif [[ $EUID -ne 0 ]]; then
+  echo "edge uninstall must run as root" >&2
+  exit 2
+fi
+if [[ "$CONTROL_URL" != https://* || -z "$TOKEN" ]]; then
+  echo "usage: uninstall-edge.sh --control-url HTTPS_URL --token TOKEN" >&2
+  exit 2
+fi
+
+CONTROL_URL="${CONTROL_URL%/}"
+root_path() {
+  printf '%s%s' "$ROOT_PREFIX" "$1"
+}
+
+lock_dir=$(root_path /run/cdn-edge-agent-uninstall.lock)
+if ! mkdir "$lock_dir" 2>/dev/null; then
+  echo "another edge uninstall is already running" >&2
+  exit 1
+fi
+trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+
+callback() {
+  local action="$1"
+  shift
+  curl --fail --silent --show-error --connect-timeout 10 --max-time 30 --request POST \
+    --header "Authorization: Bearer $TOKEN" \
+    "$@" "$CONTROL_URL/api/edge/v1/uninstall/$action"
+}
+
+started=0
+cleanup_committed=0
+was_enabled=0
+was_active=0
+nginx_config=""
+nginx_backup=""
+config_removed=0
+report_failure() {
+  local code=$?
+  trap - ERR
+  if ((started == 1 && cleanup_committed == 0)); then
+    if ((config_removed == 1)) && [[ -n "$nginx_config" && -n "$nginx_backup" && -e "$nginx_backup" ]]; then
+      cp -a "$nginx_backup" "$nginx_config" >/dev/null 2>&1 || true
+      nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$nginx_backup" ]]; then rm -f "$nginx_backup" >/dev/null 2>&1 || true; fi
+    if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
+    if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
+    callback fail --header 'Content-Type: text/plain' \
+      --data-binary "edge uninstall failed before local cleanup completed (exit $code)" >/dev/null 2>&1 || true
+  fi
+  exit "$code"
+}
+trap report_failure ERR
+
+callback start >/dev/null
+started=1
+
+if systemctl is-enabled --quiet cdn-edge-agent.service 2>/dev/null; then
+  was_enabled=1
+fi
+if systemctl is-active --quiet cdn-edge-agent.service 2>/dev/null; then
+  was_active=1
+fi
+
+service_unit=$(root_path /etc/systemd/system/cdn-edge-agent.service)
+if [[ -e "$service_unit" ]]; then
+  systemctl disable cdn-edge-agent.service >/dev/null
+  systemctl stop cdn-edge-agent.service >/dev/null
+else
+  systemctl disable cdn-edge-agent.service >/dev/null 2>&1 || true
+  systemctl stop cdn-edge-agent.service >/dev/null 2>&1 || true
+fi
+
+nginx_config=$(root_path /etc/nginx/conf.d/cdn-platform.conf)
+if [[ -e "$nginx_config" ]]; then
+  if ! nginx_backup=$(mktemp "$(root_path /tmp/cdn-platform-nginx.XXXXXX)"); then
+    false
+  fi
+  cp -a "$nginx_config" "$nginx_backup"
+  rm -f "$nginx_config"
+  config_removed=1
+  if ! command -v nginx >/dev/null 2>&1 || ! nginx -t; then
+    cp -a "$nginx_backup" "$nginx_config"
+    config_removed=0
+    rm -f "$nginx_backup"
+    if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
+    if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
+    callback fail --header 'Content-Type: text/plain' --data-binary 'Nginx validation failed after removing CDN Platform configuration' >/dev/null 2>&1 || true
+    echo "Nginx validation failed; platform configuration was restored" >&2
+    exit 1
+  fi
+  if ! systemctl reload nginx; then
+    cp -a "$nginx_backup" "$nginx_config"
+    config_removed=0
+    rm -f "$nginx_backup"
+    nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+    if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
+    if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
+    callback fail --header 'Content-Type: text/plain' --data-binary 'Nginx reload failed after removing CDN Platform configuration' >/dev/null 2>&1 || true
+    echo "Nginx reload failed; platform configuration was restored" >&2
+    exit 1
+  fi
+  rm -f "$nginx_backup"
+fi
+
+# From this point the operation is intentionally idempotent. A later failure
+# leaves the job running so rerunning the command can finish the callback.
+cleanup_committed=1
+rm -f "$service_unit"
+rm -f "$(root_path /usr/local/bin/cdn-edge-agent)"
+rm -rf "$(root_path /etc/cdn-platform)" "$(root_path /var/lib/cdn-platform)" "$(root_path /var/log/cdn-platform)" "$(root_path /var/cache/cdn-platform)"
+systemctl daemon-reload
+systemctl reset-failed cdn-edge-agent.service >/dev/null 2>&1 || true
+
+if ! callback complete >/dev/null; then
+  echo "local cleanup completed, but the control-plane callback failed; rerun this command" >&2
+  exit 1
+fi
+trap - ERR
+echo "CDN Platform edge components were removed; Nginx remains installed."

@@ -112,3 +112,40 @@ func TestCloudflareDNSRejectsCNAMECollision(t *testing.T) {
 		t.Fatalf("expected CNAME collision error, got %v", err)
 	}
 }
+
+func TestCloudflareDNSRemoveNodeDeletesOnlyExactManagedRecords(t *testing.T) {
+	deleted := make([]string, 0)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet:
+			if got := request.URL.Query().Get("type"); got != "A" {
+				t.Fatalf("record type filter = %q", got)
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"success": true,
+				"result": []DNSRecord{
+					{ID: "target-1", Type: "A", Name: "a.example.test", Comment: "cdn-platform:site=one;node=node-1"},
+					{ID: "target-2", Type: "A", Name: "b.example.test", Comment: "cdn-platform:node=node-1;site=two"},
+					{ID: "similar", Type: "A", Name: "c.example.test", Comment: "cdn-platform:site=one;node=node-10"},
+					{ID: "manual", Type: "A", Name: "d.example.test", Comment: "node=node-1"},
+					{ID: "cname", Type: "CNAME", Name: "e.example.test", Comment: "cdn-platform:site=one;node=node-1"},
+				},
+				"result_info": map[string]any{"total_pages": 1},
+			})
+		case http.MethodDelete:
+			deleted = append(deleted, request.URL.Path)
+			_ = json.NewEncoder(response).Encode(map[string]any{"success": true, "result": map[string]any{}})
+		default:
+			t.Fatalf("unexpected method %s", request.Method)
+		}
+	}))
+	defer server.Close()
+
+	dns := CloudflareDNS{BaseURL: server.URL, Token: func() (string, error) { return "token", nil }}
+	if err := dns.RemoveNode(context.Background(), "zone", "node-1"); err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted) != 2 || !strings.HasSuffix(deleted[0], "/target-1") || !strings.HasSuffix(deleted[1], "/target-2") {
+		t.Fatalf("deleted records = %#v", deleted)
+	}
+}

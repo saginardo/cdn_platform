@@ -80,7 +80,7 @@ func (p Publisher) publishSite(siteID, publishTaskID string) ([]store.PublishTas
 	updates := make([]store.NodeStateUpdate, 0, len(nodes))
 	targets := make([]store.PublishTaskNode, 0)
 	for _, node := range nodes {
-		if node.Status == domain.NodeRevoked {
+		if node.Status == domain.NodeRevoked || node.Status == domain.NodeUninstalling || node.Status == domain.NodeUninstalled {
 			continue
 		}
 		updatedNodes++
@@ -145,7 +145,7 @@ func (p Publisher) publishSite(siteID, publishTaskID string) ([]store.PublishTas
 		}
 	}
 	if updatedNodes == 0 {
-		return nil, fmt.Errorf("no non-revoked edge nodes are available for publication")
+		return nil, fmt.Errorf("no eligible edge nodes are available for publication")
 	}
 	// Persist targets before exposing the desired state. An agent can poll and
 	// fail quickly (for example due to a port conflict), so a later target

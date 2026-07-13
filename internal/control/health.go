@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,7 +51,7 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 		return err
 	}
 	for _, node := range nodes {
-		if node.Status == domain.NodeRevoked || node.Status == domain.NodeDraining {
+		if node.Status == domain.NodeRevoked || node.Status == domain.NodeDraining || node.Status == domain.NodeUninstalling || node.Status == domain.NodeUninstalled {
 			continue
 		}
 		prior, err := m.Server.Store.NodeHealth(node.ID)
@@ -215,4 +216,32 @@ func (m *MemoryDNS) Reconcile(_ context.Context, zoneID, _ string, desired []int
 	}
 	m.Zones[zoneID] = append([]integrations.DNSRecord(nil), desired...)
 	return nil
+}
+
+func (m *MemoryDNS) RemoveNode(_ context.Context, zoneID, nodeID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	records := m.Zones[zoneID]
+	kept := records[:0]
+	for _, record := range records {
+		if memoryDNSRecordMatchesNode(record.Comment, nodeID) {
+			continue
+		}
+		kept = append(kept, record)
+	}
+	m.Zones[zoneID] = append([]integrations.DNSRecord(nil), kept...)
+	return nil
+}
+
+func memoryDNSRecordMatchesNode(comment, nodeID string) bool {
+	if !strings.HasPrefix(comment, integrations.ManagedRecordPrefix) {
+		return false
+	}
+	for _, field := range strings.Split(strings.TrimPrefix(comment, integrations.ManagedRecordPrefix), ";") {
+		key, value, found := strings.Cut(field, "=")
+		if found && key == "node" && value == nodeID {
+			return true
+		}
+	}
+	return false
 }

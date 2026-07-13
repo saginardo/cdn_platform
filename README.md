@@ -92,6 +92,18 @@ Before first public startup, set `SETUP_ALLOW_CIDRS` to your administrator egres
 
 The agent keeps the last working Nginx configuration if the control plane is unavailable or a new configuration fails validation. It checks TCP 80/443 before applying a public site: a non-Nginx listener is reported to the publish task with its port, PID, and process name; the agent never stops that process. Once the port is released, click **Republish** and the agent clears Nginx's failed state and starts it automatically. Do not delete `/var/lib/cdn-platform` on an active edge node; it contains the node private key, mTLS certificate, applied version, and pending access-log queue.
 
+## Edge uninstall
+
+Revoking authorization only invalidates the node certificate; it does not remove software or data from the edge host. To retire a host, use the separate **Uninstall node** workflow:
+
+1. Pause scheduling or revoke authorization for the node.
+2. Remove it from every site, assign replacement active nodes, and publish each changed site. A disabled site is exempt from the replacement-node requirement.
+3. Start uninstall preparation. The controller removes only Cloudflare A records whose managed comment exactly identifies that node, then enforces a 75-second DNS safety wait.
+4. Generate the 30-minute workflow command and run it as root on the edge host. The script stops and removes `cdn-edge-agent`, `/etc/cdn-platform`, `/var/lib/cdn-platform`, `/var/log/cdn-platform`, `/var/cache/cdn-platform`, and `/etc/nginx/conf.d/cdn-platform.conf`. It validates and reloads Nginx, but preserves the Nginx package, service, and unrelated configuration.
+5. A successful callback retains the node as **Uninstalled** for audit history. Deleting that control-plane record is a separate confirmation-protected action.
+
+If Nginx validation or reload fails before cleanup is committed, the script restores the platform configuration and the previous edge-agent service state. **Force complete** only changes control-plane state when a host is permanently unreachable; it does not verify or perform remote cleanup.
+
 ## First site
 
 1. Add the site with its Cloudflare Zone ID, hostname(s), assigned node IDs, primary origin, and optional backup origin. Use HTTP(S) origins for normal sites; enable passthrough mode for an entire HTTP(S) hostname that must not use disk cache, including media byte-range traffic. Set stream paths such as `/ws` or `/events` for WebSocket/SSE, use `ws://` or `wss://` for an all-WebSocket site, and use `grpc://` or `grpcs://` for an all-gRPC hostname.

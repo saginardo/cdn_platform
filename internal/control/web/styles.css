@@ -35,7 +35,7 @@ button {
 }
 button:hover { background: var(--primary-hover); }
 button:focus-visible, summary:focus-visible, input:focus-visible { outline: 3px solid #8ac8dc; outline-offset: 2px; }
-button:disabled { cursor: wait; opacity: .6; }
+button:disabled { cursor: not-allowed; opacity: .6; }
 button.secondary { border-color: var(--line); background: var(--surface); color: #334450; }
 button.secondary:hover { background: #edf3f5; }
 button.danger { background: #b33a3a; }
@@ -104,6 +104,8 @@ td code { font-size: .77rem; }
 .status.pending, .status.queued, .status.dispatching, .status.applying, .status.partial { background: var(--warning-soft); color: var(--warning); }
 .status.revoked, .status.disabled, .status.failed { background: var(--danger-soft); color: var(--danger); }
 .status.draining, .status.rolled_back { background: #e7e5f6; color: #504c89; }
+.status.uninstalling { background: var(--warning-soft); color: var(--warning); }
+.status.uninstalled { background: #e5eaed; color: #52636d; }
 
 #notice { min-height: 1.2rem; margin: .75rem 0 0; color: var(--danger); }
 #notice.success { color: var(--success); }
@@ -111,6 +113,33 @@ td code { font-size: .77rem; }
 .tls-task small { color: var(--text-muted); line-height: 1.3; overflow-wrap: anywhere; }
 .actions { min-width: 12rem; }
 .actions button { margin: 0 .25rem .35rem 0; white-space: nowrap; }
+
+dialog {
+  width: min(680px, calc(100% - 2rem));
+  max-height: calc(100vh - 2rem);
+  padding: 1.25rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 18px 48px rgb(20 37 48 / 20%);
+  overflow-y: auto;
+}
+dialog::backdrop { background: rgb(23 33 43 / 38%); }
+.dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1rem; }
+.dialog-header > div { min-width: 0; }
+.dialog-header h2 { margin: 0; font-size: 1.15rem; line-height: 1.3; }
+.uninstall-state { padding: .8rem 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); line-height: 1.5; overflow-wrap: anywhere; }
+.uninstall-scope { display: grid; grid-template-columns: auto 1fr; gap: .65rem; margin-top: .8rem; color: #4b5d68; font-size: .86rem; line-height: 1.45; }
+.uninstall-scope strong { color: #324550; white-space: nowrap; }
+.uninstall-blockers { display: grid; gap: .4rem; margin: .85rem 0; padding: .75rem .75rem .75rem 1.9rem; border: 1px solid #ead59e; border-radius: 6px; color: #644b16; background: #fff9e9; font-size: .9rem; line-height: 1.4; }
+.dialog-error { margin: .8rem 0 0; padding: .65rem .75rem; border: 1px solid #e7bcbc; border-radius: 6px; color: var(--danger); background: #fff1f1; font-size: .9rem; line-height: 1.4; overflow-wrap: anywhere; }
+.confirmation { margin-top: 1rem; }
+.dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-top: 1rem; }
+#node-uninstall-countdown { margin: .8rem 0 0; }
+#node-uninstall-command { max-height: 12rem; overflow: auto; }
+#node-uninstall-token-expiry { margin: -.55rem 0 .8rem; }
+#node-uninstall-meta { overflow-wrap: anywhere; }
 
 .site-list { display: grid; gap: .7rem; }
 .site-row {
@@ -168,4 +197,8 @@ button.menu-action:hover { background: #edf4f6; }
   .site-facts > div:nth-child(odd) { padding-left: 0; border-left: 0; }
   .site-facts > div:nth-child(even) { padding-right: 0; }
   .site-actions { grid-column: auto; justify-content: flex-start; flex-wrap: wrap; }
+  dialog { width: calc(100% - 1rem); padding: 1rem; }
+  .dialog-actions { justify-content: stretch; }
+  .dialog-actions button { flex: 1 1 auto; }
+  .uninstall-scope { grid-template-columns: 1fr; gap: .2rem; }
 }

@@ -22,6 +22,7 @@ var (
 	ErrNotFound      = errors.New("not found")
 	ErrTokenInvalid  = errors.New("enrollment token is invalid or expired")
 	ErrCacheDisabled = errors.New("site cache is disabled in passthrough mode")
+	ErrNodeAssigned  = errors.New("node is still assigned to a site")
 )
 
 type Store struct {
@@ -188,6 +189,21 @@ CREATE TABLE IF NOT EXISTS node_health (
   dns_eligible INTEGER NOT NULL DEFAULT 0,
   last_checked_at TEXT,
   last_error TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS node_uninstall_jobs (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  status TEXT NOT NULL,
+  previous_status TEXT NOT NULL,
+  token_hash TEXT UNIQUE,
+  token_expires_at TEXT,
+  ready_at TEXT NOT NULL,
+  affected_site_ids_json TEXT NOT NULL DEFAULT '[]',
+  detail TEXT NOT NULL DEFAULT '',
+  forced INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT,
+  completed_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON deployment_tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_publish_task_nodes_node ON publish_task_nodes(node_id, status);
@@ -508,15 +524,32 @@ func scanNode(row scanner) (domain.Node, error) {
 }
 
 func (s *Store) CreateEnrollmentToken(nodeID, token string, expiresAt time.Time) error {
-	node, err := s.GetNode(nodeID)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	if node.Status == domain.NodeRevoked {
-		return errors.New("cannot enroll a revoked node")
+	defer tx.Rollback()
+	var status domain.NodeStatus
+	var activeUninstall int
+	err = tx.QueryRow(`SELECT nodes.status, EXISTS(
+		SELECT 1 FROM node_uninstall_jobs WHERE node_id = nodes.id AND status IN (?, ?, ?, ?)
+	) FROM nodes WHERE nodes.id = ?`, NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed, nodeID).Scan(&status, &activeUninstall)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
 	}
-	_, err = s.db.Exec(`INSERT INTO enrollment_tokens(token_hash, node_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, hashToken(token), nodeID, stamp(expiresAt), stamp(now()))
-	return err
+	if err != nil {
+		return err
+	}
+	if status == domain.NodeRevoked || status == domain.NodeUninstalling || status == domain.NodeUninstalled {
+		return errors.New("cannot enroll a revoked, uninstalling, or uninstalled node")
+	}
+	if activeUninstall != 0 {
+		return ErrUninstallActive
+	}
+	if _, err := tx.Exec(`INSERT INTO enrollment_tokens(token_hash, node_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, hashToken(token), nodeID, stamp(expiresAt), stamp(now())); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ConsumeEnrollmentToken(token string) (string, error) {
@@ -527,8 +560,12 @@ func (s *Store) ConsumeEnrollmentToken(token string) (string, error) {
 	defer tx.Rollback()
 	var nodeID, expiresAt string
 	var nodeStatus domain.NodeStatus
+	var activeUninstall int
 	var usedAt sql.NullString
-	err = tx.QueryRow(`SELECT enrollment_tokens.node_id, enrollment_tokens.expires_at, enrollment_tokens.used_at, nodes.status FROM enrollment_tokens JOIN nodes ON nodes.id = enrollment_tokens.node_id WHERE enrollment_tokens.token_hash = ?`, hashToken(token)).Scan(&nodeID, &expiresAt, &usedAt, &nodeStatus)
+	err = tx.QueryRow(`SELECT enrollment_tokens.node_id, enrollment_tokens.expires_at, enrollment_tokens.used_at, nodes.status, EXISTS(
+		SELECT 1 FROM node_uninstall_jobs WHERE node_id = nodes.id AND status IN (?, ?, ?, ?)
+	) FROM enrollment_tokens JOIN nodes ON nodes.id = enrollment_tokens.node_id WHERE enrollment_tokens.token_hash = ?`,
+		NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed, hashToken(token)).Scan(&nodeID, &expiresAt, &usedAt, &nodeStatus, &activeUninstall)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrTokenInvalid
 	}
@@ -536,7 +573,7 @@ func (s *Store) ConsumeEnrollmentToken(token string) (string, error) {
 		return "", err
 	}
 	expires, err := parseTime(expiresAt)
-	if err != nil || nodeStatus == domain.NodeRevoked || usedAt.Valid || !expires.After(now()) {
+	if err != nil || nodeStatus == domain.NodeRevoked || nodeStatus == domain.NodeUninstalling || nodeStatus == domain.NodeUninstalled || activeUninstall != 0 || usedAt.Valid || !expires.After(now()) {
 		return "", ErrTokenInvalid
 	}
 	result, err := tx.Exec(`UPDATE enrollment_tokens SET used_at = ? WHERE token_hash = ? AND used_at IS NULL`, stamp(now()), hashToken(token))
@@ -554,7 +591,10 @@ func (s *Store) ConsumeEnrollmentToken(token string) (string, error) {
 }
 
 func (s *Store) SetNodeCertificate(nodeID, fingerprint string) error {
-	result, err := s.db.Exec(`UPDATE nodes SET cert_fingerprint = ?, updated_at = ? WHERE id = ? AND status != ?`, fingerprint, stamp(now()), nodeID, domain.NodeRevoked)
+	result, err := s.db.Exec(`UPDATE nodes SET cert_fingerprint = ?, updated_at = ? WHERE id = ? AND status NOT IN (?, ?, ?)
+		AND NOT EXISTS (SELECT 1 FROM node_uninstall_jobs WHERE node_id = nodes.id AND status IN (?, ?, ?, ?))`,
+		fingerprint, stamp(now()), nodeID, domain.NodeRevoked, domain.NodeUninstalling, domain.NodeUninstalled,
+		NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed)
 	if err != nil {
 		return err
 	}
@@ -570,7 +610,7 @@ func (s *Store) SetNodeCertificate(nodeID, fingerprint string) error {
 
 func (s *Store) NodeIDByFingerprint(fingerprint string) (string, error) {
 	var nodeID string
-	err := s.db.QueryRow(`SELECT id FROM nodes WHERE cert_fingerprint = ? AND status != ?`, fingerprint, domain.NodeRevoked).Scan(&nodeID)
+	err := s.db.QueryRow(`SELECT id FROM nodes WHERE cert_fingerprint = ? AND status NOT IN (?, ?, ?)`, fingerprint, domain.NodeRevoked, domain.NodeUninstalling, domain.NodeUninstalled).Scan(&nodeID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -694,12 +734,29 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 	if status != domain.NodeActive && status != domain.NodeDraining && status != domain.NodeRevoked && status != domain.NodePending {
 		return errors.New("invalid node status")
 	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var currentStatus domain.NodeStatus
+	var activeUninstall int
+	err = tx.QueryRow(`SELECT nodes.status, EXISTS(
+		SELECT 1 FROM node_uninstall_jobs WHERE node_id = nodes.id AND status IN (?, ?, ?, ?)
+	) FROM nodes WHERE nodes.id = ?`, NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed, nodeID).Scan(&currentStatus, &activeUninstall)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if currentStatus == domain.NodeUninstalling || currentStatus == domain.NodeUninstalled {
+		return errors.New("uninstalling or uninstalled nodes cannot change status")
+	}
+	if activeUninstall != 0 && status != currentStatus && status != domain.NodeRevoked {
+		return ErrUninstallActive
+	}
 	if status == domain.NodeRevoked {
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
 		result, err := tx.Exec(`UPDATE nodes SET status = ?, cert_fingerprint = NULL, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
 		if err != nil {
 			return err
@@ -714,20 +771,24 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 		if _, err := tx.Exec(`DELETE FROM enrollment_tokens WHERE node_id = ? AND used_at IS NULL`, nodeID); err != nil {
 			return err
 		}
-		return tx.Commit()
+		if _, err := tx.Exec(`UPDATE node_uninstall_jobs SET previous_status = ?, updated_at = ? WHERE node_id = ? AND status IN (?, ?, ?, ?)`,
+			status, stamp(now()), nodeID, NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed); err != nil {
+			return err
+		}
+	} else {
+		result, err := tx.Exec(`UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
+		if err != nil {
+			return err
+		}
+		changed, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return ErrNotFound
+		}
 	}
-	result, err := s.db.Exec(`UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
-	if err != nil {
-		return err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if changed != 1 {
-		return ErrNotFound
-	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) CreateSite(site domain.Site, zoneID string) (domain.Site, error) {
@@ -772,14 +833,14 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 	if err != nil {
 		return err
 	}
-	if err := s.validateSiteNodes(site.Nodes); err != nil {
-		return err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := validateSiteNodes(tx, site.Nodes); err != nil {
+		return err
+	}
 	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, cache_generation, config_version, published, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.CreatedAt), stamp(site.UpdatedAt))
 	if err != nil {
@@ -892,14 +953,14 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	if site.BackupOrigin != nil {
 		backup, _ = json.Marshal(site.BackupOrigin)
 	}
-	if err := s.validateSiteNodes(site.Nodes); err != nil {
-		return domain.Site{}, err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return domain.Site{}, err
 	}
 	defer tx.Rollback()
+	if err := validateSiteNodes(tx, site.Nodes); err != nil {
+		return domain.Site{}, err
+	}
 	if _, err := tx.Exec(`DELETE FROM site_domains WHERE site_id = ?`, site.ID); err != nil {
 		return domain.Site{}, err
 	}
@@ -916,14 +977,29 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	return site, nil
 }
 
-func (s *Store) validateSiteNodes(nodeIDs []string) error {
+type rowQueryer interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+func validateSiteNodes(queryer rowQueryer, nodeIDs []string) error {
 	for _, nodeID := range nodeIDs {
-		node, err := s.GetNode(nodeID)
-		if err != nil {
-			return fmt.Errorf("site node %s: %w", nodeID, err)
+		var name string
+		var status domain.NodeStatus
+		var activeUninstall int
+		err := queryer.QueryRow(`SELECT nodes.name, nodes.status, EXISTS(
+			SELECT 1 FROM node_uninstall_jobs WHERE node_id = nodes.id AND status IN (?, ?, ?, ?)
+		) FROM nodes WHERE nodes.id = ?`, NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed, nodeID).Scan(&name, &status, &activeUninstall)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("site node %s: %w", nodeID, ErrNotFound)
 		}
-		if node.Status == domain.NodeRevoked {
-			return fmt.Errorf("site node %s is revoked", node.Name)
+		if err != nil {
+			return err
+		}
+		if status == domain.NodeRevoked || status == domain.NodeUninstalling || status == domain.NodeUninstalled {
+			return fmt.Errorf("site node %s is revoked, uninstalling, or uninstalled", name)
+		}
+		if activeUninstall != 0 {
+			return fmt.Errorf("site node %s: %w", name, ErrUninstallActive)
 		}
 	}
 	return nil

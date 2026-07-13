@@ -5,10 +5,12 @@ import "time"
 type NodeStatus string
 
 const (
-	NodePending  NodeStatus = "pending"
-	NodeActive   NodeStatus = "active"
-	NodeDraining NodeStatus = "draining"
-	NodeRevoked  NodeStatus = "revoked"
+	NodePending      NodeStatus = "pending"
+	NodeActive       NodeStatus = "active"
+	NodeDraining     NodeStatus = "draining"
+	NodeRevoked      NodeStatus = "revoked"
+	NodeUninstalling NodeStatus = "uninstalling"
+	NodeUninstalled  NodeStatus = "uninstalled"
 )
 
 type TaskStatus string

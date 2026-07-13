@@ -21,6 +21,11 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		`Cloudflare 区域 ID`,
 		`流式路径（WebSocket / SSE）`,
 		`透传模式（仅 HTTP(S)，禁用 Nginx 缓存）`,
+		`id="node-uninstall-dialog"`,
+		`>开始卸载准备</button>`,
+		`>生成卸载命令</button>`,
+		`强制完成（不清理远端）`,
+		`>删除记录</button>`,
 	} {
 		if !strings.Contains(page, expected) {
 			t.Fatalf("index.html does not contain %q", expected)
@@ -42,12 +47,19 @@ func TestEmbeddedConsoleLocalizesStatusLabelsWithoutChangingStatusValues(t *test
 	for _, expected := range []string{
 		"active: '运行中'",
 		"draining: '暂停中'",
-		"'启用调度'",
+		"uninstalling: '卸载中'",
+		"uninstalled: '已卸载'",
+		">启用调度</button>",
 		">暂停调度</button>",
+		">撤销授权</button>",
+		"'卸载节点'",
 		"succeeded: '成功'",
 		"rolled_back: '已回滚'",
 		`data-status="draining"`,
-		`data-status="${node.status === 'revoked' || node.status === 'draining' ? 'active' : 'revoked'}"`,
+		`data-status="active">启用调度</button>`,
+		`/uninstall/command`,
+		`/uninstall/force-complete`,
+		`can_generate_command`,
 		"toLocaleString('zh-CN'",
 		"return 'gRPC'",
 		"return 'WebSocket'",

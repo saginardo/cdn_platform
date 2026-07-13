@@ -32,6 +32,9 @@ import (
 //go:embed web/*
 var embeddedWeb embed.FS
 
+//go:embed uninstall-edge.sh
+var uninstallEdgeScript string
+
 type Server struct {
 	Store              *store.Store
 	Cipher             *Cipher
@@ -59,6 +62,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /install-edge.sh", s.bootstrapEdgeScript)
 	mux.HandleFunc("GET /install-edge.service", s.bootstrapEdgeService)
+	mux.HandleFunc("GET /uninstall-edge.sh", s.uninstallEdgeScript)
 	mux.HandleFunc("GET /downloads/cdn-edge-agent-linux-amd64", s.edgeBinary)
 	mux.HandleFunc("GET /api/setup/status", s.setupStatus)
 	mux.HandleFunc("POST /api/setup", s.setup)
@@ -69,6 +73,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/nodes", s.requireAdmin(s.createNode))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/nodes/{id}/status", s.requireAdmin(s.setNodeStatus))
+	mux.HandleFunc("POST /api/nodes/{id}/uninstall", s.requireAdmin(s.prepareNodeUninstall))
+	mux.HandleFunc("GET /api/nodes/{id}/uninstall", s.requireAdmin(s.nodeUninstallStatus))
+	mux.HandleFunc("POST /api/nodes/{id}/uninstall/command", s.requireAdmin(s.createNodeUninstallCommand))
+	mux.HandleFunc("DELETE /api/nodes/{id}/uninstall", s.requireAdmin(s.cancelNodeUninstall))
+	mux.HandleFunc("POST /api/nodes/{id}/uninstall/force-complete", s.requireAdmin(s.forceCompleteNodeUninstall))
+	mux.HandleFunc("DELETE /api/nodes/{id}", s.requireAdmin(s.deleteNode))
 	mux.HandleFunc("GET /api/sites", s.requireAdmin(s.listSites))
 	mux.HandleFunc("POST /api/sites", s.requireAdmin(s.createSite))
 	mux.HandleFunc("PUT /api/sites/{id}", s.requireAdmin(s.updateSite))
@@ -87,6 +97,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/edge/v1/desired-state", s.requireEdge(s.desiredState))
 	mux.HandleFunc("POST /api/edge/v1/heartbeat", s.requireEdge(s.heartbeat))
 	mux.HandleFunc("POST /api/edge/v1/logs", s.requireEdge(s.writeLogs))
+	mux.HandleFunc("POST /api/edge/v1/uninstall/start", s.startNodeUninstall)
+	mux.HandleFunc("POST /api/edge/v1/uninstall/fail", s.failNodeUninstall)
+	mux.HandleFunc("POST /api/edge/v1/uninstall/complete", s.completeNodeUninstall)
 	web, err := fs.Sub(embeddedWeb, "web")
 	if err == nil {
 		mux.Handle("/", http.FileServer(http.FS(web)))
@@ -601,7 +614,7 @@ func (s *Server) originAllowlist(response http.ResponseWriter, request *http.Req
 	addresses := make([]string, 0, len(site.Nodes))
 	for _, nodeID := range site.Nodes {
 		node, err := s.Store.GetNode(nodeID)
-		if err != nil || node.Status == domain.NodeRevoked {
+		if err != nil || node.Status == domain.NodeRevoked || node.Status == domain.NodeUninstalling || node.Status == domain.NodeUninstalled {
 			continue
 		}
 		addresses = append(addresses, node.PublicIPv4+"/32")
@@ -975,6 +988,10 @@ func writeError(response http.ResponseWriter, status int, err error) {
 func writeStoreError(response http.ResponseWriter, err error) {
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(response, http.StatusNotFound, err)
+		return
+	}
+	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) {
+		writeError(response, http.StatusConflict, err)
 		return
 	}
 	writeError(response, http.StatusBadRequest, err)

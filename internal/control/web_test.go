@@ -75,3 +75,22 @@ func TestEmbeddedConsoleLocalizesStatusLabelsWithoutChangingStatusValues(t *test
 		}
 	}
 }
+
+func TestEmbeddedConsolePreservesSelectedViewInURLHash(t *testing.T) {
+	contents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, expected := range []string{
+		"const consoleViews = new Set(['overview', 'nodes', 'sites'])",
+		"window.location.hash.replace(/^#\\/?/, '')",
+		"syncViewFromLocation();",
+		"window.location.hash = hash",
+		"window.addEventListener('hashchange', syncViewFromLocation)",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+}

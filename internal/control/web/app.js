@@ -29,6 +29,7 @@ const taskStatusLabels = {
   rolled_back: '已回滚',
 };
 const numberFormatter = new Intl.NumberFormat('zh-CN');
+const consoleViews = new Set(['overview', 'nodes', 'sites']);
 
 const byId = (id) => document.getElementById(id);
 const split = (value) => value.split(',').map((item) => item.trim()).filter(Boolean);
@@ -445,7 +446,30 @@ async function boot() {
   } catch (error) { show('setup-panel'); }
 }
 
-function showApp() { hide('setup-panel'); hide('login-panel'); show('app'); show('logout'); refresh().catch((error) => notice(error.message)); }
+function viewFromLocation() {
+  const view = window.location.hash.replace(/^#\/?/, '');
+  return consoleViews.has(view) ? view : 'overview';
+}
+
+function activateView(view) {
+  document.querySelectorAll('.nav').forEach((button) => {
+    const active = button.dataset.view === view;
+    button.classList.toggle('active', active);
+    if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+  });
+  document.querySelectorAll('.view').forEach((section) => section.classList.toggle('hidden', section.id !== view));
+}
+
+function syncViewFromLocation() { activateView(viewFromLocation()); }
+
+function showApp() {
+  hide('setup-panel');
+  hide('login-panel');
+  syncViewFromLocation();
+  show('app');
+  show('logout');
+  refresh().catch((error) => notice(error.message));
+}
 
 byId('setup-form').addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -469,9 +493,11 @@ byId('login-form').addEventListener('submit', async (event) => {
 byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); closeNodeUninstall(); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); csrf = ''; hide('app'); hide('logout'); show('login-panel'); } });
 
 document.querySelectorAll('.nav').forEach((button) => button.addEventListener('click', () => {
-  document.querySelectorAll('.nav').forEach((item) => item.classList.remove('active')); button.classList.add('active');
-  document.querySelectorAll('.view').forEach((item) => item.classList.add('hidden')); show(button.dataset.view);
+  const hash = `#/${button.dataset.view}`;
+  if (window.location.hash === hash) activateView(button.dataset.view);
+  else window.location.hash = hash;
 }));
+window.addEventListener('hashchange', syncViewFromLocation);
 
 byId('show-node-form').addEventListener('click', () => show('node-form'));
 byId('show-site-form').addEventListener('click', () => resetSiteForm());

@@ -166,7 +166,8 @@ func TestRenderUsesGRPCPassForGRPCOrigin(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		"listen 443 ssl http2",
+		"listen 443 ssl;",
+		"http2 on;",
 		"grpc_pass grpcs://origin_grpc-site",
 		"grpc_set_header TE trailers",
 		"grpc_connect_timeout 10s",
@@ -180,5 +181,8 @@ func TestRenderUsesGRPCPassForGRPCOrigin(t *testing.T) {
 	}
 	if strings.Contains(configuration, "proxy_pass grpcs://") {
 		t.Fatalf("gRPC origin must not use proxy_pass:\n%s", configuration)
+	}
+	if strings.Contains(configuration, "listen 443 ssl http2") {
+		t.Fatalf("configuration still uses the deprecated HTTP/2 listen parameter:\n%s", configuration)
 	}
 }

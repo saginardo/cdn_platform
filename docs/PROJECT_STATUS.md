@@ -61,7 +61,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 - Edge agent 用 15 分钟的一次性注册令牌提交 CSR，获得控制面内部 CA 签发的 mTLS 客户端证书；后续所有状态拉取、心跳、日志上传均使用该证书。
 - 边缘自有文件统一位于 `/opt/cdn-edge`：`bin/`、`config/`、`data/`、`logs/`、`cache/` 和 `systemd/`。系统路径仅保留 systemd 与 Nginx 的发现链接；Nginx 包、全局配置和 journald 仍由 Debian 管理。
 - Agent 默认每 30 秒拉取一次状态；配置或证书写入采用原子替换，先执行 `nginx -t`，仅在成功时 reload，失败会恢复上一个已知可用版本。
-- Nginx 为每个站点生成独立 `server` 和 `upstream`：80 强制跳转 HTTPS，443 使用 TLS 1.2/1.3 和 HTTP/2。
+- Nginx 为每个站点生成独立 `server` 和 `upstream`：80 强制跳转 HTTPS，443 使用 TLS 1.2/1.3，并通过独立的 `http2 on` 指令启用 HTTP/2。
 - CDN 业务 HTTPS server 显式使用 `keepalive_timeout 300s` 和 `keepalive_requests 1000`；每个 upstream、每个 worker 的空闲回源连接池为 `keepalive 30`，HTTP/gRPC 回源连接超时统一为 10 秒。普通 HTTP 代理显式发送 `proxy_set_header Connection ""`，确保 HTTP/1.1 上游连接可以复用；流式路径按请求的 `Upgrade` 头决定 WebSocket 升级或普通 SSE 透传。
 
 ### 3.3 请求处理策略

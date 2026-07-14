@@ -52,13 +52,13 @@ func New(config Config) (*Agent, error) {
 	}
 	config.ControlURL = strings.TrimRight(config.ControlURL, "/")
 	if config.StateDir == "" {
-		config.StateDir = "/var/lib/cdn-platform"
+		config.StateDir = "/opt/cdn-edge/data"
 	}
 	if config.NginxConfigPath == "" {
-		config.NginxConfigPath = "/etc/nginx/conf.d/cdn-platform.conf"
+		config.NginxConfigPath = "/opt/cdn-edge/config/nginx/cdn-platform.conf"
 	}
 	if config.CertificateDir == "" {
-		config.CertificateDir = "/etc/cdn-platform/certs"
+		config.CertificateDir = "/opt/cdn-edge/config/certs"
 	}
 	if config.ClientKeyPath == "" {
 		config.ClientKeyPath = filepath.Join(config.StateDir, "edge-client.key")
@@ -70,7 +70,7 @@ func New(config Config) (*Agent, error) {
 		config.CAPath = filepath.Join(config.StateDir, "edge-ca.crt")
 	}
 	if config.AccessLogPath == "" {
-		config.AccessLogPath = "/var/log/cdn-platform/access.json"
+		config.AccessLogPath = "/opt/cdn-edge/logs/access.json"
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = 30 * time.Second

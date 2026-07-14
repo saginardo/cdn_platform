@@ -239,8 +239,19 @@ func TestLoginAndEnrollmentCommandGuard(t *testing.T) {
 	ready.Header.Set("X-CSRF-Token", decodeCSRF(t, loginResponse.Body.Bytes()))
 	readyResponse := httptest.NewRecorder()
 	server.Handler().ServeHTTP(readyResponse, ready)
-	if readyResponse.Code != http.StatusCreated || !bytes.Contains(readyResponse.Body.Bytes(), []byte("--binary-sha256")) || !bytes.Contains(readyResponse.Body.Bytes(), []byte("sudo bash -s")) || !bytes.Contains(readyResponse.Body.Bytes(), []byte("https://edge-control.example.test:8443")) {
+	if readyResponse.Code != http.StatusCreated || !bytes.Contains(readyResponse.Body.Bytes(), []byte("--binary-sha256")) || !bytes.Contains(readyResponse.Body.Bytes(), []byte("--enrollment-token")) || !bytes.Contains(readyResponse.Body.Bytes(), []byte("sudo bash -s")) || !bytes.Contains(readyResponse.Body.Bytes(), []byte("https://edge-control.example.test:8443")) {
 		t.Fatalf("expected checksum-bound command, got %d %s", readyResponse.Code, readyResponse.Body.String())
+	}
+	if err := database.SetNodeCertificate(node.ID, "sha256:existing-edge"); err != nil {
+		t.Fatal(err)
+	}
+	upgrade := httptest.NewRequest(http.MethodPost, "/api/nodes/"+node.ID+"/enrollment-token", nil)
+	upgrade.AddCookie(cookie)
+	upgrade.Header.Set("X-CSRF-Token", decodeCSRF(t, loginResponse.Body.Bytes()))
+	upgradeResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(upgradeResponse, upgrade)
+	if upgradeResponse.Code != http.StatusCreated || bytes.Contains(upgradeResponse.Body.Bytes(), []byte("--enrollment-token")) || !bytes.Contains(upgradeResponse.Body.Bytes(), []byte(`"enrollment_required":false`)) {
+		t.Fatalf("expected identity-preserving upgrade command, got %d %s", upgradeResponse.Code, upgradeResponse.Body.String())
 	}
 	server.EdgeBinarySHA256 = strings.Repeat("z", 64)
 	invalid := httptest.NewRequest(http.MethodPost, "/api/nodes/"+node.ID+"/enrollment-token", nil)

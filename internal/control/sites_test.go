@@ -3,6 +3,7 @@ package control
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -12,6 +13,83 @@ import (
 	"cdn-platform/internal/domain"
 	"cdn-platform/internal/store"
 )
+
+func TestSiteClientMaxBodySizeAPI(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-1", "203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	defaultSite := requestSite(t, server, http.MethodPost, "/api/sites", map[string]any{
+		"name": "default", "zone_id": "zone", "domains": []string{"default.example.test"}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "enabled": true,
+	})
+	if defaultSite.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB {
+		t.Fatalf("omitted client max body size = %d", defaultSite.ClientMaxBodySizeMB)
+	}
+
+	var largest domain.Site
+	for _, value := range []int{128, 256, 512, 1024} {
+		created := requestSite(t, server, http.MethodPost, "/api/sites", map[string]any{
+			"name": fmt.Sprintf("body-%d", value), "zone_id": "zone", "domains": []string{fmt.Sprintf("body-%d.example.test", value)}, "node_ids": []string{node.ID},
+			"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "client_max_body_size_mb": value, "enabled": true,
+		})
+		if created.ClientMaxBodySizeMB != value {
+			t.Fatalf("created client max body size = %d, want %d", created.ClientMaxBodySizeMB, value)
+		}
+		if value == 1024 {
+			largest = created
+		}
+	}
+
+	updated := requestSite(t, server, http.MethodPut, "/api/sites/"+largest.ID, map[string]any{
+		"name": largest.Name, "zone_id": largest.ZoneID, "domains": largest.Domains, "node_ids": largest.Nodes,
+		"primary_origin": largest.PrimaryOrigin, "enabled": largest.Enabled,
+	})
+	if updated.ClientMaxBodySizeMB != 1024 {
+		t.Fatalf("omitted update did not preserve client max body size: %#v", updated)
+	}
+
+	for _, value := range []int{0, 127, 129, 1025} {
+		response := requestSiteResponse(t, server, http.MethodPost, "/api/sites", map[string]any{
+			"name": "invalid", "zone_id": "zone", "domains": []string{"invalid.example.test"}, "node_ids": []string{node.ID},
+			"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "client_max_body_size_mb": value, "enabled": true,
+		})
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("client max body size %d = %d %s", value, response.Code, response.Body.String())
+		}
+	}
+
+	before, _, err := database.GetSite(largest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := requestSiteResponse(t, server, http.MethodPut, "/api/sites/"+largest.ID, map[string]any{
+		"name": largest.Name, "zone_id": largest.ZoneID, "domains": largest.Domains, "node_ids": largest.Nodes,
+		"primary_origin": largest.PrimaryOrigin, "client_max_body_size_mb": 129, "enabled": largest.Enabled,
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid update = %d %s", response.Code, response.Body.String())
+	}
+	after, _, err := database.GetSite(largest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ClientMaxBodySizeMB != before.ClientMaxBodySizeMB || after.ConfigVersion != before.ConfigVersion {
+		t.Fatalf("invalid update changed site: before=%#v after=%#v", before, after)
+	}
+}
 
 func TestSitePassthroughAPICompatibilityAndCacheInvalidation(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
@@ -95,6 +173,19 @@ func TestSitePassthroughAPICompatibilityAndCacheInvalidation(t *testing.T) {
 
 func requestSite(t *testing.T, server *Server, method, path string, input map[string]any) domain.Site {
 	t.Helper()
+	response := requestSiteResponse(t, server, method, path, input)
+	if response.Code != http.StatusCreated && response.Code != http.StatusOK {
+		t.Fatalf("%s %s = %d %s", method, path, response.Code, response.Body.String())
+	}
+	var site domain.Site
+	if err := json.NewDecoder(response.Body).Decode(&site); err != nil {
+		t.Fatal(err)
+	}
+	return site
+}
+
+func requestSiteResponse(t *testing.T, server *Server, method, path string, input map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
 	body, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
@@ -105,12 +196,5 @@ func requestSite(t *testing.T, server *Server, method, path string, input map[st
 	request.AddCookie(&http.Cookie{Name: "cdn_session", Value: "session-token"})
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusCreated && response.Code != http.StatusOK {
-		t.Fatalf("%s %s = %d %s", method, path, response.Code, response.Body.String())
-	}
-	var site domain.Site
-	if err := json.NewDecoder(response.Body).Decode(&site); err != nil {
-		t.Fatal(err)
-	}
-	return site
+	return response
 }

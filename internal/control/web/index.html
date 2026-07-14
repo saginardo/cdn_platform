@@ -108,6 +108,14 @@
             <label>备用源站 URL <input id="site-backup-url" placeholder="https://backup.example.com"></label>
             <label>备用源站 Host 头 <input id="site-backup-host" placeholder="backup.example.com"></label>
             <label>流式路径（WebSocket / SSE）<input id="site-stream-paths" placeholder="/ws, /events"></label>
+            <label>请求体上限
+              <select id="site-client-max-body-size">
+                <option value="128">128 MiB</option>
+                <option value="256">256 MiB</option>
+                <option value="512">512 MiB</option>
+                <option value="1024">1024 MiB</option>
+              </select>
+            </label>
             <label class="checkbox-label"><input id="site-passthrough" type="checkbox"> 透传模式（仅 HTTP(S)，禁用 Nginx 缓存）</label>
             <label class="checkbox-label"><input id="site-enabled" type="checkbox" checked> 启用流量</label>
             <div class="form-actions"><button id="site-submit" type="submit">创建站点</button><button type="button" class="secondary cancel">取消</button></div>

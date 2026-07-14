@@ -6,14 +6,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=root
-EnvironmentFile=/etc/cdn-platform/edge.env
-ExecStart=/usr/local/bin/cdn-edge-agent
+UMask=0027
+EnvironmentFile=/opt/cdn-edge/config/edge.env
+ExecStart=/opt/cdn-edge/bin/cdn-edge-agent
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
-ReadWritePaths=/var/lib/cdn-platform /var/log/cdn-platform /etc/cdn-platform /etc/nginx/conf.d
+ReadWritePaths=/opt/cdn-edge
 LimitNOFILE=65536
 
 [Install]

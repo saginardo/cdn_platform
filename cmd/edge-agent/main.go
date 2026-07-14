@@ -25,8 +25,8 @@ func main() {
 	}
 	agent, err := edge.New(edge.Config{
 		ControlURL: os.Getenv("CONTROL_URL"), EnrollmentToken: os.Getenv("ENROLLMENT_TOKEN"),
-		StateDir: env("EDGE_STATE_DIR", "/var/lib/cdn-platform"), NginxConfigPath: env("NGINX_CONFIG_PATH", "/etc/nginx/conf.d/cdn-platform.conf"),
-		CertificateDir: env("EDGE_CERT_DIR", "/etc/cdn-platform/certs"), AccessLogPath: env("EDGE_ACCESS_LOG", "/var/log/cdn-platform/access.json"), PollInterval: time.Duration(pollSeconds) * time.Second,
+		StateDir: env("EDGE_STATE_DIR", "/opt/cdn-edge/data"), NginxConfigPath: env("NGINX_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform.conf"),
+		CertificateDir: env("EDGE_CERT_DIR", "/opt/cdn-edge/config/certs"), AccessLogPath: env("EDGE_ACCESS_LOG", "/opt/cdn-edge/logs/access.json"), PollInterval: time.Duration(pollSeconds) * time.Second,
 	})
 	if err != nil {
 		fatal(err.Error())

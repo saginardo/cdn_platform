@@ -130,7 +130,9 @@ fi
 cleanup_committed=1
 rm -f "$service_unit"
 rm -f "$(root_path /usr/local/bin/cdn-edge-agent)"
-rm -rf "$(root_path /etc/cdn-platform)" "$(root_path /var/lib/cdn-platform)" "$(root_path /var/log/cdn-platform)" "$(root_path /var/cache/cdn-platform)"
+rm -rf "$(root_path /opt/cdn-edge)" \
+  "$(root_path /etc/cdn-platform)" "$(root_path /var/lib/cdn-platform)" \
+  "$(root_path /var/log/cdn-platform)" "$(root_path /var/cache/cdn-platform)"
 systemctl daemon-reload
 systemctl reset-failed cdn-edge-agent.service >/dev/null 2>&1 || true
 

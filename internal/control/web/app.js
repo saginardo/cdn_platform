@@ -28,6 +28,7 @@ const taskStatusLabels = {
   failed: '失败',
   rolled_back: '已回滚',
 };
+const defaultClientMaxBodySizeMB = 128;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const consoleViews = new Set(['overview', 'nodes', 'sites']);
 
@@ -76,7 +77,7 @@ function renderNodeRow(node) {
 function renderNodeActions(node) {
   const actions = [];
   if (['pending', 'active', 'draining'].includes(node.status)) {
-    actions.push(`<button class="small enroll" data-id="${node.id}">获取部署命令</button>`);
+    actions.push(`<button class="small enroll" data-id="${node.id}">获取部署/升级命令</button>`);
   }
   if (node.status === 'active') {
     actions.push(`<button class="small secondary node-status" data-id="${node.id}" data-status="draining">暂停调度</button>`);
@@ -114,6 +115,7 @@ function renderSites() {
         <div><dt>协议</dt><dd>${escapeHTML(siteProtocol(site))}</dd></div>
         <div><dt>节点</dt><dd>${numberFormatter.format(site.node_ids.length)} 个</dd></div>
         <div><dt>缓存</dt><dd>${siteCacheMarkup(site)}</dd></div>
+        <div><dt>请求体</dt><dd>${numberFormatter.format(site.client_max_body_size_mb ?? defaultClientMaxBodySizeMB)} MiB</dd></div>
         <div><dt>TLS</dt><dd>${tlsStatusMarkup(tlsStatus)}</dd></div>
 		<div><dt>发布</dt><dd>${publishStatusMarkup(publishStatus)}</dd></div>
       </dl>
@@ -570,7 +572,7 @@ byId('node-form').addEventListener('submit', async (event) => {
 byId('site-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   const backup = byId('site-backup-url').value.trim();
-  const payload = { name: byId('site-name').value, zone_id: byId('site-zone').value, domains: split(byId('site-domains').value), node_ids: selectedNodeIDs(), primary_origin: { url: byId('site-primary-url').value, host_header: byId('site-primary-host').value, enabled: true }, stream_paths: split(byId('site-stream-paths').value), passthrough: byId('site-passthrough').checked, enabled: byId('site-enabled').checked };
+  const payload = { name: byId('site-name').value, zone_id: byId('site-zone').value, domains: split(byId('site-domains').value), node_ids: selectedNodeIDs(), primary_origin: { url: byId('site-primary-url').value, host_header: byId('site-primary-host').value, enabled: true }, stream_paths: split(byId('site-stream-paths').value), passthrough: byId('site-passthrough').checked, client_max_body_size_mb: Number(byId('site-client-max-body-size').value), enabled: byId('site-enabled').checked };
   if (backup) payload.backup_origin = { url: backup, host_header: byId('site-backup-host').value, enabled: true };
   const siteID = byId('site-id').value;
   try {
@@ -584,6 +586,7 @@ function resetSiteForm(showForm = true) {
   byId('site-form').reset();
   byId('site-id').value = '';
   byId('site-zone').disabled = false;
+  byId('site-client-max-body-size').value = String(defaultClientMaxBodySizeMB);
   byId('site-passthrough').checked = false;
   byId('site-enabled').checked = true;
   byId('site-submit').textContent = '创建站点';
@@ -602,6 +605,7 @@ function editSite(site) {
   byId('site-backup-url').value = site.backup_origin?.url || '';
   byId('site-backup-host').value = site.backup_origin?.host_header || '';
   byId('site-stream-paths').value = (site.stream_paths || []).join(', ');
+  byId('site-client-max-body-size').value = String(site.client_max_body_size_mb ?? defaultClientMaxBodySizeMB);
   byId('site-passthrough').checked = Boolean(site.passthrough);
   byId('site-enabled').checked = site.enabled;
   byId('site-submit').textContent = '保存更改';

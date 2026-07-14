@@ -14,6 +14,11 @@ func NormalizeAndValidateSite(site *Site) error {
 	if site.Name == "" || len(site.Name) > 100 {
 		return fmt.Errorf("site name must be between 1 and 100 characters")
 	}
+	clientMaxBodySizeMB, err := NormalizeClientMaxBodySizeMB(site.ClientMaxBodySizeMB)
+	if err != nil {
+		return err
+	}
+	site.ClientMaxBodySizeMB = clientMaxBodySizeMB
 	if len(site.Domains) == 0 {
 		return fmt.Errorf("at least one domain is required")
 	}
@@ -79,6 +84,25 @@ func NormalizeAndValidateSite(site *Site) error {
 		}
 	}
 	return nil
+}
+
+func NormalizeClientMaxBodySizeMB(value int) (int, error) {
+	if value == 0 {
+		value = DefaultClientMaxBodySizeMB
+	}
+	if err := ValidateClientMaxBodySizeMB(value); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
+func ValidateClientMaxBodySizeMB(value int) error {
+	switch value {
+	case DefaultClientMaxBodySizeMB, 256, 512, MaxClientMaxBodySizeMB:
+		return nil
+	default:
+		return fmt.Errorf("client max body size must be one of 128, 256, 512, or 1024 MiB")
+	}
 }
 
 func ValidateOrigin(origin *Origin) error {

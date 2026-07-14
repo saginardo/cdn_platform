@@ -336,20 +336,33 @@ func (s *Server) createEnrollmentToken(response http.ResponseWriter, request *ht
 		writeError(response, http.StatusConflict, errors.New("CONTROL_PUBLIC_URL, EDGE_CONTROL_URL, and EDGE_BINARY_URL must be HTTPS URLs, and EDGE_BINARY_SHA256 must be a 64-character digest before generating an enrollment command"))
 		return
 	}
-	token, err := auth.NewOpaqueToken(32)
+	enrollmentRequired, err := s.Store.NodeRequiresEnrollment(nodeID)
 	if err != nil {
-		writeError(response, http.StatusInternalServerError, err)
-		return
-	}
-	expiresAt := time.Now().UTC().Add(15 * time.Minute)
-	if err := s.Store.CreateEnrollmentToken(nodeID, token, expiresAt); err != nil {
 		writeStoreError(response, err)
 		return
 	}
-	s.audit(request, adminID(request.Context()), "create_enrollment_token", "node", nodeID, "expires "+expiresAt.Format(time.RFC3339))
 	bootstrapURL := strings.TrimRight(s.ControlURL, "/") + "/install-edge.sh"
-	command := fmt.Sprintf("curl -fsSL %q | sudo bash -s -- --control-url %q --enrollment-token %q --binary-url %q --binary-sha256 %q", bootstrapURL, edgeControlURL, token, s.EdgeBinaryURL, digest)
-	writeJSON(response, http.StatusCreated, map[string]any{"token": token, "expires_at": expiresAt, "install_command": command})
+	result := map[string]any{"enrollment_required": enrollmentRequired}
+	if enrollmentRequired {
+		token, err := auth.NewOpaqueToken(32)
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		expiresAt := time.Now().UTC().Add(15 * time.Minute)
+		if err := s.Store.CreateEnrollmentToken(nodeID, token, expiresAt); err != nil {
+			writeStoreError(response, err)
+			return
+		}
+		s.audit(request, adminID(request.Context()), "create_enrollment_token", "node", nodeID, "expires "+expiresAt.Format(time.RFC3339))
+		result["token"] = token
+		result["expires_at"] = expiresAt
+		result["install_command"] = fmt.Sprintf("curl -fsSL %q | sudo bash -s -- --control-url %q --enrollment-token %q --binary-url %q --binary-sha256 %q", bootstrapURL, edgeControlURL, token, s.EdgeBinaryURL, digest)
+	} else {
+		s.audit(request, adminID(request.Context()), "create_upgrade_command", "node", nodeID, "preserve existing mTLS identity")
+		result["install_command"] = fmt.Sprintf("curl -fsSL %q | sudo bash -s -- --control-url %q --binary-url %q --binary-sha256 %q", bootstrapURL, edgeControlURL, s.EdgeBinaryURL, digest)
+	}
+	writeJSON(response, http.StatusCreated, result)
 }
 
 func validSHA256Digest(value string) bool {
@@ -421,15 +434,16 @@ func (s *Server) listSites(response http.ResponseWriter, request *http.Request) 
 }
 
 type siteRequest struct {
-	Name          string         `json:"name"`
-	ZoneID        string         `json:"zone_id"`
-	Domains       []string       `json:"domains"`
-	NodeIDs       []string       `json:"node_ids"`
-	PrimaryOrigin domain.Origin  `json:"primary_origin"`
-	BackupOrigin  *domain.Origin `json:"backup_origin"`
-	StreamPaths   *[]string      `json:"stream_paths"`
-	Passthrough   *bool          `json:"passthrough"`
-	Enabled       *bool          `json:"enabled"`
+	Name                string         `json:"name"`
+	ZoneID              string         `json:"zone_id"`
+	Domains             []string       `json:"domains"`
+	NodeIDs             []string       `json:"node_ids"`
+	PrimaryOrigin       domain.Origin  `json:"primary_origin"`
+	BackupOrigin        *domain.Origin `json:"backup_origin"`
+	StreamPaths         *[]string      `json:"stream_paths"`
+	Passthrough         *bool          `json:"passthrough"`
+	ClientMaxBodySizeMB *int           `json:"client_max_body_size_mb"`
+	Enabled             *bool          `json:"enabled"`
 }
 
 func (input siteRequest) site(id string) domain.Site {
@@ -445,12 +459,27 @@ func (input siteRequest) site(id string) domain.Site {
 	if input.Passthrough != nil {
 		passthrough = *input.Passthrough
 	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin, BackupOrigin: input.BackupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, Enabled: enabled}
+	clientMaxBodySizeMB := domain.DefaultClientMaxBodySizeMB
+	if input.ClientMaxBodySizeMB != nil {
+		clientMaxBodySizeMB = *input.ClientMaxBodySizeMB
+	}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin, BackupOrigin: input.BackupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, Enabled: enabled}
+}
+
+func (input siteRequest) validateClientMaxBodySize() error {
+	if input.ClientMaxBodySizeMB == nil {
+		return nil
+	}
+	return domain.ValidateClientMaxBodySizeMB(*input.ClientMaxBodySizeMB)
 }
 
 func (s *Server) createSite(response http.ResponseWriter, request *http.Request) {
 	var input siteRequest
 	if !readJSON(response, request, &input) {
+		return
+	}
+	if err := input.validateClientMaxBodySize(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
 		return
 	}
 	site, err := s.Store.CreateSite(input.site(""), input.ZoneID)
@@ -472,6 +501,10 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 		writeStoreError(response, err)
 		return
 	}
+	if err := input.validateClientMaxBodySize(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
 	siteInput := input.site(request.PathValue("id"))
 	if input.Enabled == nil {
 		siteInput.Enabled = current.Enabled
@@ -481,6 +514,9 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 	}
 	if input.Passthrough == nil {
 		siteInput.Passthrough = current.Passthrough
+	}
+	if input.ClientMaxBodySizeMB == nil {
+		siteInput.ClientMaxBodySizeMB = current.ClientMaxBodySizeMB
 	}
 	site, err := s.Store.UpdateSite(siteInput, input.ZoneID)
 	if err != nil {

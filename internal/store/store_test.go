@@ -355,6 +355,41 @@ func TestSitePassthroughRoundTripAndCacheGeneration(t *testing.T) {
 	}
 }
 
+func TestSiteClientMaxBodySizeRoundTrip(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	node, err := store.CreateNode("edge-1", "203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.CreateSite(domain.Site{
+		Name: "large-requests", Domains: []string{"api.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin:       domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		ClientMaxBodySizeMB: 1024, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, zoneID, err := store.GetSite(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ClientMaxBodySizeMB != 1024 {
+		t.Fatalf("stored client max body size = %d", loaded.ClientMaxBodySizeMB)
+	}
+	loaded.ClientMaxBodySizeMB = 256
+	updated, err := store.UpdateSite(loaded, zoneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ClientMaxBodySizeMB != 256 || updated.CacheGeneration != created.CacheGeneration || updated.ConfigVersion != created.ConfigVersion+1 {
+		t.Fatalf("unexpected updated site: %#v", updated)
+	}
+}
+
 func TestOpenMigratesSiteColumnsForExistingDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "control.db")
 	legacy, err := sql.Open("sqlite", path)
@@ -408,18 +443,18 @@ func TestOpenMigratesSiteColumnsForExistingDatabase(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			t.Fatal(err)
 		}
-		if name == "stream_paths_json" || name == "passthrough" {
+		if name == "stream_paths_json" || name == "passthrough" || name == "client_max_body_size_mb" {
 			found[name] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !found["stream_paths_json"] || !found["passthrough"] {
+	if !found["stream_paths_json"] || !found["passthrough"] || !found["client_max_body_size_mb"] {
 		t.Fatalf("site columns were not added to legacy table: %#v", found)
 	}
 	site, _, err := migrated.GetSite("legacy-site")
-	if err != nil || site.Passthrough {
-		t.Fatalf("legacy site passthrough default = %t, err=%v", site.Passthrough, err)
+	if err != nil || site.Passthrough || site.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB {
+		t.Fatalf("legacy site defaults: passthrough=%t client_max_body_size_mb=%d err=%v", site.Passthrough, site.ClientMaxBodySizeMB, err)
 	}
 }

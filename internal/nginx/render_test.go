@@ -13,7 +13,7 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"proxy_cache_path /var/cache/cdn-platform levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Connection \"\";", "location @cdn_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health"} {
+	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "client_max_body_size 128m;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Connection \"\";", "location @cdn_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health"} {
 		if !strings.Contains(configuration, expected) {
 			t.Fatalf("missing %q from config:\n%s", expected, configuration)
 		}
@@ -23,6 +23,45 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	}
 	if strings.Contains(configuration, "max_size=50g") {
 		t.Fatalf("configuration still uses the retired 50g default:\n%s", configuration)
+	}
+}
+
+func TestRenderUsesConfiguredClientMaxBodySize(t *testing.T) {
+	configuration, err := Render([]domain.Site{{
+		ID: "site-1", Name: "site", Domains: []string{"api.example.test"},
+		PrimaryOrigin:       domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		ClientMaxBodySizeMB: 1024, Enabled: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(configuration, "client_max_body_size 1024m;") {
+		t.Fatalf("configured client max body size is missing:\n%s", configuration)
+	}
+	if strings.Contains(configuration, "client_max_body_size 0m;") {
+		t.Fatalf("configuration disabled the client body limit:\n%s", configuration)
+	}
+	if _, err := Render([]domain.Site{{
+		ID: "invalid", Name: "invalid", Domains: []string{"invalid.example.test"},
+		PrimaryOrigin:       domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		ClientMaxBodySizeMB: 129, Enabled: true,
+	}}); err == nil {
+		t.Fatal("expected an unsupported client max body size to be rejected")
+	}
+}
+
+func TestRenderEmptyNodeConfigurationDoesNotReferenceSiteVariables(t *testing.T) {
+	configuration, err := Render(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(configuration, "location = /__cdn_health") {
+		t.Fatalf("empty node configuration lost the health endpoint:\n%s", configuration)
+	}
+	for _, unexpected := range []string{"$cdn_site_id", "proxy_cache_path", "log_format cdn_json", "client_max_body_size"} {
+		if strings.Contains(configuration, unexpected) {
+			t.Fatalf("empty node configuration contains %q:\n%s", unexpected, configuration)
+		}
 	}
 }
 

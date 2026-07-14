@@ -20,6 +20,8 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		`最近 24 小时流量`,
 		`Cloudflare 区域 ID`,
 		`流式路径（WebSocket / SSE）`,
+		`id="site-client-max-body-size"`,
+		`<option value="1024">1024 MiB</option>`,
 		`透传模式（仅 HTTP(S)，禁用 Nginx 缓存）`,
 		`id="node-uninstall-dialog"`,
 		`>开始卸载准备</button>`,
@@ -69,6 +71,8 @@ func TestEmbeddedConsoleLocalizesStatusLabelsWithoutChangingStatusValues(t *test
 		"port_conflicts",
 		"site-passthrough",
 		"site.passthrough",
+		"client_max_body_size_mb",
+		"site-client-max-body-size",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)

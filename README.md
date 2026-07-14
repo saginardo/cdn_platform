@@ -30,8 +30,8 @@ internal/edge        Enrollment, mTLS polling, atomic apply, local log queue
 internal/nginx       Generated Nginx cache and origin configuration
 internal/integrations Cloudflare, Certbot, SMTP adapters
 internal/logstore    ClickHouse access-log and aggregate storage
-deploy/              Compose, edge systemd, and environment templates
-scripts/             Compose control-plane and Debian edge helpers
+deploy/              Compose and environment templates
+scripts/             Compose control-plane helpers and release builds
 ```
 
 ## Build and test
@@ -90,7 +90,9 @@ Before first public startup, set `SETUP_ALLOW_CIDRS` to your administrator egres
 3. Use **Enroll** and run the generated command as root on that Debian 12 VPS.
 4. The agent creates its private key locally, submits a CSR using the 15-minute one-time token, receives an internal mTLS certificate, and begins heartbeats every 30 seconds.
 
-The agent keeps the last working Nginx configuration if the control plane is unavailable or a new configuration fails validation. It checks TCP 80/443 before applying a public site: a non-Nginx listener is reported to the publish task with its port, PID, and process name; the agent never stops that process. Once the port is released, click **Republish** and the agent clears Nginx's failed state and starts it automatically. Do not delete `/var/lib/cdn-platform` on an active edge node; it contains the node private key, mTLS certificate, applied version, and pending access-log queue.
+The same generated command installs a fresh edge, migrates the legacy scattered layout, or upgrades an existing `/opt/cdn-edge` deployment. It keeps the node identity, certificates, applied version, pending access-log queue, offset, and access logs during migration; the recreatable Nginx cache starts empty. Do not publish new site state while legacy and migrated nodes coexist. See [docs/EDGE_DEPLOYMENT.md](docs/EDGE_DEPLOYMENT.md) for the layout, migration checks, backup boundary, and rollback behavior.
+
+The agent keeps the last working Nginx configuration if the control plane is unavailable or a new configuration fails validation. It checks TCP 80/443 before applying a public site: a non-Nginx listener is reported to the publish task with its port, PID, and process name; the agent never stops that process. Once the port is released, click **Republish** and the agent clears Nginx's failed state and starts it automatically. Do not delete `/opt/cdn-edge/data` on an active edge node; it contains the node private key, mTLS certificate, applied version, and pending access-log queue.
 
 ## Edge uninstall
 
@@ -99,14 +101,14 @@ Revoking authorization only invalidates the node certificate; it does not remove
 1. Pause scheduling or revoke authorization for the node.
 2. Remove it from every site, assign replacement active nodes, and publish each changed site. A disabled site is exempt from the replacement-node requirement.
 3. Start uninstall preparation. The controller removes only Cloudflare A records whose managed comment exactly identifies that node, then enforces a 75-second DNS safety wait.
-4. Generate the 30-minute workflow command and run it as root on the edge host. The script stops and removes `cdn-edge-agent`, `/etc/cdn-platform`, `/var/lib/cdn-platform`, `/var/log/cdn-platform`, `/var/cache/cdn-platform`, and `/etc/nginx/conf.d/cdn-platform.conf`. It validates and reloads Nginx, but preserves the Nginx package, service, and unrelated configuration.
+4. Generate the 30-minute workflow command and run it as root on the edge host. The script stops the agent and removes `/opt/cdn-edge`, its systemd/Nginx integration links, and any legacy CDN Platform paths. It validates and reloads Nginx, but preserves the Nginx package, service, system logs, and unrelated configuration.
 5. A successful callback retains the node as **Uninstalled** for audit history. Deleting that control-plane record is a separate confirmation-protected action.
 
 If Nginx validation or reload fails before cleanup is committed, the script restores the platform configuration and the previous edge-agent service state. **Force complete** only changes control-plane state when a host is permanently unreachable; it does not verify or perform remote cleanup.
 
 ## First site
 
-1. Add the site with its Cloudflare Zone ID, hostname(s), assigned node IDs, primary origin, and optional backup origin. Use HTTP(S) origins for normal sites; enable passthrough mode for an entire HTTP(S) hostname that must not use disk cache, including media byte-range traffic. Set stream paths such as `/ws` or `/events` for WebSocket/SSE, use `ws://` or `wss://` for an all-WebSocket site, and use `grpc://` or `grpcs://` for an all-gRPC hostname.
+1. Add the site with its Cloudflare Zone ID, hostname(s), assigned node IDs, primary origin, and optional backup origin. Generated HTTPS sites default to a 128 MiB request-body limit; the site form can raise it to the fixed 256, 512, or 1024 MiB presets. Use HTTP(S) origins for normal sites; enable passthrough mode for an entire HTTP(S) hostname that must not use disk cache, including media byte-range traffic. Set stream paths such as `/ws` or `/events` for WebSocket/SSE, use `ws://` or `wss://` for an all-WebSocket site, and use `grpc://` or `grpcs://` for an all-gRPC hostname.
 2. In Cloudflare, keep these hostname records as DNS-only. The control plane only manages records tagged with `cdn-platform:site=<site-id>;...`; it refuses a hostname already occupied by an untagged or another site's A record.
 3. Run **Issue TLS**. The control VPS queues an asynchronous DNS-01 job via the scoped Cloudflare token and stores the resulting certificate encrypted. The Sites view polls its status; reloading the page does not cancel it. Only one active certificate job may exist per site, so repeated clicks reuse that job.
 4. Run **Publish**. The controller builds each affected node's desired state and waits up to 90 seconds for assigned active nodes to validate and apply it. The Sites view shows per-node conflicts or timeout details; after resolving a conflict, click **Republish**.

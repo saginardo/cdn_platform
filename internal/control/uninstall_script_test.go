@@ -25,6 +25,7 @@ func TestUninstallEdgeScriptRemovesOnlyPlatformFiles(t *testing.T) {
 		"etc/nginx/conf.d/cdn-platform.conf",
 		"etc/systemd/system/cdn-edge-agent.service",
 		"usr/local/bin/cdn-edge-agent",
+		"opt/cdn-edge",
 		"etc/cdn-platform",
 		"var/lib/cdn-platform",
 		"var/log/cdn-platform",
@@ -156,6 +157,7 @@ func runUninstallEdgeScript(t *testing.T, failureMode string) (string, string, s
 	root := t.TempDir()
 	for _, directory := range []string{
 		"run", "tmp", "mock-bin", "etc/nginx/conf.d", "etc/systemd/system", "usr/local/bin",
+		"opt/cdn-edge/bin", "opt/cdn-edge/config", "opt/cdn-edge/data", "opt/cdn-edge/logs", "opt/cdn-edge/cache",
 		"etc/cdn-platform", "var/lib/cdn-platform", "var/log/cdn-platform", "var/cache/cdn-platform",
 	} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
@@ -167,6 +169,9 @@ func runUninstallEdgeScript(t *testing.T, failureMode string) (string, string, s
 		"etc/nginx/nginx.conf":                      "unrelated config\n",
 		"etc/systemd/system/cdn-edge-agent.service": "service\n",
 		"usr/local/bin/cdn-edge-agent":              "binary\n",
+		"opt/cdn-edge/.layout-version":              "1\n",
+		"opt/cdn-edge/bin/cdn-edge-agent":           "new binary\n",
+		"opt/cdn-edge/data/state":                   "new state\n",
 		"etc/cdn-platform/state":                    "state\n",
 		"var/lib/cdn-platform/state":                "state\n",
 		"var/log/cdn-platform/state":                "state\n",

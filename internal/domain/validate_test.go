@@ -2,6 +2,39 @@ package domain
 
 import "testing"
 
+func TestClientMaxBodySizeDefaultsAndPresetValidation(t *testing.T) {
+	newSite := func(value int) Site {
+		return Site{
+			Name:                "example",
+			Domains:             []string{"example.test"},
+			Nodes:               []string{"node-1"},
+			PrimaryOrigin:       Origin{URL: "https://origin.example.test"},
+			ClientMaxBodySizeMB: value,
+		}
+	}
+
+	defaultSite := newSite(0)
+	if err := NormalizeAndValidateSite(&defaultSite); err != nil {
+		t.Fatal(err)
+	}
+	if defaultSite.ClientMaxBodySizeMB != DefaultClientMaxBodySizeMB {
+		t.Fatalf("default client max body size = %d", defaultSite.ClientMaxBodySizeMB)
+	}
+
+	for _, value := range []int{128, 256, 512, 1024} {
+		site := newSite(value)
+		if err := NormalizeAndValidateSite(&site); err != nil {
+			t.Fatalf("expected %d MiB to be accepted: %v", value, err)
+		}
+	}
+	for _, value := range []int{-1, 1, 127, 129, 1025} {
+		site := newSite(value)
+		if err := NormalizeAndValidateSite(&site); err == nil {
+			t.Fatalf("expected %d MiB to be rejected", value)
+		}
+	}
+}
+
 func TestSiteDomainRejectsIPAddress(t *testing.T) {
 	site := Site{
 		Name:    "example",

@@ -43,22 +43,28 @@ type Origin struct {
 	Enabled    bool   `json:"enabled"`
 }
 
+const (
+	DefaultClientMaxBodySizeMB = 128
+	MaxClientMaxBodySizeMB     = 1024
+)
+
 type Site struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name"`
-	ZoneID          string    `json:"zone_id"`
-	Domains         []string  `json:"domains"`
-	Nodes           []string  `json:"node_ids"`
-	PrimaryOrigin   Origin    `json:"primary_origin"`
-	BackupOrigin    *Origin   `json:"backup_origin,omitempty"`
-	StreamPaths     []string  `json:"stream_paths"`
-	Passthrough     bool      `json:"passthrough"`
-	CacheGeneration int64     `json:"cache_generation"`
-	ConfigVersion   int64     `json:"config_version"`
-	Published       bool      `json:"published"`
-	Enabled         bool      `json:"enabled"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                  string    `json:"id"`
+	Name                string    `json:"name"`
+	ZoneID              string    `json:"zone_id"`
+	Domains             []string  `json:"domains"`
+	Nodes               []string  `json:"node_ids"`
+	PrimaryOrigin       Origin    `json:"primary_origin"`
+	BackupOrigin        *Origin   `json:"backup_origin,omitempty"`
+	StreamPaths         []string  `json:"stream_paths"`
+	Passthrough         bool      `json:"passthrough"`
+	ClientMaxBodySizeMB int       `json:"client_max_body_size_mb"`
+	CacheGeneration     int64     `json:"cache_generation"`
+	ConfigVersion       int64     `json:"config_version"`
+	Published           bool      `json:"published"`
+	Enabled             bool      `json:"enabled"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type EnrollmentToken struct {

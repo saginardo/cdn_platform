@@ -10,6 +10,8 @@ let uninstallNodeID = '';
 let uninstallNodeName = '';
 let uninstallCommand = '';
 let uninstallActionPending = false;
+let overviewLoading = false;
+let overviewLoaded = false;
 
 const nodeStatusLabels = {
   pending: '待激活',
@@ -30,9 +32,11 @@ const taskStatusLabels = {
 };
 const defaultClientMaxBodySizeMB = 128;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
+const compactNumberFormatter = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
 const consoleViews = new Set(['overview', 'nodes', 'sites']);
 const viewLabels = { overview: '概览', nodes: '节点', sites: '站点' };
 const mobileSidebarQuery = window.matchMedia('(max-width: 800px)');
+const overviewStatusColors = ['#3274d9', '#168a7a', '#6d5bc5', '#d29224', '#c44f4f', '#2b8fa3', '#8b99a2'];
 
 const byId = (id) => document.getElementById(id);
 const split = (value) => value.split(',').map((item) => item.trim()).filter(Boolean);
@@ -66,14 +70,11 @@ function hide(id) { byId(id).classList.add('hidden'); }
 
 async function refresh() {
   [nodes, sites] = await Promise.all([request('/api/nodes'), request('/api/sites')]);
-  byId('node-count').textContent = numberFormatter.format(nodes.length);
-  byId('active-node-count').textContent = numberFormatter.format(nodes.filter((node) => node.status === 'active').length);
-  byId('site-count').textContent = numberFormatter.format(sites.length);
   byId('site-list-meta').textContent = `${numberFormatter.format(sites.length)} 个站点 · ${numberFormatter.format(sites.filter((site) => site.enabled && site.published).length)} 个已发布`;
   byId('node-table').innerHTML = nodes.map(renderNodeRow).join('');
   renderSites();
   renderNodeSelector(selectedNodeIDs());
-  void refreshTraffic();
+  void refreshOverview();
   await Promise.all([refreshTLSStatuses(), refreshPublishStatuses()]);
 }
 
@@ -413,24 +414,130 @@ async function runNodeUninstallAction(path, options, successMessage) {
   }
 }
 
-async function refreshTraffic() {
-  const summaries = await Promise.all(sites.map(async (site) => {
-    try {
-      const points = await request(`/api/sites/${site.id}/metrics`);
-      return { site, points };
-    } catch (_) {
-      return { site, points: [] };
+async function refreshOverview() {
+  if (overviewLoading) return;
+  overviewLoading = true;
+  const section = byId('overview');
+  const button = byId('refresh-overview');
+  const state = byId('overview-state');
+  section.setAttribute('aria-busy', 'true');
+  button.disabled = true;
+  button.classList.add('is-loading');
+  if (!overviewLoaded) {
+    state.className = 'overview-state';
+    state.textContent = '正在加载概览数据…';
+  }
+  try {
+    const data = await request('/api/overview');
+    renderOverview(data);
+    overviewLoaded = true;
+    const requests = Number(data.totals?.requests || 0);
+    state.textContent = requests ? '' : '最近 24 小时暂无请求数据。';
+    state.className = requests ? 'overview-state hidden' : 'overview-state empty';
+    byId('overview-updated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+    if (byId('notice').textContent.startsWith('概览数据加载失败')) byId('notice').textContent = '';
+  } catch (error) {
+    if (!overviewLoaded) {
+      state.className = 'overview-state error';
+      state.textContent = '概览数据暂时不可用，请稍后刷新。';
     }
-  }));
-  byId('traffic-table').innerHTML = summaries.map(({ site, points }) => {
-    const total = points.reduce((result, point) => ({ requests: result.requests + Number(point.requests || 0), bytes: result.bytes + Number(point.bytes || 0), errors: result.errors + Number(point.errors || 0), hits: result.hits + Number(point.cache_hits || 0) }), { requests: 0, bytes: 0, errors: 0, hits: 0 });
-    const hitRate = total.requests ? `${((total.hits / total.requests) * 100).toFixed(1)}%` : '-';
-    return `<tr><td>${escapeHTML(site.name)}</td><td>${numberFormatter.format(total.requests)}</td><td>${formatBytes(total.bytes)}</td><td>${numberFormatter.format(total.errors)}</td><td>${hitRate}</td></tr>`;
-  }).join('') || '<tr><td colspan="5" class="muted">暂无站点。</td></tr>';
+    notice(`概览数据加载失败：${error.message}`);
+  } finally {
+    overviewLoading = false;
+    section.setAttribute('aria-busy', 'false');
+    button.disabled = false;
+    button.classList.remove('is-loading');
+  }
+}
+
+function renderOverview(data) {
+  const totals = data.totals || {};
+  const series = Array.isArray(data.series) ? data.series : [];
+  const requests = Number(totals.requests || 0);
+  const errorRequests = Number(totals.error_requests || 0);
+  byId('overview-requests').textContent = formatCompactNumber(requests);
+  byId('overview-traffic').textContent = formatBytes(Number(totals.bytes || 0));
+  byId('overview-error-rate').textContent = formatPercent(requests ? errorRequests / requests : 0);
+
+  renderSparkline(byId('overview-requests-chart'), series.map((point) => Number(point.requests || 0)), '最近 24 小时请求趋势');
+  renderSparkline(byId('overview-traffic-chart'), series.map((point) => Number(point.bytes || 0)), '最近 24 小时流量趋势');
+  renderSparkline(byId('overview-errors-chart'), series.map((point) => {
+    const pointRequests = Number(point.requests || 0);
+    return pointRequests ? Number(point.error_requests || 0) / pointRequests : 0;
+  }), '最近 24 小时错误率趋势');
+  renderStatusCodes(Array.isArray(data.status_codes) ? data.status_codes : [], requests);
+  renderOverviewSites(Array.isArray(data.sites) ? data.sites : []);
+}
+
+function renderSparkline(target, values, label) {
+  target.innerHTML = sparklineSVG(values, label);
+}
+
+function sparklineSVG(values, label) {
+  const data = values.length ? values.map((value) => Math.max(0, Number(value) || 0)) : [0, 0];
+  const width = 300;
+  const height = 80;
+  const padding = 4;
+  const bottom = height - padding;
+  const maximum = Math.max(...data, 0);
+  const points = data.map((value, index) => {
+    const x = data.length === 1 ? width / 2 : padding + (index / (data.length - 1)) * (width - padding * 2);
+    const y = maximum ? bottom - (value / maximum) * (height - padding * 2) : bottom;
+    return [x, y];
+  });
+  const line = points.map(([x, y], index) => `${index ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`).join(' ');
+  const area = `${line} L${points[points.length - 1][0].toFixed(2)} ${bottom} L${points[0][0].toFixed(2)} ${bottom} Z`;
+  const [endX, endY] = points[points.length - 1];
+  const safeLabel = escapeHTML(label);
+  return `<svg class="sparkline" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${safeLabel}"><title>${safeLabel}</title><path class="spark-area" d="${area}"></path><path class="spark-line" d="${line}"></path><circle class="spark-end" cx="${endX.toFixed(2)}" cy="${endY.toFixed(2)}" r="2.8"></circle></svg>`;
+}
+
+function renderStatusCodes(statusCodes, totalRequests) {
+  const entries = statusCodes
+    .map((item) => ({ code: String(item.code), requests: Number(item.requests || 0) }))
+    .filter((item) => item.requests > 0);
+  const displayed = entries.slice(0, 6);
+  const otherRequests = entries.slice(6).reduce((sum, item) => sum + item.requests, 0);
+  if (otherRequests) displayed.push({ code: '其他', requests: otherRequests });
+
+  let offset = 0;
+  const segments = displayed.map((item, index) => {
+    const percentage = totalRequests ? (item.requests / totalRequests) * 100 : 0;
+    const segment = `<circle class="donut-segment" cx="60" cy="60" r="43" pathLength="100" stroke="${overviewStatusColors[index]}" stroke-dasharray="${percentage.toFixed(4)} ${(100 - percentage).toFixed(4)}" stroke-dashoffset="${(-offset).toFixed(4)}" transform="rotate(-90 60 60)"></circle>`;
+    offset += percentage;
+    return segment;
+  }).join('');
+  const totalLabel = formatCompactNumber(totalRequests);
+  const lengthAttribute = totalLabel.length > 6 ? ' textLength="48" lengthAdjust="spacingAndGlyphs"' : '';
+  byId('overview-status-chart').innerHTML = `<svg viewBox="0 0 120 120" aria-hidden="true"><circle class="donut-track" cx="60" cy="60" r="43"></circle>${segments}<text class="donut-total" x="60" y="58"${lengthAttribute}>${escapeHTML(totalLabel)}</text><text class="donut-caption" x="60" y="72">请求</text></svg>`;
+  byId('overview-status-legend').innerHTML = displayed.length ? displayed.map((item, index) => `<li><span class="legend-swatch swatch-${index}" aria-hidden="true"></span><span class="legend-code">${escapeHTML(item.code)}</span><span class="legend-count">${formatCompactNumber(item.requests)}</span></li>`).join('') : '<li class="legend-empty">暂无状态码数据</li>';
+}
+
+function renderOverviewSites(overviewSites) {
+  byId('overview-site-count').textContent = `${numberFormatter.format(overviewSites.length)} 个站点`;
+  byId('overview-site-table').innerHTML = overviewSites.map((site) => {
+    const name = site.name || site.id || '未命名站点';
+    const domains = Array.isArray(site.domains) ? site.domains.filter(Boolean) : [];
+    const domain = domains.length ? `${domains[0]}${domains.length > 1 ? ` 等 ${domains.length} 个域名` : ''}` : '未配置域名';
+    const requests = Number(site.requests || 0);
+    const bytes = Number(site.bytes || 0);
+    const values = Array.isArray(site.series) ? site.series.map((point) => Number(point.requests || 0)) : [];
+    const fullRequests = numberFormatter.format(requests);
+    return `<tr><td><div class="site-identity"><strong title="${escapeHTML(name)}">${escapeHTML(name)}</strong><span class="site-domain" title="${escapeHTML(domains.join(', ') || domain)}">${escapeHTML(domain)}</span></div></td><td><span class="site-request-total" title="${fullRequests} 次请求">${formatCompactNumber(requests)}</span></td><td><span class="site-transfer-total">${formatBytes(bytes)}</span></td><td><div class="site-sparkline">${sparklineSVG(values, `${name} 最近 24 小时请求趋势`)}</div></td></tr>`;
+  }).join('') || '<tr><td colspan="4" class="muted">暂无站点。</td></tr>';
+}
+
+function formatCompactNumber(value) {
+  return compactNumberFormatter.format(Math.max(0, Number(value) || 0));
+}
+
+function formatPercent(value) {
+  return Math.max(0, Number(value) || 0).toLocaleString('zh-CN', { style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function formatBytes(value) {
-  if (!value) return '0 B';
+  value = Number(value) || 0;
+  if (value <= 0) return '0 B';
   const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
   const digits = index ? 1 : 0;
@@ -439,7 +546,7 @@ function formatBytes(value) {
 }
 
 function formatDateTime(value) { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
-function escapeHTML(value) { const element = document.createElement('div'); element.textContent = value || ''; return element.innerHTML; }
+function escapeHTML(value) { const element = document.createElement('div'); element.textContent = value ?? ''; return element.innerHTML; }
 
 async function boot() {
   try {
@@ -527,7 +634,7 @@ byId('login-form').addEventListener('submit', async (event) => {
   } catch (error) { notice(error.message); }
 });
 
-byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); closeNodeUninstall(); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); csrf = ''; setSidebarOpen(false); byId('notice').textContent = ''; hide('app'); hide('logout'); show('auth-shell'); show('login-panel'); byId('login-password').focus(); } });
+byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); closeNodeUninstall(); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); overviewLoaded = false; csrf = ''; setSidebarOpen(false); byId('notice').textContent = ''; hide('app'); hide('logout'); show('auth-shell'); show('login-panel'); byId('login-password').focus(); } });
 
 byId('sidebar-toggle').addEventListener('click', () => setSidebarOpen(!sidebarOpen()));
 byId('sidebar-close').addEventListener('click', () => setSidebarOpen(false, true));
@@ -536,6 +643,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebarOpen()) setSidebarOpen(false, true);
 });
 mobileSidebarQuery.addEventListener('change', syncSidebarMode);
+byId('refresh-overview').addEventListener('click', refreshOverview);
 
 document.querySelectorAll('.nav').forEach((button) => button.addEventListener('click', () => {
   const hash = `#/${button.dataset.view}`;

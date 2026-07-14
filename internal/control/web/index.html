@@ -61,18 +61,71 @@
           <div class="page">
             <div id="notice" role="status" aria-live="polite"></div>
 
-            <section id="overview" class="view">
-          <h1>概览</h1>
-          <div class="metric-grid">
-            <article><span id="node-count">0</span><small>节点总数</small></article>
-            <article><span id="active-node-count">0</span><small>运行中节点</small></article>
-            <article><span id="site-count">0</span><small>站点总数</small></article>
-          </div>
-          <section class="overview-table">
-            <div class="section-heading"><h2>最近 24 小时流量</h2></div>
-            <div class="table-wrap"><table><thead><tr><th>站点</th><th>请求数</th><th>传输量</th><th>5xx</th><th>缓存命中率</th></tr></thead><tbody id="traffic-table"></tbody></table></div>
-          </section>
-        </section>
+            <section id="overview" class="view" aria-busy="true">
+              <div class="dashboard-heading">
+                <div class="heading-copy">
+                  <h1>概览</h1>
+                  <p class="section-meta">边缘请求与传输情况</p>
+                </div>
+                <div class="overview-actions">
+                  <div class="overview-timestamp">
+                    <span class="range-label">最近 24 小时</span>
+                    <span id="overview-updated">等待加载</span>
+                  </div>
+                  <button id="refresh-overview" class="secondary" type="button" title="刷新概览数据">
+                    <span class="refresh-mark" aria-hidden="true">↻</span><span>刷新</span>
+                  </button>
+                </div>
+              </div>
+
+              <div id="overview-state" class="overview-state" role="status" aria-live="polite">正在加载概览数据…</div>
+
+              <div id="overview-content" class="overview-content">
+                <section class="overview-summary" aria-label="最近 24 小时汇总">
+                  <article class="overview-metric requests-metric">
+                    <span class="metric-label">请求</span>
+                    <strong id="overview-requests" class="metric-value">--</strong>
+                    <span class="metric-unit">次请求</span>
+                    <div id="overview-requests-chart" class="metric-chart requests-chart" aria-hidden="true"></div>
+                  </article>
+                  <article class="overview-metric traffic-metric">
+                    <span class="metric-label">流量</span>
+                    <strong id="overview-traffic" class="metric-value">--</strong>
+                    <span class="metric-unit">已传输</span>
+                    <div id="overview-traffic-chart" class="metric-chart traffic-chart" aria-hidden="true"></div>
+                  </article>
+                  <article class="overview-metric errors-metric">
+                    <span class="metric-label">错误率</span>
+                    <strong id="overview-error-rate" class="metric-value">--</strong>
+                    <span class="metric-unit">HTTP 4xx / 5xx</span>
+                    <div id="overview-errors-chart" class="metric-chart errors-chart" aria-hidden="true"></div>
+                  </article>
+                  <article class="overview-metric status-metric">
+                    <span class="metric-label">状态码</span>
+                    <div class="status-overview">
+                      <div id="overview-status-chart" class="status-chart" aria-hidden="true"></div>
+                      <ul id="overview-status-legend" class="status-legend" aria-label="状态码分布"></ul>
+                    </div>
+                  </article>
+                </section>
+
+                <section class="overview-sites">
+                  <div class="section-heading">
+                    <div>
+                      <h2>站点请求趋势</h2>
+                      <p class="section-meta">每小时请求数 · 最近 24 小时</p>
+                    </div>
+                    <span id="overview-site-count" class="overview-site-count">0 个站点</span>
+                  </div>
+                  <div class="table-wrap overview-site-table-wrap">
+                    <table class="overview-site-table">
+                      <thead><tr><th scope="col">站点</th><th scope="col">请求总量</th><th scope="col">传输量</th><th scope="col">24 小时请求趋势</th></tr></thead>
+                      <tbody id="overview-site-table"><tr><td colspan="4" class="muted">正在加载站点数据…</td></tr></tbody>
+                    </table>
+                  </div>
+                </section>
+              </div>
+            </section>
 
             <section id="nodes" class="view hidden">
           <div class="section-heading"><h1>节点</h1><button id="show-node-form">添加节点</button></div>

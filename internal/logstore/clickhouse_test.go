@@ -47,6 +47,29 @@ func TestMetricsDecodesJSONEachRow(t *testing.T) {
 	}
 }
 
+func TestOverviewDecodesHourlyStatusRows(t *testing.T) {
+	from := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	to := from.Add(24 * time.Hour)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query().Get("query")
+		if !strings.Contains(query, "toStartOfHour(timestamp)") || !strings.Contains(query, "GROUP BY hour, site_id, status") {
+			t.Fatalf("unexpected query: %s", query)
+		}
+		if request.URL.Query().Get("param_from") != "2026-01-02 03:04:05" || request.URL.Query().Get("param_to") != "2026-01-03 03:04:05" {
+			t.Fatalf("unexpected time parameters: %s", request.URL.RawQuery)
+		}
+		_, _ = io.WriteString(response, "{\"hour\":\"2026-01-02T04:00:00Z\",\"site_id\":\"site\",\"status\":404,\"requests\":\"7\",\"bytes\":\"700\"}\n")
+	}))
+	defer server.Close()
+	buckets, err := (ClickHouse{Endpoint: server.URL}).Overview(context.Background(), from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0].SiteID != "site" || buckets[0].Status != 404 || buckets[0].Requests != 7 || buckets[0].Bytes != 700 {
+		t.Fatalf("unexpected overview buckets: %#v", buckets)
+	}
+}
+
 func TestClickHouseTimeDecodesNativeDateTimeFormat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		_, _ = io.WriteString(response, "{\"timestamp\":\"2026-01-02 03:04:05.123\",\"node_id\":\"node\",\"site_id\":\"site\",\"client_ip\":\"203.0.113.5\",\"method\":\"GET\",\"path\":\"/a\",\"status\":200,\"bytes\":10,\"duration_ms\":2,\"upstream\":\"origin\",\"cache_status\":\"HIT\"}\n")

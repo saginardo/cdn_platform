@@ -17,7 +17,10 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		`>概览</button>`,
 		`>节点</button>`,
 		`>站点</button>`,
-		`最近 24 小时流量`,
+		`最近 24 小时`,
+		`HTTP 4xx / 5xx`,
+		`站点请求趋势`,
+		`<th scope="col">传输量</th>`,
 		`Cloudflare 区域 ID`,
 		`流式路径（WebSocket / SSE）`,
 		`id="site-client-max-body-size"`,
@@ -36,6 +39,65 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 	for _, unexpected := range []string{">Overview</button>", ">Nodes</button>", ">Sites</button>"} {
 		if strings.Contains(page, unexpected) {
 			t.Fatalf("index.html still contains %q", unexpected)
+		}
+	}
+}
+
+func TestEmbeddedConsoleRendersOverviewChartsAndManualRefresh(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`id="refresh-overview"`,
+		`id="overview-requests-chart"`,
+		`id="overview-traffic-chart"`,
+		`id="overview-errors-chart"`,
+		`id="overview-status-chart"`,
+		`id="overview-status-legend"`,
+		`id="overview-site-table"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"request('/api/overview')",
+		"function sparklineSVG(values, label)",
+		"function renderStatusCodes(statusCodes, totalRequests)",
+		"function renderOverviewSites(overviewSites)",
+		"byId('refresh-overview').addEventListener('click', refreshOverview)",
+		"point.error_requests",
+		"site.bytes",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+	if strings.Contains(script, "refreshTraffic") {
+		t.Fatal("app.js still contains the per-site traffic refresh path")
+	}
+
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(styleContents)
+	for _, expected := range []string{
+		"grid-template-columns: repeat(4, minmax(0, 1fr))",
+		".status-overview",
+		".site-sparkline",
+		"@media (max-width: 1200px)",
+	} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
 		}
 	}
 }

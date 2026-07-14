@@ -19,6 +19,7 @@ type Store interface {
 	Append(ctx context.Context, events []domain.AccessLogEvent) error
 	Recent(ctx context.Context, siteID string, limit int) ([]domain.AccessLogEvent, error)
 	Metrics(ctx context.Context, siteID string, since time.Time) ([]MinuteMetric, error)
+	Overview(ctx context.Context, from, to time.Time) ([]OverviewBucket, error)
 }
 
 type MinuteMetric struct {
@@ -27,6 +28,14 @@ type MinuteMetric struct {
 	Bytes     int64     `json:"bytes"`
 	Errors    uint64    `json:"errors"`
 	CacheHits uint64    `json:"cache_hits"`
+}
+
+type OverviewBucket struct {
+	Hour     time.Time `json:"hour"`
+	SiteID   string    `json:"site_id"`
+	Status   uint16    `json:"status"`
+	Requests uint64    `json:"requests"`
+	Bytes    int64     `json:"bytes"`
 }
 
 type ClickHouse struct {
@@ -144,6 +153,32 @@ func (c ClickHouse) Metrics(ctx context.Context, siteID string, since time.Time)
 	return metrics, nil
 }
 
+func (c ClickHouse) Overview(ctx context.Context, from, to time.Time) ([]OverviewBucket, error) {
+	query := `SELECT toStartOfHour(timestamp) AS hour, site_id, status, count() AS requests, sum(bytes) AS bytes FROM ` + identifier(c.database()) + `.cdn_access_logs WHERE timestamp >= {from:DateTime} AND timestamp < {to:DateTime} GROUP BY hour, site_id, status ORDER BY hour, site_id, status FORMAT JSONEachRow`
+	parameters := url.Values{
+		"param_from": {from.UTC().Format("2006-01-02 15:04:05")},
+		"param_to":   {to.UTC().Format("2006-01-02 15:04:05")},
+	}
+	response, err := c.request(ctx, c.database(), query, nil, parameters)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	buckets := make([]OverviewBucket, 0)
+	decoder := json.NewDecoder(response.Body)
+	for {
+		var bucket OverviewBucket
+		if err := decoder.Decode(&bucket); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		buckets = append(buckets, bucket)
+	}
+	return buckets, nil
+}
+
 func (c ClickHouse) query(ctx context.Context, query string, body *bytes.Buffer) error {
 	return c.queryInDatabase(ctx, c.database(), query, body)
 }
@@ -233,6 +268,9 @@ func (Noop) Recent(context.Context, string, int) ([]domain.AccessLogEvent, error
 func (Noop) Metrics(context.Context, string, time.Time) ([]MinuteMetric, error) {
 	return []MinuteMetric{}, nil
 }
+func (Noop) Overview(context.Context, time.Time, time.Time) ([]OverviewBucket, error) {
+	return []OverviewBucket{}, nil
+}
 
 type accessLogRow struct {
 	Timestamp   string `json:"timestamp"`
@@ -287,6 +325,43 @@ func (m *MinuteMetric) UnmarshalJSON(contents []byte) error {
 	}
 	*m = MinuteMetric{Minute: minute, Requests: row.Requests, Bytes: row.Bytes, Errors: row.Errors, CacheHits: row.CacheHits}
 	return nil
+}
+
+func (b *OverviewBucket) UnmarshalJSON(contents []byte) error {
+	var row struct {
+		Hour     string          `json:"hour"`
+		SiteID   string          `json:"site_id"`
+		Status   uint16          `json:"status"`
+		Requests json.RawMessage `json:"requests"`
+		Bytes    json.RawMessage `json:"bytes"`
+	}
+	if err := json.Unmarshal(contents, &row); err != nil {
+		return err
+	}
+	hour, err := parseClickHouseTime(row.Hour)
+	if err != nil {
+		return fmt.Errorf("decode overview hour: %w", err)
+	}
+	requests, err := parseJSONUint64(row.Requests)
+	if err != nil {
+		return fmt.Errorf("decode overview requests: %w", err)
+	}
+	bytes, err := parseJSONInt64(row.Bytes)
+	if err != nil {
+		return fmt.Errorf("decode overview bytes: %w", err)
+	}
+	*b = OverviewBucket{Hour: hour, SiteID: row.SiteID, Status: row.Status, Requests: requests, Bytes: bytes}
+	return nil
+}
+
+func parseJSONUint64(contents json.RawMessage) (uint64, error) {
+	value := strings.Trim(string(contents), `"`)
+	return strconv.ParseUint(value, 10, 64)
+}
+
+func parseJSONInt64(contents json.RawMessage) (int64, error) {
+	value := strings.Trim(string(contents), `"`)
+	return strconv.ParseInt(value, 10, 64)
 }
 
 func parseClickHouseTime(value string) (time.Time, error) {

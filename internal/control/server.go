@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.requireAdmin(s.logout))
 	mux.HandleFunc("GET /api/session", s.requireAdmin(s.session))
+	mux.HandleFunc("GET /api/overview", s.requireAdmin(s.overview))
 	mux.HandleFunc("GET /api/nodes", s.requireAdmin(s.listNodes))
 	mux.HandleFunc("POST /api/nodes", s.requireAdmin(s.createNode))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))

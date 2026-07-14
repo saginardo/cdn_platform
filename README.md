@@ -49,14 +49,14 @@ go test ./...
 
 ## Control-plane installation
 
-Docker Compose is the supported deployment for the control plane and ClickHouse. It keeps configuration, SQLite, the internal CA, certificate state, ClickHouse data, logs, and backup staging below `/srv/cdn-platform`. The existing public reverse proxy can remain separate; the controller still terminates TLS on its direct port for edge mTLS. See [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md) for installation, backup, and restore instructions.
+Docker Compose is the supported deployment for the control plane and ClickHouse. It keeps configuration, SQLite, the internal CA, certificate state, ClickHouse data, logs, and backup staging below `/opt/cdn-platform`. The existing public reverse proxy can remain separate; the controller still terminates TLS on its direct port for edge mTLS. See [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md) for installation, backup, and restore instructions.
 
 On a fresh Debian 12 control VPS with Docker Engine and Docker Compose, run from a trusted checkout:
 
 ```bash
-sudo ./scripts/install-control-compose.sh /srv/cdn-platform
-sudoedit /srv/cdn-platform/config/control.env
-cd /srv/cdn-platform
+sudo ./scripts/install-control-compose.sh /opt/cdn-platform
+sudoedit /opt/cdn-platform/config/control.env
+cd /opt/cdn-platform
 sudo docker compose config --quiet
 sudo docker compose build control
 sudo docker compose run --rm --no-deps control keygen

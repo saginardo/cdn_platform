@@ -7,7 +7,7 @@ Docker Compose is the supported control-plane deployment. Edge nodes use the hos
 The installer creates one operational and backup boundary:
 
 ```text
-/srv/cdn-platform/
+/opt/cdn-platform/
   app/                         pinned source used for local image builds
   compose.yaml
   .env
@@ -33,9 +33,9 @@ The shared host-network Caddy installation stays outside this directory. It prox
 Run from a trusted repository checkout on a Debian 12 host with Docker Engine and Docker Compose:
 
 ```bash
-sudo ./scripts/install-control-compose.sh /srv/cdn-platform
-sudoedit /srv/cdn-platform/config/control.env
-cd /srv/cdn-platform
+sudo ./scripts/install-control-compose.sh /opt/cdn-platform
+sudoedit /opt/cdn-platform/config/control.env
+cd /opt/cdn-platform
 sudo docker compose config --quiet
 sudo docker compose build control
 sudo docker compose run --rm --no-deps control keygen
@@ -60,14 +60,14 @@ The backup container uses SQLite's online backup API and a native ClickHouse `BA
 Initialize a new Restic repository once before starting the scheduler:
 
 ```bash
-cd /srv/cdn-platform
+cd /opt/cdn-platform
 sudo docker compose --profile backup run --rm --entrypoint restic backup init
 ```
 
 Start the optional scheduler only after these values are complete:
 
 ```bash
-cd /srv/cdn-platform
+cd /opt/cdn-platform
 sudo docker compose --profile backup up -d backup
 sudo docker compose --profile backup run --rm --entrypoint \
   /usr/local/lib/cdn-platform/compose-backup.sh backup
@@ -80,7 +80,7 @@ The default schedule is 03:25 Asia/Shanghai with up to 20 minutes of random dela
 On a replacement host, install the same source revision and populate `config/backup.env`, `config/restic-password`, and the S3 credentials from the offline recovery record. Do not initialize the control plane first. Then run:
 
 ```bash
-sudo CDN_PLATFORM_ROOT=/srv/cdn-platform \
+sudo CDN_PLATFORM_ROOT=/opt/cdn-platform \
   ./app/scripts/restore-control-compose.sh latest
 ```
 

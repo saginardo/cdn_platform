@@ -106,7 +106,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 | 管理域名 | `https://control.example.com` |
 | 控制面监听 | Compose `control` 使用 host network 监听 `${CONTROL_MTLS_PORT}`；公网 443 由共享反向代理接入。 |
 | 控制服务 | Compose `control`、`clickhouse`、`control-cert-renew` 应保持运行并通过健康检查。 |
-| 数据目录 | 统一根目录 `/srv/cdn-platform`；配置、control 数据、ClickHouse、证书、日志、备份和 rollback 均在其下。 |
+| 数据目录 | 统一根目录 `/opt/cdn-platform`；配置、control 数据、ClickHouse、证书、日志、备份和 rollback 均在其下。 |
 | ClickHouse | Compose `clickhouse` 固定为 `26.6.1.1193`，HTTP 仅映射到 `127.0.0.1:${CLICKHOUSE_HTTP_PORT}`。 |
 | ClickHouse 验收 | 原始访问日志和分钟聚合应持续写入；具体数量不记录在仓库中。 |
 | TLS | Compose 内使用 Cloudflare DNS-01 独立签发并每 12 小时检查续期；主控支持无重启热加载。 |
@@ -121,10 +121,10 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 
 - 管理 UI/API 走 `control.example.com` 的公网 HTTPS 地址。
 - Edge agent 使用 `EDGE_CONTROL_URL=https://control.example.com:${CONTROL_MTLS_PORT}` 直接进行 mTLS 通信，不经过公网管理反向代理。
-- 控制容器使用 UID/GID `10001`，仅写 `/srv/cdn-platform/data/control` 和 Certbot 日志；ClickHouse 数据由 UID/GID `101` 持有。
+- 控制容器使用 UID/GID `10001`，仅写 `/opt/cdn-platform/data/control` 和 Certbot 日志；ClickHouse 数据由 UID/GID `101` 持有。
 - Edge agent 以 root 运行以写入 Nginx 配置、站点证书和执行 reload；其 systemd 服务同样设置 `LimitNOFILE=65536`。
 - Edge 持久备份边界为 `/opt/cdn-edge/config` 与 `/opt/cdn-edge/data`；缓存可重建，访问日志在已上传到主控后可不纳入节点备份。
-- Cloudflare API 令牌、控制面加密密钥等均在 `/srv/cdn-platform/config/control.env`，文档和日志中不应记录其值。
+- Cloudflare API 令牌、控制面加密密钥等均在 `/opt/cdn-platform/config/control.env`，文档和日志中不应记录其值。
 
 ## 6. 已完成的近期修复
 
@@ -149,7 +149,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 
 ### P1：完成可用性与运维闭环
 
-- 配置 `/srv/cdn-platform/config/backup.env`、Restic 密码和 S3 兼容存储凭据，初始化仓库并启用 Compose `backup` profile；隔离备份恢复已通过，生产仓库尚未配置。
+- 配置 `/opt/cdn-platform/config/backup.env`、Restic 密码和 S3 兼容存储凭据，初始化仓库并启用 Compose `backup` profile；隔离备份恢复已通过，生产仓库尚未配置。
 - 使用现有两个独立边缘节点完成 DNS 健康摘除/恢复、源站 CIDR 白名单与故障切换演练。
 - 对 Cloudflare DNS 记录、站点源站防火墙和控制面 `${CONTROL_MTLS_PORT}` 访问规则做一次上线检查，确保业务记录为 DNS-only，源站仅放行边缘 IP。
 - 为 ClickHouse 磁盘容量、日志写入失败和备份失败配置外部告警；当前本地日志和指标功能已启动，但尚未完成容量/告警演练。
@@ -182,8 +182,8 @@ node --check internal/control/web/app.js
 
 ### 发布控制面
 
-1. 将受信任的源码同步到 `control-host:/srv/cdn-platform/app`，并保持 `/srv/cdn-platform/compose.yaml` 使用同一版本。
-2. 在 `/srv/cdn-platform` 执行 `docker compose build control` 和 `docker compose up -d`。
+1. 将受信任的源码同步到 `control-host:/opt/cdn-platform/app`，并保持 `/opt/cdn-platform/compose.yaml` 使用同一版本。
+2. 在 `/opt/cdn-platform` 执行 `docker compose build control` 和 `docker compose up -d`。
 3. 检查 `docker compose ps`、控制容器日志和 `https://control.example.com/healthz`。
 4. 需要更新已发布站点的 Nginx 渲染逻辑时，执行 `docker compose run --rm --no-deps control publish-all`，使 edge agent 拉取新的 desired state。
 
@@ -199,12 +199,12 @@ node --check internal/control/web/app.js
 
 ```bash
 # 控制面
-cd /srv/cdn-platform
+cd /opt/cdn-platform
 sudo docker compose ps
 curl -fsS https://control.example.com/healthz
 
 # 控制面数据库中的节点和站点状态
-sudo sqlite3 -header -column /srv/cdn-platform/data/control/control.db \
+sudo sqlite3 -header -column /opt/cdn-platform/data/control/control.db \
   'select name, public_ipv4, status, applied_version, last_error from nodes;'
 
 # 边缘

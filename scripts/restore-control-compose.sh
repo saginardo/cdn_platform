@@ -7,7 +7,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 2
 fi
 
-root="${CDN_PLATFORM_ROOT:-/srv/cdn-platform}"
+root="${CDN_PLATFORM_ROOT:-/opt/cdn-platform}"
 snapshot="${1:-latest}"
 restore_dir=$(mktemp -d /tmp/cdn-platform-restore.XXXXXX)
 trap 'rm -rf "$restore_dir"' EXIT

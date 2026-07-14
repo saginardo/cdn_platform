@@ -10,7 +10,7 @@ if [[ ! -f compose.yaml || ! -f Dockerfile || ! -f go.mod ]]; then
   exit 2
 fi
 
-root="${1:-/srv/cdn-platform}"
+root="${1:-/opt/cdn-platform}"
 source_dir="$root/app"
 install -d -m 0750 "$root" "$source_dir" "$root/config" "$root/backup/staging/clickhouse"
 install -d -o 10001 -g 10001 -m 0750 \

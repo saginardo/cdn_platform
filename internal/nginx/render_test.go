@@ -13,13 +13,21 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "client_max_body_size 128m;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Connection \"\";", "location @cdn_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health"} {
+	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "client_max_body_size 128m;", "keepalive_timeout 300s;", "keepalive_requests 1000;", "keepalive 30;", "proxy_connect_timeout 10s;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Connection \"\";", "location @cdn_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health"} {
 		if !strings.Contains(configuration, expected) {
 			t.Fatalf("missing %q from config:\n%s", expected, configuration)
 		}
 	}
 	if got := strings.Count(configuration, "proxy_set_header Connection \"\";"); got != 2 {
 		t.Fatalf("expected Connection header to be cleared in both regular proxy locations, got %d:\n%s", got, configuration)
+	}
+	if got := strings.Count(configuration, "keepalive 30;"); got != 2 {
+		t.Fatalf("expected one 30-connection pool for each upstream, got %d:\n%s", got, configuration)
+	}
+	for _, retired := range []string{"keepalive 32;", "proxy_connect_timeout 5s;", "grpc_connect_timeout 5s;"} {
+		if strings.Contains(configuration, retired) {
+			t.Fatalf("configuration still contains retired connection setting %q:\n%s", retired, configuration)
+		}
 	}
 	if strings.Contains(configuration, "max_size=50g") {
 		t.Fatalf("configuration still uses the retired 50g default:\n%s", configuration)
@@ -58,7 +66,7 @@ func TestRenderEmptyNodeConfigurationDoesNotReferenceSiteVariables(t *testing.T)
 	if !strings.Contains(configuration, "location = /__cdn_health") {
 		t.Fatalf("empty node configuration lost the health endpoint:\n%s", configuration)
 	}
-	for _, unexpected := range []string{"$cdn_site_id", "proxy_cache_path", "log_format cdn_json", "client_max_body_size"} {
+	for _, unexpected := range []string{"$cdn_site_id", "proxy_cache_path", "log_format cdn_json", "client_max_body_size", "keepalive_timeout", "keepalive_requests"} {
 		if strings.Contains(configuration, unexpected) {
 			t.Fatalf("empty node configuration contains %q:\n%s", unexpected, configuration)
 		}
@@ -102,6 +110,7 @@ func TestRenderAddsStreamingLocationsForWebSocketAndSSE(t *testing.T) {
 		"proxy_cache off",
 		"proxy_buffering off",
 		"proxy_request_buffering off",
+		"proxy_connect_timeout 10s",
 		"proxy_read_timeout 1h",
 		"proxy_send_timeout 1h",
 	} {
@@ -127,6 +136,7 @@ func TestRenderPassthroughDisablesCacheAndForwardsRanges(t *testing.T) {
 		"proxy_cache off;",
 		"proxy_buffering off;",
 		"proxy_request_buffering off;",
+		"proxy_connect_timeout 10s;",
 		"proxy_read_timeout 1h;",
 		"proxy_send_timeout 1h;",
 		"proxy_set_header Range $http_range;",
@@ -159,6 +169,7 @@ func TestRenderUsesGRPCPassForGRPCOrigin(t *testing.T) {
 		"listen 443 ssl http2",
 		"grpc_pass grpcs://origin_grpc-site",
 		"grpc_set_header TE trailers",
+		"grpc_connect_timeout 10s",
 		"grpc_read_timeout 1h",
 		"grpc_ssl_server_name on",
 		"grpc_ssl_name origin.example.test",

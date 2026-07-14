@@ -98,3 +98,57 @@ func TestEmbeddedConsolePreservesSelectedViewInURLHash(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`id="app" class="console-shell hidden"`,
+		`<aside id="sidebar" class="sidebar" aria-label="控制台导航">`,
+		`<nav class="side-nav" aria-label="主导航">`,
+		`id="sidebar-toggle"`,
+		`aria-controls="sidebar"`,
+		`id="sidebar-backdrop"`,
+		`id="mobile-page-title"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(styleContents)
+	for _, expected := range []string{
+		"grid-template-columns: 208px minmax(0, 1fr)",
+		"body.sidebar-open .sidebar",
+		"@media (max-width: 800px)",
+		".page { width: 100%",
+	} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
+		}
+	}
+
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"const viewLabels = { overview: '概览', nodes: '节点', sites: '站点' }",
+		"function setSidebarOpen(open, restoreFocus = false)",
+		"setAttribute('aria-expanded', String(open))",
+		"event.key === 'Escape'",
+		"mobileSidebarQuery.addEventListener('change', syncSidebarMode)",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+}

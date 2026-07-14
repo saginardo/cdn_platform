@@ -31,6 +31,8 @@ const taskStatusLabels = {
 const defaultClientMaxBodySizeMB = 128;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const consoleViews = new Set(['overview', 'nodes', 'sites']);
+const viewLabels = { overview: '概览', nodes: '节点', sites: '站点' };
+const mobileSidebarQuery = window.matchMedia('(max-width: 800px)');
 
 const byId = (id) => document.getElementById(id);
 const split = (value) => value.split(',').map((item) => item.trim()).filter(Boolean);
@@ -53,7 +55,12 @@ async function request(path, options = {}) {
   return data;
 }
 
-function notice(message, success = false) { const box = byId('notice'); box.textContent = message; box.className = success ? 'success' : ''; }
+function notice(message, success = false) {
+  const target = byId('app').classList.contains('hidden') ? 'auth-notice' : 'notice';
+  const box = byId(target);
+  box.textContent = message;
+  box.className = success ? (target === 'auth-notice' ? 'auth-notice success' : 'success') : (target === 'auth-notice' ? 'auth-notice' : '');
+}
 function show(id) { byId(id).classList.remove('hidden'); }
 function hide(id) { byId(id).classList.add('hidden'); }
 
@@ -453,13 +460,38 @@ function viewFromLocation() {
   return consoleViews.has(view) ? view : 'overview';
 }
 
+function sidebarOpen() { return document.body.classList.contains('sidebar-open'); }
+
+function syncSidebarMode() {
+  const open = mobileSidebarQuery.matches && sidebarOpen() && !byId('app').classList.contains('hidden');
+  document.body.classList.toggle('sidebar-open', open);
+  byId('sidebar-toggle').setAttribute('aria-expanded', String(open));
+  byId('sidebar-toggle').setAttribute('aria-label', open ? '关闭导航' : '打开导航');
+  if (mobileSidebarQuery.matches) byId('sidebar').setAttribute('aria-hidden', String(!open));
+  else byId('sidebar').removeAttribute('aria-hidden');
+}
+
+function setSidebarOpen(open, restoreFocus = false) {
+  const shouldOpen = Boolean(open && mobileSidebarQuery.matches && !byId('app').classList.contains('hidden'));
+  document.body.classList.toggle('sidebar-open', shouldOpen);
+  syncSidebarMode();
+  if (shouldOpen) {
+    window.requestAnimationFrame(() => (document.querySelector('.nav.active') || document.querySelector('.nav'))?.focus());
+  } else if (restoreFocus && !byId('app').classList.contains('hidden')) {
+    byId('sidebar-toggle').focus();
+  }
+}
+
 function activateView(view) {
+  const restoreSidebarFocus = sidebarOpen();
   document.querySelectorAll('.nav').forEach((button) => {
     const active = button.dataset.view === view;
     button.classList.toggle('active', active);
     if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
   });
   document.querySelectorAll('.view').forEach((section) => section.classList.toggle('hidden', section.id !== view));
+  byId('mobile-page-title').textContent = viewLabels[view] || viewLabels.overview;
+  setSidebarOpen(false, restoreSidebarFocus);
 }
 
 function syncViewFromLocation() { activateView(viewFromLocation()); }
@@ -467,9 +499,12 @@ function syncViewFromLocation() { activateView(viewFromLocation()); }
 function showApp() {
   hide('setup-panel');
   hide('login-panel');
-  syncViewFromLocation();
+  hide('auth-shell');
   show('app');
   show('logout');
+  byId('auth-notice').textContent = '';
+  syncViewFromLocation();
+  syncSidebarMode();
   refresh().catch((error) => notice(error.message));
 }
 
@@ -492,7 +527,15 @@ byId('login-form').addEventListener('submit', async (event) => {
   } catch (error) { notice(error.message); }
 });
 
-byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); closeNodeUninstall(); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); csrf = ''; hide('app'); hide('logout'); show('login-panel'); } });
+byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); closeNodeUninstall(); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); csrf = ''; setSidebarOpen(false); byId('notice').textContent = ''; hide('app'); hide('logout'); show('auth-shell'); show('login-panel'); byId('login-password').focus(); } });
+
+byId('sidebar-toggle').addEventListener('click', () => setSidebarOpen(!sidebarOpen()));
+byId('sidebar-close').addEventListener('click', () => setSidebarOpen(false, true));
+byId('sidebar-backdrop').addEventListener('click', () => setSidebarOpen(false, true));
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && sidebarOpen()) setSidebarOpen(false, true);
+});
+mobileSidebarQuery.addEventListener('change', syncSidebarMode);
 
 document.querySelectorAll('.nav').forEach((button) => button.addEventListener('click', () => {
   const hash = `#/${button.dataset.view}`;
@@ -627,4 +670,5 @@ document.addEventListener('click', async (event) => {
   } catch (error) { notice(error.message); }
 });
 
+syncSidebarMode();
 boot();

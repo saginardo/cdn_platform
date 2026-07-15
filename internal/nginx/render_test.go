@@ -134,6 +134,52 @@ func TestRenderOnlyUsesTLSUpstreamDirectivesForHTTPSOrigins(t *testing.T) {
 	}
 }
 
+func TestRenderUsesIndependentTLSServerNamesForIPOrigins(t *testing.T) {
+	backup := domain.Origin{URL: "https://203.0.113.21:443", HostHeader: "backup.dustvm.de", TLSServerName: "backup.dustvm.de", Enabled: true}
+	configuration, err := Render([]domain.Site{{
+		ID: "ip-origin", Name: "ip-origin", Domains: []string{"lax.dustvm.de"},
+		PrimaryOrigin: domain.Origin{URL: "https://203.0.113.20:443", HostHeader: "lax.dustvm.de", TLSServerName: "lax.dustvm.de", Enabled: true},
+		BackupOrigin:  &backup, Enabled: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"server 203.0.113.20:443", "server 203.0.113.21:443",
+		"proxy_set_header Host lax.dustvm.de", "proxy_set_header Host backup.dustvm.de",
+		"proxy_ssl_name lax.dustvm.de", "proxy_ssl_name backup.dustvm.de",
+		"proxy_ssl_verify on", "proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt",
+	} {
+		if !strings.Contains(configuration, expected) {
+			t.Fatalf("missing %q from IP origin config:\n%s", expected, configuration)
+		}
+	}
+	if strings.Contains(configuration, "proxy_ssl_name 203.0.113.") {
+		t.Fatalf("IP connection address leaked into TLS certificate name:\n%s", configuration)
+	}
+	if got := strings.Count(configuration, "proxy_ssl_name lax.dustvm.de;"); got != 2 {
+		t.Fatalf("expected primary SNI in regular and stream locations, got %d:\n%s", got, configuration)
+	}
+	if got := strings.Count(configuration, "proxy_ssl_name backup.dustvm.de;"); got != 2 {
+		t.Fatalf("expected backup SNI in regular and stream locations, got %d:\n%s", got, configuration)
+	}
+}
+
+func TestRenderUsesIndependentTLSServerNameForWSSOrigin(t *testing.T) {
+	configuration, err := Render([]domain.Site{{
+		ID: "wss-ip", Name: "wss-ip", Domains: []string{"ws.dustvm.de"},
+		PrimaryOrigin: domain.Origin{URL: "wss://203.0.113.20:443", HostHeader: "ws.dustvm.de", TLSServerName: "ws.dustvm.de", Enabled: true}, Enabled: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"server 203.0.113.20:443", "proxy_set_header Host ws.dustvm.de", "proxy_ssl_name ws.dustvm.de", "proxy_ssl_verify on"} {
+		if !strings.Contains(configuration, expected) {
+			t.Fatalf("missing %q from WSS IP origin config:\n%s", expected, configuration)
+		}
+	}
+}
+
 func TestRenderAutomaticallyRoutesWebSocketAndSSEWithoutPaths(t *testing.T) {
 	configuration, err := Render([]domain.Site{{
 		ID: "site-1", Name: "streaming", Domains: []string{"stream.example.test"},
@@ -266,5 +312,30 @@ func TestRenderUsesGRPCPassForGRPCOrigin(t *testing.T) {
 	}
 	if strings.Contains(configuration, "listen 443 ssl http2") {
 		t.Fatalf("configuration still uses the deprecated HTTP/2 listen parameter:\n%s", configuration)
+	}
+}
+
+func TestRenderUsesIndependentTLSServerNamesForGRPCSIPOrigins(t *testing.T) {
+	backup := domain.Origin{URL: "grpcs://203.0.113.31:443", HostHeader: "grpc-backup.dustvm.de", TLSServerName: "grpc-backup.dustvm.de", Enabled: true}
+	configuration, err := Render([]domain.Site{{
+		ID: "grpc-ip", Name: "grpc-ip", Domains: []string{"grpc.dustvm.de"},
+		PrimaryOrigin: domain.Origin{URL: "grpcs://203.0.113.30:443", HostHeader: "grpc.dustvm.de", TLSServerName: "grpc.dustvm.de", Enabled: true},
+		BackupOrigin:  &backup, Enabled: true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"server 203.0.113.30:443", "server 203.0.113.31:443",
+		"grpc_set_header Host grpc.dustvm.de", "grpc_set_header Host grpc-backup.dustvm.de",
+		"grpc_ssl_name grpc.dustvm.de", "grpc_ssl_name grpc-backup.dustvm.de",
+		"grpc_ssl_verify on", "grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt",
+	} {
+		if !strings.Contains(configuration, expected) {
+			t.Fatalf("missing %q from GRPCS IP origin config:\n%s", expected, configuration)
+		}
+	}
+	if strings.Contains(configuration, "grpc_ssl_name 203.0.113.") {
+		t.Fatalf("IP connection address leaked into gRPC TLS certificate name:\n%s", configuration)
 	}
 }

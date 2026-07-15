@@ -12,6 +12,15 @@ let uninstallCommand = '';
 let uninstallActionPending = false;
 let overviewLoading = false;
 let overviewLoaded = false;
+let overviewData = null;
+let overviewSiteMetric = 'requests';
+let logLoading = false;
+let logLoaded = false;
+let logSearchInitialized = false;
+let logPageOffset = 0;
+let logPageHasMore = false;
+let logQueryState = null;
+let logRequestController = null;
 let routeDataReady = false;
 let activeRoute = { view: 'overview', page: 'main', siteID: '' };
 let acceptedHash = '#/overview';
@@ -40,8 +49,8 @@ const defaultClientMaxBodySizeMB = 128;
 const defaultReadWriteTimeoutSeconds = 360;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const compactNumberFormatter = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
-const consoleViews = new Set(['overview', 'nodes', 'sites']);
-const viewLabels = { overview: '概览', nodes: '节点', sites: '站点' };
+const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites']);
+const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点' };
 const mobileSidebarQuery = window.matchMedia('(max-width: 800px)');
 const overviewStatusColors = ['#3274d9', '#168a7a', '#6d5bc5', '#d29224', '#c44f4f', '#2b8fa3', '#8b99a2'];
 
@@ -81,6 +90,7 @@ async function refresh() {
   byId('site-list-meta').textContent = `${numberFormatter.format(sites.length)} 个站点 · ${numberFormatter.format(sites.filter((site) => site.enabled && site.published).length)} 个已发布`;
   byId('node-table').innerHTML = nodes.map(renderNodeRow).join('');
   renderSites();
+  renderLogFilterOptions();
   syncRouteFromLocation({ forceForm: !siteFormDirty(), focus: false });
   void refreshOverview();
   await Promise.all([refreshTLSStatuses(), refreshPublishStatuses()]);
@@ -187,8 +197,21 @@ function tlsStatusMarkup(tlsStatus) {
   return `<span class="status ${escapeHTML(task.status)}">${escapeHTML(taskStatusLabel(task.status))}</span>`;
 }
 
-function originScheme(site) {
-  try { return new URL(site.primary_origin.url).protocol.replace(':', ''); } catch (_) { return ''; }
+function originURLScheme(value) {
+  try { return new URL(value).protocol.replace(':', '').toLowerCase(); } catch (_) { return ''; }
+}
+
+function originURLUsesTLS(value) { return ['https', 'wss', 'grpcs'].includes(originURLScheme(value)); }
+
+function originScheme(site) { return originURLScheme(site.primary_origin.url); }
+
+function updateOriginTLSFields() {
+  const primaryUsesTLS = originURLUsesTLS(byId('site-primary-url').value);
+  const backupUsesTLS = originURLUsesTLS(byId('site-backup-url').value);
+  byId('site-primary-tls-name-wrap').classList.toggle('hidden', !primaryUsesTLS);
+  byId('site-backup-tls-name-wrap').classList.toggle('hidden', !backupUsesTLS);
+  byId('site-primary-tls-name').disabled = !primaryUsesTLS;
+  byId('site-backup-tls-name').disabled = !backupUsesTLS;
 }
 
 function siteProtocol(site) {
@@ -205,6 +228,7 @@ function siteCacheable(site) {
 
 function updateSiteFormPreview(savedSite = null) {
   if (!siteFormReady || activeRoute.view !== 'sites' || activeRoute.page === 'list') return;
+  updateOriginTLSFields();
   const payload = siteFormPayload();
   const draft = {
     ...(savedSite || {}),
@@ -470,14 +494,21 @@ async function refreshOverview() {
   if (overviewLoading) return;
   overviewLoading = true;
   const section = byId('overview');
-  const button = byId('refresh-overview');
+  const buttons = [byId('refresh-overview'), byId('refresh-site-analytics')];
   const state = byId('overview-state');
   section.setAttribute('aria-busy', 'true');
-  button.disabled = true;
-  button.classList.add('is-loading');
+  buttons.forEach((button) => {
+    button.disabled = true;
+    button.classList.add('is-loading');
+  });
   if (!overviewLoaded) {
     state.className = 'overview-state';
     state.textContent = '正在加载概览数据…';
+    if (activeRoute.view === 'overview' && activeRoute.page === 'site-analytics') {
+      byId('overview-site-detail-state').className = 'overview-state';
+      byId('overview-site-detail-state').textContent = '正在加载站点请求数据…';
+      hide('overview-site-detail-content');
+    }
   }
   try {
     const data = await request('/api/overview');
@@ -492,17 +523,231 @@ async function refreshOverview() {
     if (!overviewLoaded) {
       state.className = 'overview-state error';
       state.textContent = '概览数据暂时不可用，请稍后刷新。';
+      if (activeRoute.view === 'overview' && activeRoute.page === 'site-analytics') {
+        byId('overview-site-detail-state').className = 'overview-state error';
+        byId('overview-site-detail-state').textContent = '站点请求数据暂时不可用，请稍后刷新。';
+        hide('overview-site-detail-content');
+      }
     }
     notice(`概览数据加载失败：${error.message}`);
   } finally {
     overviewLoading = false;
     section.setAttribute('aria-busy', 'false');
-    button.disabled = false;
-    button.classList.remove('is-loading');
+    buttons.forEach((button) => {
+      button.disabled = false;
+      button.classList.remove('is-loading');
+    });
   }
 }
 
+function renderLogFilterOptions() {
+  const siteSelect = byId('log-site');
+  const nodeSelect = byId('log-node');
+  const selectedSite = siteSelect.value;
+  const selectedNode = nodeSelect.value;
+  const siteOptions = [...sites].sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id), 'zh-CN'));
+  const nodeOptions = [...nodes].sort((left, right) => String(left.name || left.id).localeCompare(String(right.name || right.id), 'zh-CN'));
+  siteSelect.innerHTML = `<option value="">全部站点</option>${siteOptions.map((site) => `<option value="${escapeHTML(site.id)}">${escapeHTML(site.name || site.id)}</option>`).join('')}`;
+  nodeSelect.innerHTML = `<option value="">全部节点</option>${nodeOptions.map((node) => `<option value="${escapeHTML(node.id)}">${escapeHTML(node.name || node.id)}</option>`).join('')}`;
+  if (siteOptions.some((site) => site.id === selectedSite)) siteSelect.value = selectedSite;
+  if (nodeOptions.some((node) => node.id === selectedNode)) nodeSelect.value = selectedNode;
+}
+
+function initializeLogSearch() {
+  if (logSearchInitialized) return;
+  logSearchInitialized = true;
+  resetLogSearchForm();
+  if (routeDataReady) void runLogSearch();
+}
+
+function resetLogSearchForm() {
+  byId('log-time-range').value = '1h';
+  byId('log-status').value = '';
+  byId('log-path').value = '';
+  byId('log-client-ip').value = '';
+  byId('log-site').value = '';
+  byId('log-node').value = '';
+  byId('log-method').value = '';
+  byId('log-cache-status').value = '';
+  byId('log-from').value = '';
+  byId('log-to').value = '';
+  toggleLogCustomRange();
+  logLoaded = false;
+  logQueryState = null;
+  logPageOffset = 0;
+  logPageHasMore = false;
+  byId('log-table').innerHTML = '';
+  hide('log-results-content');
+  renderLogPagination();
+}
+
+function toggleLogCustomRange() {
+  const custom = byId('log-time-range').value === 'custom';
+  byId('log-from-wrap').classList.toggle('hidden', !custom);
+  byId('log-to-wrap').classList.toggle('hidden', !custom);
+  if (custom) {
+    const now = new Date();
+    if (!byId('log-to').value) byId('log-to').value = formatDateTimeLocal(now);
+    if (!byId('log-from').value) byId('log-from').value = formatDateTimeLocal(new Date(now.getTime() - 60 * 60 * 1000));
+  }
+}
+
+function formatDateTimeLocal(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function logSearchWindow(keepWindow) {
+  if (keepWindow && logQueryState) return { from: new Date(logQueryState.from), to: new Date(logQueryState.to) };
+  const range = byId('log-time-range').value;
+  const to = new Date();
+  if (range === 'custom') {
+    const from = new Date(byId('log-from').value);
+    const customTo = new Date(byId('log-to').value);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(customTo.getTime())) throw new Error('请填写有效的自定义时间范围');
+    return { from, to: customTo };
+  }
+  const durations = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000, '6h': 6 * 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000, '7d': 7 * 24 * 60 * 60 * 1000 };
+  return { from: new Date(to.getTime() - (durations[range] || durations['1h'])), to };
+}
+
+function collectLogFilters() {
+  return {
+    site_id: byId('log-site').value,
+    node_id: byId('log-node').value,
+    method: byId('log-method').value,
+    status: byId('log-status').value.trim(),
+    path: byId('log-path').value.trim(),
+    client_ip: byId('log-client-ip').value.trim(),
+    cache_status: byId('log-cache-status').value,
+  };
+}
+
+async function runLogSearch({ offset = 0, keepWindow = false } = {}) {
+  if (logLoading) return;
+  let rangeWindow;
+  try {
+    rangeWindow = logSearchWindow(keepWindow);
+    if (!(rangeWindow.from < rangeWindow.to)) throw new Error('开始时间必须早于结束时间');
+    if (rangeWindow.to - rangeWindow.from > 7 * 24 * 60 * 60 * 1000) throw new Error('日志检索范围不能超过 7 天');
+  } catch (error) {
+    setLogSearchState(error.message, 'error');
+    hide('log-results-content');
+    return;
+  }
+
+  if (logRequestController) logRequestController.abort();
+  const controller = new AbortController();
+  logRequestController = controller;
+  logLoading = true;
+  logLoaded = false;
+  const section = byId('logs');
+  section.setAttribute('aria-busy', 'true');
+  setLogSearchState('正在检索日志…', 'loading');
+  hide('log-results-content');
+  ['log-search-submit', 'log-search-reset', 'refresh-logs', 'log-prev', 'log-next'].forEach((id) => { byId(id).disabled = true; });
+  byId('log-search-submit').classList.add('is-loading');
+  byId('refresh-logs').classList.add('is-loading');
+
+  const filters = keepWindow && logQueryState ? {
+    site_id: logQueryState.site_id,
+    node_id: logQueryState.node_id,
+    method: logQueryState.method,
+    status: logQueryState.status,
+    path: logQueryState.path,
+    client_ip: logQueryState.client_ip,
+    cache_status: logQueryState.cache_status,
+  } : collectLogFilters();
+  const params = new URLSearchParams({ from: rangeWindow.from.toISOString(), to: rangeWindow.to.toISOString(), offset: String(Math.max(0, offset)) });
+  Object.entries(filters).forEach(([key, value]) => { if (value) params.set(key, value); });
+  try {
+    const data = await request(`/api/logs?${params.toString()}`, { signal: controller.signal });
+    if (logRequestController !== controller) return;
+    const logs = Array.isArray(data.logs) ? data.logs : [];
+    logQueryState = { ...filters, from: data.from || rangeWindow.from.toISOString(), to: data.to || rangeWindow.to.toISOString() };
+    logPageOffset = Number(data.offset ?? offset) || 0;
+    logPageHasMore = Boolean(data.has_more);
+    logLoaded = true;
+    renderLogRows(logs);
+    renderLogPagination();
+    if (!logs.length) {
+      setLogSearchState('当前时间和筛选条件下没有匹配的日志。', 'empty');
+      byId('log-results-meta').textContent = `${formatDateTime(data.from || rangeWindow.from)} 至 ${formatDateTime(data.to || rangeWindow.to)} · 本页无结果`;
+      if (logPageOffset > 0) show('log-results-content'); else hide('log-results-content');
+    } else {
+      hide('log-search-state');
+      byId('log-results-meta').textContent = `${numberFormatter.format(logs.length)} 条结果 · ${formatDateTime(data.from || rangeWindow.from)} 至 ${formatDateTime(data.to || rangeWindow.to)}${data.has_more ? ' · 还有更多结果' : ''}`;
+      show('log-results-content');
+    }
+  } catch (error) {
+    if (error.name === 'AbortError') return;
+    logLoaded = false;
+    setLogSearchState(`日志检索失败：${error.message}`, 'error');
+    hide('log-results-content');
+  } finally {
+    if (logRequestController === controller) {
+      logRequestController = null;
+      logLoading = false;
+      section.setAttribute('aria-busy', 'false');
+      ['log-search-submit', 'log-search-reset', 'refresh-logs'].forEach((id) => { byId(id).disabled = false; });
+      renderLogPagination();
+      byId('log-search-submit').classList.remove('is-loading');
+      byId('refresh-logs').classList.remove('is-loading');
+    }
+  }
+}
+
+function cancelLogSearch() {
+  if (logRequestController) logRequestController.abort();
+  logRequestController = null;
+  logLoading = false;
+  byId('logs').setAttribute('aria-busy', 'false');
+  ['log-search-submit', 'log-search-reset', 'refresh-logs'].forEach((id) => { byId(id).disabled = false; });
+  byId('log-search-submit').classList.remove('is-loading');
+  byId('refresh-logs').classList.remove('is-loading');
+  renderLogPagination();
+}
+
+function setLogSearchState(message, kind) {
+  const state = byId('log-search-state');
+  state.className = `overview-state${kind === 'empty' ? ' empty' : ''}${kind === 'error' ? ' error' : ''}`;
+  state.textContent = message;
+  show('log-search-state');
+}
+
+function renderLogRows(logs) {
+  if (!logs.length) {
+    byId('log-table').innerHTML = '<tr><td colspan="8" class="muted">本页没有匹配的日志。</td></tr>';
+    return;
+  }
+  byId('log-table').innerHTML = logs.map((event) => {
+    const site = sites.find((item) => item.id === event.site_id);
+    const node = nodes.find((item) => item.id === event.node_id);
+    const status = Number(event.status || 0);
+    const statusClass = status >= 500 ? 'status-code-5xx' : status >= 400 ? 'status-code-4xx' : status >= 300 ? 'status-code-3xx' : status >= 200 ? 'status-code-2xx' : 'status-code-other';
+    const path = event.path || '/';
+    return `<tr><td><time datetime="${escapeHTML(event.timestamp || '')}" title="${escapeHTML(event.timestamp || '')}">${escapeHTML(formatDateTime(event.timestamp))}</time></td><td><strong class="log-primary-text" title="${escapeHTML(site?.name || event.site_id || '未知站点')}">${escapeHTML(site?.name || event.site_id || '未知站点')}</strong><span class="log-secondary-text" title="${escapeHTML(node?.name || event.node_id || '')}">${escapeHTML(node?.name || event.node_id || '未知节点')}</span></td><td><span class="log-method">${escapeHTML(event.method || '--')}</span><code class="log-path" title="${escapeHTML(path)}">${escapeHTML(path)}</code></td><td><span class="log-status-code ${statusClass}">${escapeHTML(String(status || '--'))}</span></td><td><code>${escapeHTML(event.client_ip || '--')}</code></td><td><strong>${formatBytes(Number(event.bytes || 0))}</strong><span class="log-secondary-text">${numberFormatter.format(Math.max(0, Number(event.duration_ms || 0)))} ms</span></td><td><span class="log-cache-status">${escapeHTML(formatLogCacheStatus(event.cache_status))}</span></td><td><code class="log-upstream" title="${escapeHTML(event.upstream || '')}">${escapeHTML(event.upstream || '--')}</code></td></tr>`;
+  }).join('');
+}
+
+function formatLogCacheStatus(value) {
+  const labels = { HIT: '命中', MISS: '未命中', BYPASS: '绕过', EXPIRED: '已过期', STALE: '陈旧', UPDATING: '更新中', REVALIDATED: '重新验证' };
+  const normalized = String(value || '').toUpperCase();
+  return normalized ? `${labels[normalized] || normalized}（${normalized}）` : '无缓存';
+}
+
+function renderLogPagination() {
+  const page = Math.floor(logPageOffset / logSearchPageSize()) + 1;
+  byId('log-page-label').textContent = `第 ${numberFormatter.format(page)} 页`;
+  byId('log-prev').disabled = logLoading || logPageOffset <= 0;
+  byId('log-next').disabled = logLoading || !logPageHasMore;
+}
+
+function logSearchPageSize() { return 100; }
+
 function renderOverview(data) {
+  overviewData = data;
   const totals = data.totals || {};
   const series = Array.isArray(data.series) ? data.series : [];
   const requests = Number(totals.requests || 0);
@@ -519,6 +764,7 @@ function renderOverview(data) {
   }), '最近 24 小时错误率趋势');
   renderStatusCodes(Array.isArray(data.status_codes) ? data.status_codes : [], requests);
   renderOverviewSites(Array.isArray(data.sites) ? data.sites : []);
+  renderOverviewSiteDetail();
 }
 
 function renderSparkline(target, values, label) {
@@ -575,8 +821,142 @@ function renderOverviewSites(overviewSites) {
     const bytes = Number(site.bytes || 0);
     const values = Array.isArray(site.series) ? site.series.map((point) => Number(point.requests || 0)) : [];
     const fullRequests = numberFormatter.format(requests);
-    return `<tr><td><div class="site-identity"><strong title="${escapeHTML(name)}">${escapeHTML(name)}</strong><span class="site-domain" title="${escapeHTML(domains.join(', ') || domain)}">${escapeHTML(domain)}</span></div></td><td><span class="site-request-total" title="${fullRequests} 次请求">${formatCompactNumber(requests)}</span></td><td><span class="site-transfer-total">${formatBytes(bytes)}</span></td><td><div class="site-sparkline">${sparklineSVG(values, `${name} 最近 24 小时请求趋势`)}</div></td></tr>`;
+    return `<tr class="overview-site-row" data-id="${escapeHTML(site.id)}" tabindex="0" role="link" aria-label="查看 ${escapeHTML(name)} 的请求详情"><td><div class="site-identity"><strong title="${escapeHTML(name)}">${escapeHTML(name)}</strong><span class="site-domain" title="${escapeHTML(domains.join(', ') || domain)}">${escapeHTML(domain)}</span></div></td><td><span class="site-request-total" title="${fullRequests} 次请求">${formatCompactNumber(requests)}</span></td><td><span class="site-transfer-total">${formatBytes(bytes)}</span></td><td><div class="site-sparkline">${sparklineSVG(values, `${name} 最近 24 小时请求趋势`)}</div></td></tr>`;
   }).join('') || '<tr><td colspan="4" class="muted">暂无站点。</td></tr>';
+}
+
+function renderOverviewSiteDetail() {
+  if (activeRoute.view !== 'overview' || activeRoute.page !== 'site-analytics') return;
+  const state = byId('overview-site-detail-state');
+  const configuredSite = sites.find((site) => site.id === activeRoute.siteID);
+  if (!routeDataReady) {
+    byId('overview-site-title').textContent = '加载站点…';
+    byId('overview-site-meta').textContent = activeRoute.siteID;
+    hide('overview-site-manage');
+    hide('overview-site-detail-content');
+    state.className = 'overview-state';
+    state.textContent = '正在加载站点请求数据…';
+    return;
+  }
+  if (!configuredSite) {
+    byId('overview-site-title').textContent = '未找到站点';
+    byId('overview-site-meta').textContent = activeRoute.siteID;
+    hide('overview-site-manage');
+    hide('overview-site-detail-content');
+    state.className = 'overview-state error';
+    state.textContent = '该站点可能已被删除，或链接中的站点 ID 无效。';
+    return;
+  }
+
+  byId('overview-site-title').textContent = configuredSite.name;
+  byId('overview-site-meta').textContent = `${configuredSite.domains.join(', ') || '未配置域名'} · 最近 24 小时`;
+  byId('overview-site-manage').dataset.id = configuredSite.id;
+  show('overview-site-manage');
+  if (!overviewData) {
+    hide('overview-site-detail-content');
+    state.className = 'overview-state';
+    state.textContent = '正在加载站点请求数据…';
+    return;
+  }
+
+  const analytics = (overviewData.sites || []).find((site) => site.id === configuredSite.id);
+  if (!analytics) {
+    hide('overview-site-detail-content');
+    state.className = 'overview-state error';
+    state.textContent = '站点请求数据暂时不可用，请稍后刷新。';
+    return;
+  }
+
+  const requests = Number(analytics.requests || 0);
+  const bytes = Number(analytics.bytes || 0);
+  const errors = Number(analytics.error_requests || 0);
+  byId('overview-site-requests').textContent = numberFormatter.format(requests);
+  byId('overview-site-bytes').textContent = formatBytes(bytes);
+  byId('overview-site-errors').textContent = numberFormatter.format(errors);
+  byId('overview-site-error-rate').textContent = formatPercent(requests ? errors / requests : 0);
+  renderOverviewSiteStatusCodes(Array.isArray(analytics.status_codes) ? analytics.status_codes : [], requests);
+  renderOverviewSiteSeries(analytics);
+  show('overview-site-detail-content');
+  if (requests) {
+    hide('overview-site-detail-state');
+  } else {
+    state.className = 'overview-state empty';
+    state.textContent = '最近 24 小时暂无请求数据。';
+    show('overview-site-detail-state');
+  }
+}
+
+function renderOverviewSiteStatusCodes(statusCodes, totalRequests) {
+  const entries = statusCodes
+    .map((item) => ({ code: String(item.code), requests: Number(item.requests || 0) }))
+    .filter((item) => item.requests > 0);
+  const displayed = entries.slice(0, 6);
+  const otherRequests = entries.slice(6).reduce((sum, item) => sum + item.requests, 0);
+  if (otherRequests) displayed.push({ code: '其他', requests: otherRequests });
+
+  let offset = 0;
+  const segments = displayed.map((item, index) => {
+    const percentage = totalRequests ? (item.requests / totalRequests) * 100 : 0;
+    const segment = `<circle class="donut-segment" cx="60" cy="60" r="43" pathLength="100" stroke="${overviewStatusColors[index]}" stroke-dasharray="${percentage.toFixed(4)} ${(100 - percentage).toFixed(4)}" stroke-dashoffset="${(-offset).toFixed(4)}" transform="rotate(-90 60 60)"></circle>`;
+    offset += percentage;
+    return segment;
+  }).join('');
+  const totalLabel = formatCompactNumber(totalRequests);
+  const lengthAttribute = totalLabel.length > 6 ? ' textLength="48" lengthAdjust="spacingAndGlyphs"' : '';
+  byId('overview-site-status-chart').innerHTML = `<svg viewBox="0 0 120 120" aria-hidden="true"><circle class="donut-track" cx="60" cy="60" r="43"></circle>${segments}<text class="donut-total" x="60" y="58"${lengthAttribute}>${escapeHTML(totalLabel)}</text><text class="donut-caption" x="60" y="72">请求</text></svg>`;
+  byId('overview-site-status-list').innerHTML = entries.length ? entries.map((item, index) => `<div class="analytics-status-row"><span class="legend-swatch swatch-${Math.min(index, 6)}" aria-hidden="true"></span><strong>${escapeHTML(item.code)}</strong><span>${numberFormatter.format(item.requests)}</span><span>${formatPercent(totalRequests ? item.requests / totalRequests : 0)}</span></div>`).join('') : '<div class="analytics-status-empty">暂无状态码数据</div>';
+}
+
+function renderOverviewSiteSeries(analytics) {
+  const series = Array.isArray(analytics.series) ? analytics.series : [];
+  document.querySelectorAll('.analytics-metric').forEach((button) => {
+    const active = button.dataset.metric === overviewSiteMetric;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  const chart = byId('overview-site-series-chart');
+  chart.classList.toggle('traffic', overviewSiteMetric === 'bytes');
+  chart.innerHTML = analyticsSeriesSVG(series, overviewSiteMetric);
+}
+
+function analyticsSeriesSVG(series, metric) {
+  if (!series.length) return '<div class="analytics-chart-empty">暂无分时数据</div>';
+  const values = series.map((point) => Math.max(0, Number(point[metric] || 0)));
+  const width = 900;
+  const height = 250;
+  const left = 70;
+  const right = 18;
+  const top = 18;
+  const bottom = 38;
+  const chartWidth = width - left - right;
+  const chartHeight = height - top - bottom;
+  const maximum = Math.max(...values, 0);
+  const scaleMaximum = maximum || 1;
+  const points = values.map((value, index) => {
+    const x = values.length === 1 ? left + chartWidth / 2 : left + (index / (values.length - 1)) * chartWidth;
+    const y = top + chartHeight - (value / scaleMaximum) * chartHeight;
+    return [x, y];
+  });
+  const line = points.map(([x, y], index) => `${index ? 'L' : 'M'}${x.toFixed(2)} ${y.toFixed(2)}`).join(' ');
+  const baseY = top + chartHeight;
+  const area = `${line} L${points[points.length - 1][0].toFixed(2)} ${baseY} L${points[0][0].toFixed(2)} ${baseY} Z`;
+  const formatValue = (value) => metric === 'bytes' ? formatBytes(value) : formatCompactNumber(value);
+  const grid = [1, 0.5, 0].map((ratio) => {
+    const y = top + (1 - ratio) * chartHeight;
+    return `<line class="analytics-chart-grid" x1="${left}" y1="${y}" x2="${width - right}" y2="${y}"></line><text class="analytics-chart-y-label" x="${left - 10}" y="${y + 4}">${escapeHTML(formatValue(maximum * ratio))}</text>`;
+  }).join('');
+  const labelIndexes = [...new Set([0, Math.floor((series.length - 1) / 2), series.length - 1])];
+  const xLabels = labelIndexes.map((index) => {
+    const anchor = index === 0 ? 'start' : (index === series.length - 1 ? 'end' : 'middle');
+    return `<text class="analytics-chart-x-label" x="${points[index][0]}" y="${height - 10}" text-anchor="${anchor}">${escapeHTML(formatAnalyticsHour(series[index].time))}</text>`;
+  }).join('');
+  const dots = points.map(([x, y], index) => `<circle class="analytics-chart-dot" cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="3"><title>${escapeHTML(`${formatAnalyticsHour(series[index].time)}：${formatValue(values[index])}`)}</title></circle>`).join('');
+  const label = metric === 'bytes' ? '最近 24 小时传输量趋势' : '最近 24 小时请求量趋势';
+  return `<svg class="analytics-line-chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="${label}"><title>${label}</title>${grid}<path class="analytics-chart-area" d="${area}"></path><path class="analytics-chart-line" d="${line}"></path>${dots}${xLabels}</svg>`;
+}
+
+function formatAnalyticsHour(value) {
+  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
 function formatCompactNumber(value) {
@@ -610,13 +990,22 @@ async function boot() {
       return;
     }
     const status = await request('/api/setup/status');
-    if (status.initialized) show('login-panel'); else show('setup-panel');
-  } catch (error) { show('setup-panel'); }
+    showAuthPanel(status.initialized ? 'login-panel' : 'setup-panel');
+  } catch (error) { showAuthPanel('setup-panel'); }
+}
+
+function showAuthPanel(panelID) {
+  hide('boot-shell');
+  show('auth-shell');
+  show(panelID);
 }
 
 function parseRouteHash(hash) {
   const path = hash.replace(/^#\/?/, '').replace(/\/+$/, '');
   const segments = path.split('/').filter(Boolean);
+  if (segments[0] === 'overview' && segments.length === 3 && segments[1] === 'sites') {
+    try { return { view: 'overview', page: 'site-analytics', siteID: decodeURIComponent(segments[2]) }; } catch (_) { return { view: 'overview', page: 'site-analytics', siteID: segments[2] }; }
+  }
   if (segments[0] === 'sites') {
     if (segments.length === 1) return { view: 'sites', page: 'list', siteID: '' };
     if (segments.length === 2 && segments[1] === 'new') return { view: 'sites', page: 'new', siteID: '' };
@@ -631,6 +1020,7 @@ function parseRouteHash(hash) {
 function routeFromLocation() { return parseRouteHash(window.location.hash); }
 
 function routeHash(route) {
+  if (route.view === 'overview' && route.page === 'site-analytics') return `#/overview/sites/${encodeURIComponent(route.siteID)}`;
   if (route.view !== 'sites') return `#/${route.view}`;
   if (route.page === 'new') return '#/sites/new';
   if (route.page === 'detail' || route.page === 'missing') return `#/sites/${encodeURIComponent(route.siteID)}`;
@@ -659,6 +1049,26 @@ function setSidebarOpen(open, restoreFocus = false) {
   } else if (restoreFocus && !byId('app').classList.contains('hidden')) {
     byId('sidebar-toggle').focus();
   }
+}
+
+function renderLogsRoute({ routeChanged = false } = {}) {
+  if (!logSearchInitialized) initializeLogSearch();
+  if (!routeDataReady) {
+    setLogSearchState('正在加载站点和节点列表…', 'loading');
+    return;
+  }
+  if (routeChanged && !logLoaded && !logLoading) void runLogSearch();
+  if (!logLoaded && !logLoading) void runLogSearch();
+  renderLogPagination();
+}
+
+function renderOverviewRoute(route, { routeChanged = false } = {}) {
+  const detailPage = route.page === 'site-analytics';
+  byId('overview-main-page').classList.toggle('hidden', detailPage);
+  byId('overview-site-detail-page').classList.toggle('hidden', !detailPage);
+  if (!detailPage) return;
+  if (routeChanged) overviewSiteMetric = 'requests';
+  renderOverviewSiteDetail();
 }
 
 function renderSiteRoute(route, { populateForm = false, routeChanged = false } = {}) {
@@ -723,6 +1133,7 @@ function renderSiteRoute(route, { populateForm = false, routeChanged = false } =
 function activateRoute(route, { forceForm = false, focus = true } = {}) {
   const previousRoute = activeRoute;
   const routeChanged = routeKey(previousRoute) !== routeKey(route);
+  if (previousRoute.view === 'logs' && route.view !== 'logs' && logRequestController) cancelLogSearch();
   activeRoute = route;
   const restoreSidebarFocus = sidebarOpen();
   document.querySelectorAll('.nav').forEach((button) => {
@@ -731,13 +1142,18 @@ function activateRoute(route, { forceForm = false, focus = true } = {}) {
     if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
   });
   document.querySelectorAll('.view').forEach((section) => section.classList.toggle('hidden', section.id !== route.view));
+  if (route.view === 'overview') renderOverviewRoute(route, { routeChanged });
+  if (route.view === 'logs') renderLogsRoute({ routeChanged });
   if (route.view === 'sites') renderSiteRoute(route, { populateForm: forceForm || routeChanged, routeChanged });
   const site = route.view === 'sites' && route.page === 'detail' ? sites.find((item) => item.id === route.siteID) : null;
-  const mobileTitle = route.page === 'new' ? '添加站点' : (site?.name || viewLabels[route.view] || viewLabels.overview);
+  const analyticsSite = route.view === 'overview' && route.page === 'site-analytics' ? sites.find((item) => item.id === route.siteID) : null;
+  const mobileTitle = route.page === 'new' ? '添加站点' : (site?.name || analyticsSite?.name || viewLabels[route.view] || viewLabels.overview);
   byId('mobile-page-title').textContent = mobileTitle;
   setSidebarOpen(false, restoreSidebarFocus);
-  if (focus && routeChanged && route.view === 'sites' && route.page !== 'list') {
-    window.requestAnimationFrame(() => byId('site-detail-title').focus());
+  if (focus && routeChanged) {
+    if (route.view === 'sites' && route.page !== 'list') window.requestAnimationFrame(() => byId('site-detail-title').focus());
+    if (route.view === 'overview' && route.page === 'site-analytics') window.requestAnimationFrame(() => byId('overview-site-title').focus());
+    if (route.view === 'logs') window.requestAnimationFrame(() => byId('logs-title').focus());
   }
 }
 
@@ -789,6 +1205,7 @@ function handleHashChange() {
 }
 
 function showApp() {
+  hide('boot-shell');
   hide('setup-panel');
   hide('login-panel');
   hide('auth-shell');
@@ -825,6 +1242,13 @@ byId('logout').addEventListener('click', async () => {
   try {
     await request('/api/logout', { method: 'POST' });
   } finally {
+    cancelLogSearch();
+    logLoaded = false;
+    logSearchInitialized = false;
+    logQueryState = null;
+    logPageOffset = 0;
+    logPageHasMore = false;
+    resetLogSearchForm();
     window.clearTimeout(certificatePollTimer);
     window.clearTimeout(publishPollTimer);
     closeNodeUninstall();
@@ -836,6 +1260,7 @@ byId('logout').addEventListener('click', async () => {
     routeDataReady = false;
     siteFormReady = false;
     overviewLoaded = false;
+    overviewData = null;
     csrf = '';
     setSidebarOpen(false);
     byId('notice').textContent = '';
@@ -855,6 +1280,41 @@ document.addEventListener('keydown', (event) => {
 });
 mobileSidebarQuery.addEventListener('change', syncSidebarMode);
 byId('refresh-overview').addEventListener('click', refreshOverview);
+byId('refresh-site-analytics').addEventListener('click', refreshOverview);
+byId('log-time-range').addEventListener('change', toggleLogCustomRange);
+byId('log-search-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  void runLogSearch();
+});
+byId('log-search-reset').addEventListener('click', () => {
+  if (logLoading) return;
+  resetLogSearchForm();
+  void runLogSearch();
+});
+byId('refresh-logs').addEventListener('click', () => { void runLogSearch(); });
+byId('log-prev').addEventListener('click', () => {
+  if (logPageOffset > 0) void runLogSearch({ offset: Math.max(0, logPageOffset - logSearchPageSize()), keepWindow: true });
+});
+byId('log-next').addEventListener('click', () => {
+  if (logPageHasMore) void runLogSearch({ offset: logPageOffset + logSearchPageSize(), keepWindow: true });
+});
+byId('overview-site-back').addEventListener('click', () => navigateTo('#/overview'));
+byId('overview-site-manage').addEventListener('click', () => navigateTo(`#/sites/${encodeURIComponent(byId('overview-site-manage').dataset.id)}`));
+byId('overview-site-table').addEventListener('click', (event) => {
+  const row = event.target.closest('.overview-site-row');
+  if (row) navigateTo(`#/overview/sites/${encodeURIComponent(row.dataset.id)}`);
+});
+byId('overview-site-table').addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter') return;
+  const row = event.target.closest('.overview-site-row');
+  if (!row) return;
+  event.preventDefault();
+  navigateTo(`#/overview/sites/${encodeURIComponent(row.dataset.id)}`);
+});
+document.querySelectorAll('.analytics-metric').forEach((button) => button.addEventListener('click', () => {
+  overviewSiteMetric = button.dataset.metric;
+  renderOverviewSiteDetail();
+}));
 
 document.querySelectorAll('.nav').forEach((button) => button.addEventListener('click', () => {
   const hash = `#/${button.dataset.view}`;
@@ -960,18 +1420,19 @@ byId('site-form').addEventListener('submit', async (event) => {
 
 function siteFormPayload() {
   const backup = byId('site-backup-url').value.trim();
+  const primaryURL = byId('site-primary-url').value;
   const payload = {
     name: byId('site-name').value,
     zone_id: byId('site-zone').value,
     domains: split(byId('site-domains').value),
     node_ids: selectedNodeIDs(),
-    primary_origin: { url: byId('site-primary-url').value, host_header: byId('site-primary-host').value, enabled: true },
+    primary_origin: { url: primaryURL, host_header: byId('site-primary-host').value, tls_server_name: originURLUsesTLS(primaryURL) ? byId('site-primary-tls-name').value : '', enabled: true },
     passthrough: byId('site-passthrough').checked,
     client_max_body_size_mb: Number(byId('site-client-max-body-size').value),
     read_write_timeout_seconds: Number(byId('site-read-write-timeout').value),
     enabled: byId('site-enabled').checked,
   };
-  if (backup) payload.backup_origin = { url: backup, host_header: byId('site-backup-host').value, enabled: true };
+  if (backup) payload.backup_origin = { url: backup, host_header: byId('site-backup-host').value, tls_server_name: originURLUsesTLS(backup) ? byId('site-backup-tls-name').value : '', enabled: true };
   return payload;
 }
 
@@ -1010,8 +1471,10 @@ function populateSiteForm(site) {
   byId('site-domains').value = site.domains.join(', ');
   byId('site-primary-url').value = site.primary_origin.url;
   byId('site-primary-host').value = site.primary_origin.host_header || '';
+  byId('site-primary-tls-name').value = site.primary_origin.tls_server_name || '';
   byId('site-backup-url').value = site.backup_origin?.url || '';
   byId('site-backup-host').value = site.backup_origin?.host_header || '';
+  byId('site-backup-tls-name').value = site.backup_origin?.tls_server_name || '';
   byId('site-client-max-body-size').value = String(site.client_max_body_size_mb ?? defaultClientMaxBodySizeMB);
   byId('site-read-write-timeout').value = String(site.read_write_timeout_seconds ?? defaultReadWriteTimeoutSeconds);
   byId('site-passthrough').checked = Boolean(site.passthrough);

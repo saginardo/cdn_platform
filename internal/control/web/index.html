@@ -8,7 +8,15 @@
   </head>
   <body>
     <main class="shell">
-      <section id="auth-shell" class="auth-shell">
+      <section id="boot-shell" class="boot-shell" role="status" aria-live="polite" aria-busy="true">
+        <div class="boot-status">
+          <div class="boot-brand"><span class="brand">CDN Platform</span><span class="tag">控制面</span></div>
+          <span class="boot-spinner" aria-hidden="true"></span>
+          <span class="boot-label">正在验证登录状态</span>
+        </div>
+      </section>
+
+      <section id="auth-shell" class="auth-shell hidden">
         <header class="auth-header">
           <span class="brand">CDN Platform</span><span class="tag">控制面</span>
         </header>
@@ -44,6 +52,7 @@
           </div>
           <nav class="side-nav" aria-label="主导航">
             <button class="nav active" data-view="overview">概览</button>
+            <button class="nav" data-view="logs">日志</button>
             <button class="nav" data-view="nodes">节点</button>
             <button class="nav" data-view="sites">站点</button>
           </nav>
@@ -62,6 +71,7 @@
             <div id="notice" role="status" aria-live="polite"></div>
 
             <section id="overview" class="view" aria-busy="true">
+              <div id="overview-main-page">
               <div class="dashboard-heading">
                 <div class="heading-copy">
                   <h1>概览</h1>
@@ -124,6 +134,140 @@
                     </table>
                   </div>
                 </section>
+              </div>
+              </div>
+
+              <div id="overview-site-detail-page" class="overview-site-detail-page hidden">
+                <header class="analytics-detail-header">
+                  <div class="analytics-detail-heading">
+                    <button id="overview-site-back" class="analytics-detail-back secondary" type="button" aria-label="返回概览"><span aria-hidden="true">←</span><span>概览</span></button>
+                    <div class="analytics-detail-title-wrap">
+                      <h1 id="overview-site-title" tabindex="-1">站点请求详情</h1>
+                      <p id="overview-site-meta" class="section-meta">最近 24 小时</p>
+                    </div>
+                  </div>
+                  <div class="analytics-detail-actions">
+                    <button id="refresh-site-analytics" class="secondary" type="button"><span class="refresh-mark" aria-hidden="true">↻</span><span>刷新</span></button>
+                    <button id="overview-site-manage" type="button">管理站点</button>
+                  </div>
+                </header>
+
+                <div id="overview-site-detail-state" class="overview-state" role="status" aria-live="polite">正在加载站点请求数据…</div>
+
+                <div id="overview-site-detail-content" class="analytics-detail-content hidden">
+                  <section class="analytics-summary" aria-label="站点最近 24 小时汇总">
+                    <div><span>请求量</span><strong id="overview-site-requests">--</strong></div>
+                    <div><span>传输量</span><strong id="overview-site-bytes">--</strong></div>
+                    <div><span>错误请求</span><strong id="overview-site-errors">--</strong></div>
+                    <div><span>错误率</span><strong id="overview-site-error-rate">--</strong></div>
+                  </section>
+
+                  <section class="analytics-detail-section" aria-labelledby="overview-site-status-title">
+                    <div class="site-detail-section-heading">
+                      <div><h2 id="overview-site-status-title">状态码分布</h2><p class="section-meta">最近 24 小时</p></div>
+                    </div>
+                    <div class="analytics-status-layout">
+                      <div id="overview-site-status-chart" class="analytics-status-chart" aria-hidden="true"></div>
+                      <div id="overview-site-status-list" class="analytics-status-list"></div>
+                    </div>
+                  </section>
+
+                  <section class="analytics-detail-section" aria-labelledby="overview-site-series-title">
+                    <div class="analytics-series-heading">
+                      <div><h2 id="overview-site-series-title">分时情况</h2><p class="section-meta">按小时聚合</p></div>
+                      <div class="analytics-segmented" role="group" aria-label="趋势指标">
+                        <button class="analytics-metric active" type="button" data-metric="requests" aria-pressed="true">请求量</button>
+                        <button class="analytics-metric" type="button" data-metric="bytes" aria-pressed="false">传输量</button>
+                      </div>
+                    </div>
+                    <div id="overview-site-series-chart" class="analytics-series-chart"></div>
+                  </section>
+                </div>
+              </div>
+            </section>
+
+            <section id="logs" class="view hidden" aria-busy="false">
+              <div class="logs-page">
+                <div class="section-heading logs-heading">
+                  <div class="heading-copy"><h1 id="logs-title" tabindex="-1">日志</h1><p class="section-meta">原始请求日志 · 保留 7 天</p></div>
+                  <button id="refresh-logs" class="secondary" type="button"><span class="refresh-mark" aria-hidden="true">↻</span><span>刷新</span></button>
+                </div>
+
+                <form id="log-search-form" class="log-search-form">
+                  <div class="log-filter-grid">
+                    <label>时间范围
+                      <select id="log-time-range">
+                        <option value="15m">最近 15 分钟</option>
+                        <option value="1h" selected>最近 1 小时</option>
+                        <option value="6h">最近 6 小时</option>
+                        <option value="24h">最近 24 小时</option>
+                        <option value="7d">最近 7 天</option>
+                        <option value="custom">自定义</option>
+                      </select>
+                    </label>
+                    <label id="log-from-wrap" class="hidden">开始时间
+                      <input id="log-from" type="datetime-local" step="1">
+                    </label>
+                    <label id="log-to-wrap" class="hidden">结束时间
+                      <input id="log-to" type="datetime-local" step="1">
+                    </label>
+                    <label>站点
+                      <select id="log-site"><option value="">全部站点</option></select>
+                    </label>
+                    <label>节点
+                      <select id="log-node"><option value="">全部节点</option></select>
+                    </label>
+                    <label>方法
+                      <select id="log-method">
+                        <option value="">全部方法</option>
+                        <option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option>
+                        <option>DELETE</option><option>HEAD</option><option>OPTIONS</option>
+                      </select>
+                    </label>
+                    <label>状态码
+                      <input id="log-status" list="log-status-options" placeholder="如 404 或 4xx" autocomplete="off">
+                      <datalist id="log-status-options"><option value="2xx"></option><option value="3xx"></option><option value="4xx"></option><option value="5xx"></option></datalist>
+                    </label>
+                    <label>路径包含
+                      <input id="log-path" placeholder="/api/chat" autocomplete="off">
+                    </label>
+                    <label>客户端 IP
+                      <input id="log-client-ip" placeholder="203.0.113.10" inputmode="text" autocomplete="off">
+                    </label>
+                    <label>缓存状态
+                      <select id="log-cache-status">
+                        <option value="">全部状态</option>
+                        <option value="HIT">命中（HIT）</option>
+                        <option value="MISS">未命中（MISS）</option>
+                        <option value="BYPASS">绕过（BYPASS）</option>
+                        <option value="EXPIRED">已过期（EXPIRED）</option>
+                        <option value="STALE">陈旧（STALE）</option>
+                        <option value="UPDATING">更新中（UPDATING）</option>
+                        <option value="REVALIDATED">重新验证（REVALIDATED）</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="log-search-actions">
+                    <button id="log-search-submit" type="submit">检索</button>
+                    <button id="log-search-reset" class="secondary" type="button">重置</button>
+                  </div>
+                </form>
+
+                <div id="log-search-state" class="overview-state" role="status" aria-live="polite">正在准备日志检索…</div>
+                <div id="log-results-content" class="log-results-content hidden">
+                  <div class="log-results-heading"><p id="log-results-meta" class="section-meta"></p></div>
+                  <div class="table-wrap log-table-wrap">
+                    <table class="log-table">
+                      <thead><tr><th scope="col">时间</th><th scope="col">站点 / 节点</th><th scope="col">请求</th><th scope="col">状态</th><th scope="col">客户端 IP</th><th scope="col">传输 / 耗时</th><th scope="col">缓存</th><th scope="col">源站</th></tr></thead>
+                      <tbody id="log-table"></tbody>
+                    </table>
+                  </div>
+                  <div class="log-pagination" aria-label="日志分页">
+                    <button id="log-prev" class="secondary" type="button">上一页</button>
+                    <span id="log-page-label">第 1 页</span>
+                    <button id="log-next" class="secondary" type="button">下一页</button>
+                  </div>
+                </div>
               </div>
             </section>
 
@@ -222,8 +366,10 @@
                       <div class="site-form-fields">
                         <label>主源站 URL <input id="site-primary-url" required placeholder="https://origin.example.com"></label>
                         <label>主源站 Host 头 <input id="site-primary-host" placeholder="origin.example.com"></label>
+                        <label id="site-primary-tls-name-wrap" class="hidden">主源站 TLS SNI <input id="site-primary-tls-name" placeholder="origin.example.com" autocomplete="off"></label>
                         <label>备用源站 URL <input id="site-backup-url" placeholder="https://backup.example.com"></label>
                         <label>备用源站 Host 头 <input id="site-backup-host" placeholder="backup.example.com"></label>
+                        <label id="site-backup-tls-name-wrap" class="hidden">备用源站 TLS SNI <input id="site-backup-tls-name" placeholder="backup.example.com" autocomplete="off"></label>
                       </div>
                     </section>
 

@@ -90,6 +90,33 @@ func TestOriginMayUseIPAddress(t *testing.T) {
 	}
 }
 
+func TestOriginSupportsIndependentTLSServerName(t *testing.T) {
+	for _, scheme := range []string{"https", "wss", "grpcs"} {
+		origin := Origin{URL: scheme + "://203.0.113.8:443", HostHeader: "lax.dustvm.de", TLSServerName: " LAX.DUSTVM.DE ", Enabled: true}
+		if err := ValidateOrigin(&origin); err != nil {
+			t.Fatalf("expected %s origin TLS server name to be accepted: %v", scheme, err)
+		}
+		if origin.TLSServerName != "lax.dustvm.de" {
+			t.Fatalf("TLS server name was not normalized: %q", origin.TLSServerName)
+		}
+	}
+}
+
+func TestOriginRejectsInvalidTLSServerName(t *testing.T) {
+	for _, value := range []string{"203.0.113.8", "lax.dustvm.de:443", "https://lax.dustvm.de", "*.dustvm.de", "bad name"} {
+		origin := Origin{URL: "https://203.0.113.8:443", TLSServerName: value, Enabled: true}
+		if err := ValidateOrigin(&origin); err == nil {
+			t.Fatalf("expected TLS server name %q to be rejected", value)
+		}
+	}
+	for _, scheme := range []string{"http", "ws", "grpc"} {
+		origin := Origin{URL: scheme + "://origin.example.test", TLSServerName: "origin.example.test", Enabled: true}
+		if err := ValidateOrigin(&origin); err == nil {
+			t.Fatalf("expected TLS server name on %s origin to be rejected", scheme)
+		}
+	}
+}
+
 func TestOriginSupportsWebSocketAndGRPCSchemes(t *testing.T) {
 	for _, value := range []string{"ws://origin.example.test:8080", "wss://origin.example.test", "grpc://grpc.example.test:50051", "grpcs://grpc.example.test"} {
 		origin := Origin{URL: value}

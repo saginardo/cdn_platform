@@ -2,6 +2,7 @@ package logstore
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,70 @@ func TestRecentDecodesJSONEachRow(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Path != "/a" || events[0].CacheStatus != "HIT" {
 		t.Fatalf("unexpected events: %#v", events)
+	}
+}
+
+func TestSearchAppliesFiltersAndReportsMoreRows(t *testing.T) {
+	from := time.Date(2026, 7, 15, 1, 2, 3, 4000000, time.UTC)
+	to := from.Add(time.Hour)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query().Get("query")
+		for _, expected := range []string{
+			"PREWHERE timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}",
+			"site_id = {site_id:String}", "node_id = {node_id:String}", "method = {method:String}",
+			"status >= {status_min:UInt16}", "status <= {status_max:UInt16}",
+			"positionCaseInsensitive(path, {path:String}) > 0", "client_ip = {client_ip:String}",
+			"cache_status = {cache_status:String}", "LIMIT 3 OFFSET 100",
+		} {
+			if !strings.Contains(query, expected) {
+				t.Fatalf("query does not contain %q: %s", expected, query)
+			}
+		}
+		parameters := request.URL.Query()
+		expectedParameters := map[string]string{
+			"param_from": "2026-07-15 01:02:03.004", "param_to": "2026-07-15 02:02:03.004",
+			"param_site_id": "site", "param_node_id": "node", "param_method": "GET",
+			"param_status_min": "400", "param_status_max": "499", "param_path": "/api",
+			"param_client_ip": "203.0.113.5", "param_cache_status": "MISS",
+		}
+		for key, expected := range expectedParameters {
+			if got := parameters.Get(key); got != expected {
+				t.Fatalf("unexpected %s: got %q, want %q", key, got, expected)
+			}
+		}
+		for index := 0; index < 3; index++ {
+			_, _ = io.WriteString(response, fmt.Sprintf("{\"timestamp\":\"2026-07-15T01:02:0%dZ\",\"node_id\":\"node\",\"site_id\":\"site\",\"client_ip\":\"203.0.113.5\",\"method\":\"GET\",\"path\":\"/api\",\"status\":404,\"bytes\":10,\"duration_ms\":2,\"upstream\":\"origin\",\"cache_status\":\"MISS\"}\n", index))
+		}
+	}))
+	defer server.Close()
+
+	page, err := (ClickHouse{Endpoint: server.URL}).Search(context.Background(), LogQuery{
+		From: from, To: to, SiteID: "site", NodeID: "node", Method: "GET",
+		StatusMin: 400, StatusMax: 499, Path: "/api", ClientIP: "203.0.113.5",
+		CacheStatus: "MISS", Offset: 100, Limit: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Events) != 2 || !page.HasMore {
+		t.Fatalf("unexpected page: %#v", page)
+	}
+}
+
+func TestSearchUsesDefaultsAndNeverEmitsNegativeOffset(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query().Get("query")
+		if !strings.Contains(query, "LIMIT 101 OFFSET 0") {
+			t.Fatalf("unexpected query: %s", query)
+		}
+	}))
+	defer server.Close()
+	page, err := (ClickHouse{Endpoint: server.URL}).Search(context.Background(), LogQuery{Offset: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Events == nil || len(page.Events) != 0 || page.HasMore {
+		t.Fatalf("unexpected empty page: %#v", page)
 	}
 }
 

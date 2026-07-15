@@ -18,8 +18,29 @@ import (
 type Store interface {
 	Append(ctx context.Context, events []domain.AccessLogEvent) error
 	Recent(ctx context.Context, siteID string, limit int) ([]domain.AccessLogEvent, error)
+	Search(ctx context.Context, query LogQuery) (LogPage, error)
 	Metrics(ctx context.Context, siteID string, since time.Time) ([]MinuteMetric, error)
 	Overview(ctx context.Context, from, to time.Time) ([]OverviewBucket, error)
+}
+
+type LogQuery struct {
+	From        time.Time
+	To          time.Time
+	SiteID      string
+	NodeID      string
+	Method      string
+	StatusMin   uint16
+	StatusMax   uint16
+	Path        string
+	ClientIP    string
+	CacheStatus string
+	Offset      int
+	Limit       int
+}
+
+type LogPage struct {
+	Events  []domain.AccessLogEvent
+	HasMore bool
 }
 
 type MinuteMetric struct {
@@ -128,6 +149,84 @@ func (c ClickHouse) Recent(ctx context.Context, siteID string, limit int) ([]dom
 		events = append(events, event)
 	}
 	return events, nil
+}
+
+func (c ClickHouse) Search(ctx context.Context, search LogQuery) (LogPage, error) {
+	limit := search.Limit
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	offset := search.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	conditions := make([]string, 0, 8)
+	parameters := url.Values{
+		"param_from": {search.From.UTC().Format("2006-01-02 15:04:05.000")},
+		"param_to":   {search.To.UTC().Format("2006-01-02 15:04:05.000")},
+	}
+	if search.SiteID != "" {
+		conditions = append(conditions, "site_id = {site_id:String}")
+		parameters.Set("param_site_id", search.SiteID)
+	}
+	if search.NodeID != "" {
+		conditions = append(conditions, "node_id = {node_id:String}")
+		parameters.Set("param_node_id", search.NodeID)
+	}
+	if search.Method != "" {
+		conditions = append(conditions, "method = {method:String}")
+		parameters.Set("param_method", search.Method)
+	}
+	if search.StatusMin != 0 {
+		conditions = append(conditions, "status >= {status_min:UInt16}", "status <= {status_max:UInt16}")
+		parameters.Set("param_status_min", strconv.FormatUint(uint64(search.StatusMin), 10))
+		parameters.Set("param_status_max", strconv.FormatUint(uint64(search.StatusMax), 10))
+	}
+	if search.Path != "" {
+		conditions = append(conditions, "positionCaseInsensitive(path, {path:String}) > 0")
+		parameters.Set("param_path", search.Path)
+	}
+	if search.ClientIP != "" {
+		conditions = append(conditions, "client_ip = {client_ip:String}")
+		parameters.Set("param_client_ip", search.ClientIP)
+	}
+	if search.CacheStatus != "" {
+		conditions = append(conditions, "cache_status = {cache_status:String}")
+		parameters.Set("param_cache_status", search.CacheStatus)
+	}
+
+	query := `SELECT timestamp, node_id, site_id, client_ip, method, path, status, bytes, duration_ms, upstream, cache_status FROM ` + identifier(c.database()) + `.cdn_access_logs PREWHERE timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}`
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	query += ` ORDER BY timestamp DESC, site_id, node_id, client_ip, method, path, status, bytes, duration_ms, upstream, cache_status LIMIT ` + strconv.Itoa(limit+1) + ` OFFSET ` + strconv.Itoa(offset) + ` FORMAT JSONEachRow`
+
+	response, err := c.request(ctx, c.database(), query, nil, parameters)
+	if err != nil {
+		return LogPage{}, err
+	}
+	defer response.Body.Close()
+	events := make([]domain.AccessLogEvent, 0, limit+1)
+	decoder := json.NewDecoder(response.Body)
+	for {
+		var row accessLogRow
+		if err := decoder.Decode(&row); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return LogPage{}, err
+		}
+		event, err := row.event()
+		if err != nil {
+			return LogPage{}, err
+		}
+		events = append(events, event)
+	}
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+	}
+	return LogPage{Events: events, HasMore: hasMore}, nil
 }
 
 func (c ClickHouse) Metrics(ctx context.Context, siteID string, since time.Time) ([]MinuteMetric, error) {
@@ -264,6 +363,9 @@ type Noop struct{}
 func (Noop) Append(context.Context, []domain.AccessLogEvent) error { return nil }
 func (Noop) Recent(context.Context, string, int) ([]domain.AccessLogEvent, error) {
 	return []domain.AccessLogEvent{}, nil
+}
+func (Noop) Search(context.Context, LogQuery) (LogPage, error) {
+	return LogPage{Events: []domain.AccessLogEvent{}}, nil
 }
 func (Noop) Metrics(context.Context, string, time.Time) ([]MinuteMetric, error) {
 	return []MinuteMetric{}, nil

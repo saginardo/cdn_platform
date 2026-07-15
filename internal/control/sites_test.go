@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,94 @@ func TestSiteReadWriteTimeoutAPI(t *testing.T) {
 	}
 	if after.ReadWriteTimeoutSeconds != before.ReadWriteTimeoutSeconds || after.ConfigVersion != before.ConfigVersion {
 		t.Fatalf("invalid timeout update changed site: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestSiteOriginTLSServerNameAPI(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-1", "203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+
+	created := requestSite(t, server, http.MethodPost, "/api/sites", map[string]any{
+		"name": "ip-origin", "zone_id": "zone", "domains": []string{"lax.dustvm.de"}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://203.0.113.20:443", "host_header": "lax.dustvm.de", "tls_server_name": "LAX.DUSTVM.DE", "enabled": true},
+		"backup_origin":  map[string]any{"url": "https://203.0.113.21:443", "host_header": "backup.dustvm.de", "tls_server_name": "backup.dustvm.de", "enabled": true},
+		"enabled":        true,
+	})
+	if created.PrimaryOrigin.TLSServerName != "lax.dustvm.de" || created.BackupOrigin == nil || created.BackupOrigin.TLSServerName != "backup.dustvm.de" {
+		t.Fatalf("unexpected TLS server names: %#v", created)
+	}
+	loaded, _, err := database.GetSite(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.PrimaryOrigin.TLSServerName != "lax.dustvm.de" || loaded.BackupOrigin == nil || loaded.BackupOrigin.TLSServerName != "backup.dustvm.de" {
+		t.Fatalf("stored TLS server names were not preserved: %#v", loaded)
+	}
+
+	updated := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, map[string]any{
+		"name": created.Name, "zone_id": created.ZoneID, "domains": created.Domains, "node_ids": created.Nodes,
+		"primary_origin": map[string]any{"url": created.PrimaryOrigin.URL, "host_header": created.PrimaryOrigin.HostHeader, "enabled": true},
+		"backup_origin":  map[string]any{"url": created.BackupOrigin.URL, "host_header": created.BackupOrigin.HostHeader, "enabled": true}, "enabled": created.Enabled,
+	})
+	if updated.PrimaryOrigin.TLSServerName != "lax.dustvm.de" || updated.BackupOrigin == nil || updated.BackupOrigin.TLSServerName != "backup.dustvm.de" {
+		t.Fatalf("omitted TLS server names did not preserve the existing values: %#v", updated)
+	}
+	cleared := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, map[string]any{
+		"name": updated.Name, "zone_id": updated.ZoneID, "domains": updated.Domains, "node_ids": updated.Nodes,
+		"primary_origin": map[string]any{"url": updated.PrimaryOrigin.URL, "host_header": updated.PrimaryOrigin.HostHeader, "tls_server_name": "", "enabled": true},
+		"backup_origin":  updated.BackupOrigin, "enabled": updated.Enabled,
+	})
+	if cleared.PrimaryOrigin.TLSServerName != "" {
+		t.Fatalf("explicitly empty TLS server name was not cleared: %#v", cleared.PrimaryOrigin)
+	}
+	movedBackup := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, map[string]any{
+		"name": cleared.Name, "zone_id": cleared.ZoneID, "domains": cleared.Domains, "node_ids": cleared.Nodes,
+		"primary_origin": cleared.PrimaryOrigin,
+		"backup_origin":  map[string]any{"url": "https://203.0.113.22:443", "host_header": cleared.BackupOrigin.HostHeader, "enabled": true}, "enabled": cleared.Enabled,
+	})
+	if movedBackup.BackupOrigin == nil || movedBackup.BackupOrigin.TLSServerName != "" {
+		t.Fatalf("omitted TLS server name was carried to a different backup URL: %#v", movedBackup.BackupOrigin)
+	}
+
+	defaultResponse := requestSiteResponse(t, server, http.MethodPost, "/api/sites", map[string]any{
+		"name": "default-sni", "zone_id": "zone", "domains": []string{"default-sni.example.test"}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "enabled": true,
+	})
+	if defaultResponse.Code != http.StatusCreated {
+		t.Fatalf("default TLS server name create = %d %s", defaultResponse.Code, defaultResponse.Body.String())
+	}
+	if strings.Contains(defaultResponse.Body.String(), `"tls_server_name"`) {
+		t.Fatalf("empty TLS server name should be omitted from the API response: %s", defaultResponse.Body.String())
+	}
+
+	for name, origin := range map[string]map[string]any{
+		"plain HTTP": {"url": "http://203.0.113.20:80", "tls_server_name": "lax.dustvm.de", "enabled": true},
+		"IP name":    {"url": "https://203.0.113.20:443", "tls_server_name": "203.0.113.20", "enabled": true},
+		"wildcard":   {"url": "https://203.0.113.20:443", "tls_server_name": "*.dustvm.de", "enabled": true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := requestSiteResponse(t, server, http.MethodPost, "/api/sites", map[string]any{
+				"name": "invalid-" + strings.ReplaceAll(name, " ", "-"), "zone_id": "zone", "domains": []string{"invalid-" + strings.ReplaceAll(name, " ", "-") + ".example.test"}, "node_ids": []string{node.ID},
+				"primary_origin": origin, "enabled": true,
+			})
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("invalid TLS server name = %d %s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 

@@ -15,6 +15,7 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		`<html lang="zh-CN">`,
 		`<span class="brand">CDN Platform</span>`,
 		`>概览</button>`,
+		`>日志</button>`,
 		`>节点</button>`,
 		`>站点</button>`,
 		`最近 24 小时`,
@@ -41,6 +42,58 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 	for _, unexpected := range []string{">Overview</button>", ">Nodes</button>", ">Sites</button>", "流式路径（WebSocket / SSE）", `id="site-stream-paths"`} {
 		if strings.Contains(page, unexpected) {
 			t.Fatalf("index.html still contains %q", unexpected)
+		}
+	}
+}
+
+func TestEmbeddedConsoleWaitsForAuthenticationBeforeShowingUI(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`id="boot-shell" class="boot-shell" role="status" aria-live="polite" aria-busy="true"`,
+		`<span class="boot-spinner" aria-hidden="true"></span>`,
+		`<span class="boot-label">正在验证登录状态</span>`,
+		`id="auth-shell" class="auth-shell hidden"`,
+		`id="app" class="console-shell hidden"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"function showAuthPanel(panelID)",
+		"showAuthPanel(status.initialized ? 'login-panel' : 'setup-panel')",
+		"showAuthPanel('setup-panel')",
+		"hide('boot-shell')",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(styleContents)
+	for _, expected := range []string{
+		".boot-shell { display: grid; min-height: 100vh;",
+		".boot-status { display: grid; width: min(100%, 240px);",
+		".boot-spinner { display: block; width: 24px; height: 24px;",
+		"@keyframes boot-spin",
+		".boot-spinner { animation: none; }",
+	} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
 		}
 	}
 }
@@ -104,6 +157,133 @@ func TestEmbeddedConsoleRendersOverviewChartsAndManualRefresh(t *testing.T) {
 	}
 }
 
+func TestEmbeddedConsoleUsesDedicatedOverviewSiteAnalyticsRoute(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`id="overview-main-page"`,
+		`id="overview-site-detail-page"`,
+		`id="overview-site-back"`,
+		`id="overview-site-manage"`,
+		`id="refresh-site-analytics"`,
+		`id="overview-site-requests"`,
+		`id="overview-site-bytes"`,
+		`id="overview-site-errors"`,
+		`id="overview-site-error-rate"`,
+		`id="overview-site-status-chart"`,
+		`id="overview-site-status-list"`,
+		`data-metric="requests"`,
+		`data-metric="bytes"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+	if strings.Contains(page, `id="overview-site-logs"`) {
+		t.Fatal("overview analytics page exposes the deferred request-log entry")
+	}
+	if strings.Contains(page, `id="overview-site-hourly-table"`) {
+		t.Fatal("overview analytics page still exposes the removed hourly detail table")
+	}
+
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"segments[0] === 'overview' && segments.length === 3 && segments[1] === 'sites'",
+		"page: 'site-analytics'",
+		"#/overview/sites/${encodeURIComponent(route.siteID)}",
+		`class="overview-site-row"`,
+		`tabindex="0" role="link"`,
+		"event.key !== 'Enter'",
+		"function renderOverviewSiteDetail()",
+		"function renderOverviewSiteStatusCodes(statusCodes, totalRequests)",
+		"function analyticsSeriesSVG(series, metric)",
+		"function formatAnalyticsHour(value)",
+		"byId('refresh-site-analytics').addEventListener('click', refreshOverview)",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(styleContents)
+	for _, expected := range []string{".analytics-detail-header", ".analytics-summary", ".analytics-status-layout", ".analytics-segmented", ".analytics-series-chart"} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
+		}
+	}
+	if strings.Contains(styles, ".analytics-hourly-table") || strings.Contains(styles, ".analytics-hourly-table-wrap") {
+		t.Fatal("styles.css still contains removed hourly detail table styles")
+	}
+}
+
+func TestEmbeddedConsoleUsesDedicatedLogSearchRoute(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`<button class="nav" data-view="logs">日志</button>`,
+		`<section id="logs" class="view hidden"`,
+		`<h1 id="logs-title" tabindex="-1">日志</h1>`,
+		`id="log-search-form"`,
+		`id="log-time-range"`,
+		`id="log-site"`,
+		`id="log-node"`,
+		`id="log-status"`,
+		`id="log-client-ip"`,
+		`id="log-cache-status"`,
+		`id="log-table"`,
+		`id="log-prev"`,
+		`id="log-next"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites'])",
+		"function runLogSearch({ offset = 0, keepWindow = false } = {})",
+		"request(`/api/logs?${params.toString()}`",
+		"function renderLogRows(logs)",
+		"function renderLogPagination()",
+		"byId('log-search-form').addEventListener('submit'",
+		"byId('log-next').addEventListener('click'",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(styleContents)
+	for _, expected := range []string{".logs-page", ".log-filter-grid", ".log-table", ".log-pagination", ".status-code-5xx"} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
+		}
+	}
+}
+
 func TestEmbeddedConsoleLocalizesStatusLabelsWithoutChangingStatusValues(t *testing.T) {
 	contents, err := embeddedWeb.ReadFile("web/app.js")
 	if err != nil {
@@ -160,7 +340,7 @@ func TestEmbeddedConsolePreservesSelectedViewInURLHash(t *testing.T) {
 	}
 	script := string(contents)
 	for _, expected := range []string{
-		"const consoleViews = new Set(['overview', 'nodes', 'sites'])",
+		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites'])",
 		"function parseRouteHash(hash)",
 		"hash.replace(/^#\\/?/, '')",
 		"if (segments.length === 2 && segments[1] === 'new')",
@@ -191,6 +371,10 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		`id="site-summary-timeout"`,
 		`id="site-basic-title">基本信息`,
 		`id="site-origin-title">源站与协议`,
+		`id="site-primary-tls-name-wrap" class="hidden"`,
+		`id="site-primary-tls-name" placeholder="origin.example.com"`,
+		`id="site-backup-tls-name-wrap" class="hidden"`,
+		`id="site-backup-tls-name" placeholder="backup.example.com"`,
 		`id="site-policy-title">流量策略`,
 		`id="site-nodes-title">节点分配`,
 		`id="site-detail-certificate"`,
@@ -217,6 +401,12 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		"function renderSiteRoute(route",
 		"function prepareNewSiteForm()",
 		"function populateSiteForm(site)",
+		"function originURLUsesTLS(value)",
+		"function updateOriginTLSFields()",
+		"tls_server_name: originURLUsesTLS(primaryURL) ? byId('site-primary-tls-name').value : ''",
+		"tls_server_name: originURLUsesTLS(backup) ? byId('site-backup-tls-name').value : ''",
+		"site.primary_origin.tls_server_name || ''",
+		"site.backup_origin?.tls_server_name || ''",
 		"function siteFormDirty()",
 		"function confirmDiscardChanges()",
 		"window.addEventListener('beforeunload'",
@@ -301,7 +491,7 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	}
 	script := string(scriptContents)
 	for _, expected := range []string{
-		"const viewLabels = { overview: '概览', nodes: '节点', sites: '站点' }",
+		"const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点' }",
 		"function setSidebarOpen(open, restoreFocus = false)",
 		"setAttribute('aria-expanded', String(open))",
 		"event.key === 'Escape'",

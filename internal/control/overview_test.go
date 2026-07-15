@@ -57,8 +57,11 @@ func TestOverviewHandlerReturnsConfiguredSitesAndLogData(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Totals.Requests != 4 || payload.Totals.ErrorRequests != 4 || len(payload.Sites) != 1 || payload.Sites[0].ID != site.ID || payload.Sites[0].Requests != 4 || payload.Sites[0].Bytes != 400 {
+	if payload.Totals.Requests != 4 || payload.Totals.ErrorRequests != 4 || len(payload.Sites) != 1 || payload.Sites[0].ID != site.ID || payload.Sites[0].Requests != 4 || payload.Sites[0].Bytes != 400 || payload.Sites[0].ErrorRequests != 4 {
 		t.Fatalf("unexpected overview payload: %#v", payload)
+	}
+	if len(payload.Sites[0].StatusCodes) != 1 || payload.Sites[0].StatusCodes[0].Code != 404 || payload.Sites[0].StatusCodes[0].Requests != 4 {
+		t.Fatalf("unexpected site status codes: %#v", payload.Sites[0].StatusCodes)
 	}
 }
 
@@ -85,11 +88,21 @@ func TestBuildOverviewPayloadAggregatesAndZeroFills(t *testing.T) {
 	if len(payload.StatusCodes) != 3 || payload.StatusCodes[0].Code != 200 || payload.StatusCodes[1].Code != 404 || payload.StatusCodes[2].Code != 500 {
 		t.Fatalf("unexpected status sorting: %#v", payload.StatusCodes)
 	}
-	if len(payload.Sites) != 2 || payload.Sites[0].ID != "busy" || payload.Sites[0].Requests != 100 || payload.Sites[0].Bytes != 10000 || payload.Sites[1].ID != "quiet" {
+	if len(payload.Sites) != 2 || payload.Sites[0].ID != "busy" || payload.Sites[0].Requests != 100 || payload.Sites[0].Bytes != 10000 || payload.Sites[0].ErrorRequests != 10 || payload.Sites[1].ID != "quiet" {
 		t.Fatalf("unexpected site sorting: %#v", payload.Sites)
+	}
+	if len(payload.Sites[0].StatusCodes) != 3 || payload.Sites[0].StatusCodes[0].Code != 200 || payload.Sites[0].StatusCodes[1].Code != 404 || payload.Sites[0].StatusCodes[2].Code != 500 {
+		t.Fatalf("unexpected site status sorting: %#v", payload.Sites[0].StatusCodes)
+	}
+	busyFirstPoint := payload.Sites[0].Series[1]
+	if busyFirstPoint.Requests != 98 || busyFirstPoint.Bytes != 9800 || busyFirstPoint.ErrorRequests != 8 {
+		t.Fatalf("unexpected site hourly point: %#v", busyFirstPoint)
 	}
 	if len(payload.Sites[1].Series) != 25 || payload.Sites[1].Series[0].Requests != 0 {
 		t.Fatalf("quiet site was not zero-filled: %#v", payload.Sites[1].Series)
+	}
+	if payload.Sites[1].StatusCodes == nil || len(payload.Sites[1].StatusCodes) != 0 {
+		t.Fatalf("quiet site status codes must be an empty array: %#v", payload.Sites[1].StatusCodes)
 	}
 }
 

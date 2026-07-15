@@ -38,9 +38,10 @@ type Node struct {
 }
 
 type Origin struct {
-	URL        string `json:"url"`
-	HostHeader string `json:"host_header"`
-	Enabled    bool   `json:"enabled"`
+	URL           string `json:"url"`
+	HostHeader    string `json:"host_header"`
+	TLSServerName string `json:"tls_server_name,omitempty"`
+	Enabled       bool   `json:"enabled"`
 }
 
 const (

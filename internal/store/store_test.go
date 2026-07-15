@@ -523,7 +523,7 @@ func TestOpenMigratesSiteColumnsForExistingDatabase(t *testing.T) {
 		t.Fatalf("site columns were not added to legacy table: %#v", found)
 	}
 	site, _, err := migrated.GetSite("legacy-site")
-	if err != nil || site.Passthrough || site.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB || site.ReadWriteTimeoutSeconds != domain.DefaultReadWriteTimeoutSeconds {
-		t.Fatalf("legacy site defaults: passthrough=%t client_max_body_size_mb=%d read_write_timeout_seconds=%d err=%v", site.Passthrough, site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, err)
+	if err != nil || site.Passthrough || site.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB || site.ReadWriteTimeoutSeconds != domain.DefaultReadWriteTimeoutSeconds || site.PrimaryOrigin.TLSServerName != "" {
+		t.Fatalf("legacy site defaults: passthrough=%t client_max_body_size_mb=%d read_write_timeout_seconds=%d tls_server_name=%q err=%v", site.Passthrough, site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.PrimaryOrigin.TLSServerName, err)
 	}
 }

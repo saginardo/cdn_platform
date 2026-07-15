@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -70,6 +71,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.requireAdmin(s.logout))
 	mux.HandleFunc("GET /api/session", s.requireAdmin(s.session))
 	mux.HandleFunc("GET /api/overview", s.requireAdmin(s.overview))
+	mux.HandleFunc("GET /api/logs", s.requireAdmin(s.searchLogs))
 	mux.HandleFunc("GET /api/nodes", s.requireAdmin(s.listNodes))
 	mux.HandleFunc("POST /api/nodes", s.requireAdmin(s.createNode))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
@@ -434,13 +436,30 @@ func (s *Server) listSites(response http.ResponseWriter, request *http.Request) 
 	writeJSON(response, http.StatusOK, sites)
 }
 
+type originRequest struct {
+	URL           string  `json:"url"`
+	HostHeader    string  `json:"host_header"`
+	TLSServerName *string `json:"tls_server_name"`
+	Enabled       bool    `json:"enabled"`
+}
+
+func (input originRequest) origin(current *domain.Origin) domain.Origin {
+	tlsServerName := ""
+	if input.TLSServerName != nil {
+		tlsServerName = *input.TLSServerName
+	} else if current != nil && strings.TrimSpace(input.URL) == current.URL {
+		tlsServerName = current.TLSServerName
+	}
+	return domain.Origin{URL: input.URL, HostHeader: input.HostHeader, TLSServerName: tlsServerName, Enabled: input.Enabled}
+}
+
 type siteRequest struct {
 	Name                    string         `json:"name"`
 	ZoneID                  string         `json:"zone_id"`
 	Domains                 []string       `json:"domains"`
 	NodeIDs                 []string       `json:"node_ids"`
-	PrimaryOrigin           domain.Origin  `json:"primary_origin"`
-	BackupOrigin            *domain.Origin `json:"backup_origin"`
+	PrimaryOrigin           originRequest  `json:"primary_origin"`
+	BackupOrigin            *originRequest `json:"backup_origin"`
 	StreamPaths             *[]string      `json:"stream_paths"`
 	Passthrough             *bool          `json:"passthrough"`
 	ClientMaxBodySizeMB     *int           `json:"client_max_body_size_mb"`
@@ -448,7 +467,7 @@ type siteRequest struct {
 	Enabled                 *bool          `json:"enabled"`
 }
 
-func (input siteRequest) site(id string) domain.Site {
+func (input siteRequest) site(id string, current *domain.Site) domain.Site {
 	enabled := true
 	if input.Enabled != nil {
 		enabled = *input.Enabled
@@ -469,7 +488,18 @@ func (input siteRequest) site(id string) domain.Site {
 	if input.ReadWriteTimeoutSeconds != nil {
 		readWriteTimeoutSeconds = *input.ReadWriteTimeoutSeconds
 	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin, BackupOrigin: input.BackupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, Enabled: enabled}
+	var currentPrimary *domain.Origin
+	var currentBackup *domain.Origin
+	if current != nil {
+		currentPrimary = &current.PrimaryOrigin
+		currentBackup = current.BackupOrigin
+	}
+	var backupOrigin *domain.Origin
+	if input.BackupOrigin != nil {
+		backup := input.BackupOrigin.origin(currentBackup)
+		backupOrigin = &backup
+	}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, Enabled: enabled}
 }
 
 func (input siteRequest) validateClientMaxBodySize() error {
@@ -499,7 +529,7 @@ func (s *Server) createSite(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
-	site, err := s.Store.CreateSite(input.site(""), input.ZoneID)
+	site, err := s.Store.CreateSite(input.site("", nil), input.ZoneID)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
@@ -526,7 +556,7 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
-	siteInput := input.site(request.PathValue("id"))
+	siteInput := input.site(request.PathValue("id"), &current)
 	if input.Enabled == nil {
 		siteInput.Enabled = current.Enabled
 	}
@@ -699,6 +729,147 @@ func (s *Server) siteLogs(response http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(response, http.StatusOK, events)
+}
+
+const logSearchPageSize = 100
+
+type logSearchResponse struct {
+	Logs     []domain.AccessLogEvent `json:"logs"`
+	From     time.Time               `json:"from"`
+	To       time.Time               `json:"to"`
+	Offset   int                     `json:"offset"`
+	PageSize int                     `json:"page_size"`
+	HasMore  bool                    `json:"has_more"`
+}
+
+func (s *Server) searchLogs(response http.ResponseWriter, request *http.Request) {
+	query, err := parseLogSearchQuery(request, time.Now().UTC())
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	result := logstore.LogPage{Events: []domain.AccessLogEvent{}}
+	if s.Logs != nil {
+		result, err = s.Logs.Search(request.Context(), query)
+		if err != nil {
+			writeError(response, http.StatusBadGateway, err)
+			return
+		}
+	}
+	if result.Events == nil {
+		result.Events = []domain.AccessLogEvent{}
+	}
+	writeJSON(response, http.StatusOK, logSearchResponse{
+		Logs: result.Events, From: query.From, To: query.To, Offset: query.Offset,
+		PageSize: logSearchPageSize, HasMore: result.HasMore,
+	})
+}
+
+func parseLogSearchQuery(request *http.Request, now time.Time) (logstore.LogQuery, error) {
+	values := request.URL.Query()
+	to := now.UTC()
+	var err error
+	if raw := strings.TrimSpace(values.Get("to")); raw != "" {
+		to, err = time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return logstore.LogQuery{}, errors.New("to must be an RFC3339 timestamp")
+		}
+		to = to.UTC()
+	}
+	from := to.Add(-time.Hour)
+	if raw := strings.TrimSpace(values.Get("from")); raw != "" {
+		from, err = time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return logstore.LogQuery{}, errors.New("from must be an RFC3339 timestamp")
+		}
+		from = from.UTC()
+	}
+	if !from.Before(to) {
+		return logstore.LogQuery{}, errors.New("from must be earlier than to")
+	}
+	if to.Sub(from) > 7*24*time.Hour {
+		return logstore.LogQuery{}, errors.New("log search range cannot exceed 7 days")
+	}
+
+	offset := 0
+	if raw := strings.TrimSpace(values.Get("offset")); raw != "" {
+		offset, err = strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			return logstore.LogQuery{}, errors.New("offset must be a non-negative integer")
+		}
+	}
+	statusMin, statusMax, err := parseLogStatusFilter(values.Get("status"))
+	if err != nil {
+		return logstore.LogQuery{}, err
+	}
+	method := strings.ToUpper(strings.TrimSpace(values.Get("method")))
+	if method != "" && !validLogMethod(method) {
+		return logstore.LogQuery{}, errors.New("method must be a valid HTTP method token")
+	}
+	clientIP := strings.TrimSpace(values.Get("client_ip"))
+	if clientIP != "" {
+		ip := net.ParseIP(clientIP)
+		if ip == nil {
+			return logstore.LogQuery{}, errors.New("client_ip must be a valid IP address")
+		}
+		clientIP = ip.String()
+	}
+	cacheStatus := strings.ToUpper(strings.TrimSpace(values.Get("cache_status")))
+	if cacheStatus != "" && !validCacheStatus(cacheStatus) {
+		return logstore.LogQuery{}, errors.New("cache_status is not supported")
+	}
+	siteID := strings.TrimSpace(values.Get("site_id"))
+	nodeID := strings.TrimSpace(values.Get("node_id"))
+	path := strings.TrimSpace(values.Get("path"))
+	if len(siteID) > 128 || len(nodeID) > 128 {
+		return logstore.LogQuery{}, errors.New("site_id and node_id must not exceed 128 characters")
+	}
+	if len(path) > 512 {
+		return logstore.LogQuery{}, errors.New("path search must not exceed 512 characters")
+	}
+	return logstore.LogQuery{
+		From: from, To: to, SiteID: siteID, NodeID: nodeID, Method: method,
+		StatusMin: statusMin, StatusMax: statusMax, Path: path, ClientIP: clientIP,
+		CacheStatus: cacheStatus, Offset: offset, Limit: logSearchPageSize,
+	}, nil
+}
+
+func parseLogStatusFilter(value string) (uint16, uint16, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return 0, 0, nil
+	}
+	if len(value) == 3 && value[1:] == "xx" && value[0] >= '1' && value[0] <= '5' {
+		minimum := uint16(value[0]-'0') * 100
+		return minimum, minimum + 99, nil
+	}
+	status, err := strconv.Atoi(value)
+	if err != nil || status < 100 || status > 599 {
+		return 0, 0, errors.New("status must be an HTTP status code or a class such as 4xx")
+	}
+	return uint16(status), uint16(status), nil
+}
+
+func validLogMethod(value string) bool {
+	if len(value) == 0 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("!#$%&'*+-.^_`|~", character) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validCacheStatus(value string) bool {
+	switch value {
+	case "HIT", "MISS", "BYPASS", "EXPIRED", "STALE", "UPDATING", "REVALIDATED":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) siteMetrics(response http.ResponseWriter, request *http.Request) {

@@ -106,7 +106,7 @@ server {
         grpc_next_upstream_tries 2;
         {{if .UseTLS}}
         grpc_ssl_server_name on;
-        grpc_ssl_name {{.PrimaryHostname}};
+        grpc_ssl_name {{.PrimaryTLSName}};
         grpc_ssl_verify on;
         grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         {{end}}
@@ -130,7 +130,7 @@ server {
         grpc_send_timeout 1h;
         {{if .UseTLS}}
         grpc_ssl_server_name on;
-        grpc_ssl_name {{.BackupHostname}};
+        grpc_ssl_name {{.BackupTLSName}};
         grpc_ssl_verify on;
         grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         {{end}}
@@ -189,7 +189,7 @@ server {
         {{end}}
         {{if .UseTLS}}
         proxy_ssl_server_name on;
-        proxy_ssl_name {{.PrimaryHostname}};
+        proxy_ssl_name {{.PrimaryTLSName}};
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         {{end}}
@@ -222,7 +222,7 @@ server {
 		{{end}}
 		{{if .UseTLS}}
 		proxy_ssl_server_name on;
-		proxy_ssl_name {{.PrimaryHostname}};
+		proxy_ssl_name {{.PrimaryTLSName}};
 		proxy_ssl_verify on;
 		proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
 		{{end}}
@@ -256,7 +256,7 @@ server {
         {{end}}
         {{if .UseTLS}}
         proxy_ssl_server_name on;
-        proxy_ssl_name {{.BackupHostname}};
+        proxy_ssl_name {{.BackupTLSName}};
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
 		{{end}}
@@ -285,7 +285,7 @@ server {
         {{end}}
         {{if .UseTLS}}
         proxy_ssl_server_name on;
-        proxy_ssl_name {{.BackupHostname}};
+        proxy_ssl_name {{.BackupTLSName}};
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
 		{{end}}
@@ -300,11 +300,11 @@ type renderedSite struct {
 	ID                  string
 	DomainList          string
 	PrimaryHostPort     string
-	PrimaryHostname     string
+	PrimaryTLSName      string
 	PrimaryScheme       string
 	UseTLS              bool
 	BackupHostPort      string
-	BackupHostname      string
+	BackupTLSName       string
 	BackupHostHeader    string
 	HostHeader          string
 	CacheGeneration     int64
@@ -347,7 +347,7 @@ func Render(sites []domain.Site) (string, error) {
 			return "", fmt.Errorf("site %s passthrough mode is only supported for HTTP and HTTPS origins", site.Name)
 		}
 		item := renderedSite{
-			ID: site.ID, DomainList: strings.Join(site.Domains, " "), PrimaryHostPort: primary.Host, PrimaryHostname: primary.Hostname(),
+			ID: site.ID, DomainList: strings.Join(site.Domains, " "), PrimaryHostPort: primary.Host, PrimaryTLSName: site.PrimaryOrigin.TLSServerName,
 			PrimaryScheme: domain.ProxyScheme(primary.Scheme), UseTLS: domain.OriginUsesTLS(primary.Scheme), HostHeader: site.PrimaryOrigin.HostHeader, CacheGeneration: site.CacheGeneration,
 			GRPC: domain.IsGRPCScheme(primary.Scheme), Passthrough: site.Passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB,
 			ReadWriteTimeout: fmt.Sprintf("%ds", readWriteTimeoutSeconds),
@@ -358,6 +358,9 @@ func Render(sites []domain.Site) (string, error) {
 		if item.HostHeader == "" {
 			item.HostHeader = primary.Hostname()
 		}
+		if item.PrimaryTLSName == "" {
+			item.PrimaryTLSName = primary.Hostname()
+		}
 		if site.BackupOrigin != nil && site.BackupOrigin.Enabled {
 			backup, err := parseOrigin(*site.BackupOrigin)
 			if err != nil {
@@ -367,10 +370,13 @@ func Render(sites []domain.Site) (string, error) {
 				return "", fmt.Errorf("site %s origins must use the same scheme", site.Name)
 			}
 			item.BackupHostPort = backup.Host
-			item.BackupHostname = backup.Hostname()
+			item.BackupTLSName = site.BackupOrigin.TLSServerName
 			item.BackupHostHeader = site.BackupOrigin.HostHeader
 			if item.BackupHostHeader == "" {
 				item.BackupHostHeader = backup.Hostname()
+			}
+			if item.BackupTLSName == "" {
+				item.BackupTLSName = backup.Hostname()
 			}
 		}
 		items = append(items, item)

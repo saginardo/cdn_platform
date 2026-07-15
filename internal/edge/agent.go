@@ -25,18 +25,20 @@ import (
 )
 
 type Config struct {
-	ControlURL      string
-	EnrollmentToken string
-	StateDir        string
-	NginxConfigPath string
-	CertificateDir  string
-	ClientKeyPath   string
-	ClientCertPath  string
-	CAPath          string
-	AccessLogPath   string
-	PollInterval    time.Duration
-	HTTPClient      *http.Client
-	Runner          Runner
+	ControlURL            string
+	EnrollmentToken       string
+	StateDir              string
+	NginxConfigPath       string
+	CertificateDir        string
+	ClientKeyPath         string
+	ClientCertPath        string
+	CAPath                string
+	AccessLogPath         string
+	PollInterval          time.Duration
+	ListenerSettleTimeout time.Duration
+	ListenerPollInterval  time.Duration
+	HTTPClient            *http.Client
+	Runner                Runner
 }
 
 type Agent struct {
@@ -74,6 +76,12 @@ func New(config Config) (*Agent, error) {
 	}
 	if config.PollInterval == 0 {
 		config.PollInterval = 30 * time.Second
+	}
+	if config.ListenerSettleTimeout <= 0 {
+		config.ListenerSettleTimeout = 5 * time.Second
+	}
+	if config.ListenerPollInterval <= 0 {
+		config.ListenerPollInterval = 100 * time.Millisecond
 	}
 	if config.Runner == nil {
 		config.Runner = NginxRunner{}
@@ -314,7 +322,7 @@ func (a *Agent) apply(state domain.DesiredState) error {
 		}
 		return a.applyFailed(state.Version, "nginx_apply_failed", err, nil)
 	}
-	listeners, err = a.Config.Runner.PortListeners(ports)
+	listeners, err = a.waitForNginxListeners(ports)
 	if err != nil {
 		return a.applyFailed(state.Version, "port_check_failed", err, nil)
 	}
@@ -333,6 +341,28 @@ func (a *Agent) apply(state domain.DesiredState) error {
 	}
 	a.lastApplyReport = &domain.ApplyReport{Version: state.Version, Status: domain.ApplySucceeded, Detail: "Nginx is listening on " + formatPorts(ports)}
 	return nil
+}
+
+func (a *Agent) waitForNginxListeners(ports []int) ([]domain.PortConflict, error) {
+	deadline := time.Now().Add(a.Config.ListenerSettleTimeout)
+	for {
+		listeners, err := a.Config.Runner.PortListeners(ports)
+		if err != nil {
+			return nil, err
+		}
+		if len(foreignListeners(listeners)) > 0 || nginxOwnsPorts(listeners, ports) {
+			return listeners, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return listeners, nil
+		}
+		delay := a.Config.ListenerPollInterval
+		if delay > remaining {
+			delay = remaining
+		}
+		time.Sleep(delay)
+	}
 }
 
 func desiredPublicPorts(state domain.DesiredState) []int {

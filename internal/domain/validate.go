@@ -148,6 +148,15 @@ func ValidateOrigin(origin *Origin) error {
 	if !ValidHostHeader(origin.HostHeader) {
 		return fmt.Errorf("invalid origin Host header")
 	}
+	origin.TLSServerName = strings.ToLower(strings.TrimSpace(origin.TLSServerName))
+	if origin.TLSServerName != "" {
+		if !OriginUsesTLS(parsed.Scheme) {
+			return fmt.Errorf("TLS server name is only supported for HTTPS, WSS, or GRPCS origins")
+		}
+		if net.ParseIP(origin.TLSServerName) != nil || !ValidHostname(origin.TLSServerName) {
+			return fmt.Errorf("invalid TLS server name; use a DNS hostname without a port or wildcard")
+		}
+	}
 	return nil
 }
 

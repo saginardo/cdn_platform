@@ -26,8 +26,10 @@ type overviewSeriesPoint struct {
 }
 
 type overviewSitePoint struct {
-	Time     time.Time `json:"time"`
-	Requests uint64    `json:"requests"`
+	Time          time.Time `json:"time"`
+	Requests      uint64    `json:"requests"`
+	Bytes         int64     `json:"bytes"`
+	ErrorRequests uint64    `json:"error_requests"`
 }
 
 type overviewStatusCode struct {
@@ -36,12 +38,14 @@ type overviewStatusCode struct {
 }
 
 type overviewSite struct {
-	ID       string              `json:"id"`
-	Name     string              `json:"name"`
-	Domains  []string            `json:"domains"`
-	Requests uint64              `json:"requests"`
-	Bytes    int64               `json:"bytes"`
-	Series   []overviewSitePoint `json:"series"`
+	ID            string               `json:"id"`
+	Name          string               `json:"name"`
+	Domains       []string             `json:"domains"`
+	Requests      uint64               `json:"requests"`
+	Bytes         int64                `json:"bytes"`
+	ErrorRequests uint64               `json:"error_requests"`
+	StatusCodes   []overviewStatusCode `json:"status_codes"`
+	Series        []overviewSitePoint  `json:"series"`
 }
 
 type overviewPayload struct {
@@ -85,13 +89,15 @@ func buildOverviewPayload(from, to time.Time, configuredSites []domain.Site, buc
 
 	sites := make([]overviewSite, 0, len(configuredSites))
 	siteIndexes := make(map[string]int, len(configuredSites))
+	siteStatusCounts := make(map[string]map[uint16]uint64, len(configuredSites))
 	for _, site := range configuredSites {
 		siteSeries := make([]overviewSitePoint, len(times))
 		for index, bucketTime := range times {
 			siteSeries[index].Time = bucketTime
 		}
 		siteIndexes[site.ID] = len(sites)
-		sites = append(sites, overviewSite{ID: site.ID, Name: site.Name, Domains: append([]string{}, site.Domains...), Series: siteSeries})
+		siteStatusCounts[site.ID] = make(map[uint16]uint64)
+		sites = append(sites, overviewSite{ID: site.ID, Name: site.Name, Domains: append([]string{}, site.Domains...), StatusCodes: make([]overviewStatusCode, 0), Series: siteSeries})
 	}
 
 	payload := overviewPayload{From: from, To: to, BucketSeconds: int(time.Hour.Seconds()), Series: series, StatusCodes: make([]overviewStatusCode, 0), Sites: sites}
@@ -114,19 +120,20 @@ func buildOverviewPayload(from, to time.Time, configuredSites []domain.Site, buc
 				payload.Sites[siteIndex].Requests += bucket.Requests
 				payload.Sites[siteIndex].Bytes += bucket.Bytes
 				payload.Sites[siteIndex].Series[index].Requests += bucket.Requests
+				payload.Sites[siteIndex].Series[index].Bytes += bucket.Bytes
+				siteStatusCounts[bucket.SiteID][bucket.Status] += bucket.Requests
+				if isError {
+					payload.Sites[siteIndex].ErrorRequests += bucket.Requests
+					payload.Sites[siteIndex].Series[index].ErrorRequests += bucket.Requests
+				}
 			}
 		}
 	}
 
-	for code, requests := range statusCounts {
-		payload.StatusCodes = append(payload.StatusCodes, overviewStatusCode{Code: code, Requests: requests})
+	payload.StatusCodes = sortedStatusCodes(statusCounts)
+	for index := range payload.Sites {
+		payload.Sites[index].StatusCodes = sortedStatusCodes(siteStatusCounts[payload.Sites[index].ID])
 	}
-	sort.Slice(payload.StatusCodes, func(i, j int) bool {
-		if payload.StatusCodes[i].Requests == payload.StatusCodes[j].Requests {
-			return payload.StatusCodes[i].Code < payload.StatusCodes[j].Code
-		}
-		return payload.StatusCodes[i].Requests > payload.StatusCodes[j].Requests
-	})
 	sort.SliceStable(payload.Sites, func(i, j int) bool {
 		if payload.Sites[i].Requests == payload.Sites[j].Requests {
 			left, right := strings.ToLower(payload.Sites[i].Name), strings.ToLower(payload.Sites[j].Name)
@@ -138,6 +145,20 @@ func buildOverviewPayload(from, to time.Time, configuredSites []domain.Site, buc
 		return payload.Sites[i].Requests > payload.Sites[j].Requests
 	})
 	return payload
+}
+
+func sortedStatusCodes(counts map[uint16]uint64) []overviewStatusCode {
+	statusCodes := make([]overviewStatusCode, 0, len(counts))
+	for code, requests := range counts {
+		statusCodes = append(statusCodes, overviewStatusCode{Code: code, Requests: requests})
+	}
+	sort.Slice(statusCodes, func(i, j int) bool {
+		if statusCodes[i].Requests == statusCodes[j].Requests {
+			return statusCodes[i].Code < statusCodes[j].Code
+		}
+		return statusCodes[i].Requests > statusCodes[j].Requests
+	})
+	return statusCodes
 }
 
 func overviewBucketTimes(from, to time.Time) []time.Time {

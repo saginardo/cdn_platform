@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cdn-platform/internal/domain"
 )
@@ -104,6 +105,88 @@ func TestApplyConfirmsNginxOwnsBothPublicPorts(t *testing.T) {
 	}
 	if runner.tests != 1 || runner.applies != 1 || agent.lastApplyReport == nil || agent.lastApplyReport.Status != domain.ApplySucceeded {
 		t.Fatalf("unexpected apply state: tests=%d applies=%d report=%#v", runner.tests, runner.applies, agent.lastApplyReport)
+	}
+}
+
+func TestApplyWaitsForNginxToOpenNewPublicListener(t *testing.T) {
+	directory := t.TempDir()
+	runner := &fakeRunner{listeners: [][]domain.PortConflict{
+		nil,
+		{{Port: 80, PID: 11, Process: "nginx"}},
+		{{Port: 80, PID: 11, Process: "nginx"}},
+		{{Port: 80, PID: 11, Process: "nginx"}, {Port: 443, PID: 12, Process: "nginx"}},
+	}}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath: filepath.Join(directory, "nginx.conf"), CertificateDir: filepath.Join(directory, "certs"), Runner: runner,
+		ListenerSettleTimeout: 100 * time.Millisecond, ListenerPollInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.apply(domain.DesiredState{Version: 10, NginxConfig: "new-config", PublicPorts: []int{80, 443}}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.listenerChecks != 4 || agent.lastApplyReport == nil || agent.lastApplyReport.Status != domain.ApplySucceeded {
+		t.Fatalf("delayed listeners were not accepted: checks=%d report=%#v", runner.listenerChecks, agent.lastApplyReport)
+	}
+}
+
+func TestApplyRollsBackWhenNginxListenerSettleTimesOut(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	if err := os.WriteFile(configPath, []byte("old-config"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{listeners: [][]domain.PortConflict{
+		nil,
+		{{Port: 80, PID: 11, Process: "nginx"}},
+	}}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath: configPath, CertificateDir: filepath.Join(directory, "certs"), Runner: runner,
+		ListenerSettleTimeout: 5 * time.Millisecond, ListenerPollInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = agent.apply(domain.DesiredState{Version: 11, NginxConfig: "new-config", PublicPorts: []int{80, 443}})
+	if err == nil || agent.lastApplyReport == nil || agent.lastApplyReport.Code != "nginx_not_listening" {
+		t.Fatalf("apply result = %v, report = %#v", err, agent.lastApplyReport)
+	}
+	config, readErr := os.ReadFile(configPath)
+	if readErr != nil || string(config) != "old-config" {
+		t.Fatalf("configuration was not restored after listener timeout: %q, %v", config, readErr)
+	}
+	if runner.listenerChecks < 3 {
+		t.Fatalf("listener readiness was not retried: checks=%d", runner.listenerChecks)
+	}
+}
+
+func TestApplyStopsListenerWaitOnPortConflict(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	if err := os.WriteFile(configPath, []byte("old-config"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{listeners: [][]domain.PortConflict{
+		nil,
+		{{Port: 80, PID: 11, Process: "nginx"}, {Port: 443, PID: 22, Process: "caddy"}},
+	}}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath: configPath, CertificateDir: filepath.Join(directory, "certs"), Runner: runner,
+		ListenerSettleTimeout: time.Second, ListenerPollInterval: 100 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = agent.apply(domain.DesiredState{Version: 12, NginxConfig: "new-config", PublicPorts: []int{80, 443}})
+	if err == nil || agent.lastApplyReport == nil || agent.lastApplyReport.Code != "port_conflict" {
+		t.Fatalf("apply result = %v, report = %#v", err, agent.lastApplyReport)
+	}
+	if runner.listenerChecks != 2 {
+		t.Fatalf("post-reload port conflict should stop waiting immediately: checks=%d", runner.listenerChecks)
 	}
 }
 

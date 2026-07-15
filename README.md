@@ -117,6 +117,8 @@ If Nginx validation or reload fails before cleanup is committed, the script rest
 
 The edge health endpoint is `http://EDGE_IPV4/__cdn_health`; expose port 80 and 443 publicly on edge nodes. The origin itself should permit inbound traffic only from the returned edge CIDRs.
 
+For an HTTPS/WSS/GRPCS origin reached by IP while its certificate covers only a DNS hostname, configure the origin URL, Host header, and TLS SNI independently. See [docs/ORIGIN_TLS_SNI.md](docs/ORIGIN_TLS_SNI.md) for the IP connection example, certificate requirements, and edge-side verification commands.
+
 ### Range 流量与透传模式
 
 对于不需要视频缓存、只需要稳定转发 HTTP(S) Range 流量的整站代理，启用“透传模式（仅 HTTP(S)，禁用 Nginx 缓存）”并重新发布。不要在保留 `proxy_cache` 的前提下只补充 `Range` / `If-Range`；这不能保证正确回源范围语义。完整的启用条件、限制、故障根因和 `206` 验证命令见 [docs/PASSTHROUGH_MODE.md](docs/PASSTHROUGH_MODE.md)。

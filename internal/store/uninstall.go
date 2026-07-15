@@ -402,6 +402,7 @@ func completeNodeUninstall(tx *sql.Tx, nodeID string, status NodeUninstallJobSta
 		`DELETE FROM enrollment_tokens WHERE node_id = ?`,
 		`DELETE FROM node_states WHERE node_id = ?`,
 		`DELETE FROM node_health WHERE node_id = ?`,
+		`DELETE FROM site_node_health WHERE node_id = ?`,
 		`DELETE FROM dns_bindings WHERE node_id = ?`,
 	} {
 		if _, err := tx.Exec(query, nodeID); err != nil {

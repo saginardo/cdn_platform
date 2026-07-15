@@ -51,9 +51,9 @@ Migrate one node at a time. While legacy and migrated nodes coexist, do not publ
 
 1. Confirm the node is active, has no `last_error`, and has a replacement edge serving each public site if interruption is unacceptable.
 2. In the node page, generate a fresh deployment/upgrade command and run it as root on the node.
-3. The installer stops only `cdn-edge-agent`; Nginx keeps serving the already loaded configuration.
+3. The installer stops only `cdn-edge-agent`; Nginx keeps serving the already loaded configuration until the integration links are switched.
 4. It copies the mTLS identity, site certificates, applied version, pending log queue, queue offset, and rotated logs. It moves the active access log on the same filesystem so the offset and open Nginx file descriptor remain valid.
-5. It converts the generated Nginx paths, switches the system integration links, runs `nginx -t`, reloads Nginx, starts the agent, waits for the mTLS identity, and checks the local health endpoint.
+5. It converts the generated Nginx paths, switches the system integration links, runs `nginx -t`, and cold-restarts Nginx because the running `cdn_cache` zone cannot change its disk path during reload. This produces a short interruption on that node. It then starts the agent, waits for the mTLS identity, and checks the local health endpoint.
 6. Only after all checks succeed does it remove legacy paths. The Nginx disk cache is deliberately discarded and rebuilt below `/opt/cdn-edge/cache`.
 
 If the active access log and `/opt/cdn-edge` are on different filesystems, the installer stops before switching Nginx. This avoids silently losing or replaying request logs. Move `/opt` onto the root filesystem or perform an explicitly planned maintenance migration before retrying.
@@ -70,9 +70,11 @@ sudo find /opt/cdn-edge -maxdepth 3 -type f -o -type l
 
 After every node has migrated, run `cdn-control publish-all` through the control Compose service, wait for each node's applied version to catch up, and confirm the control UI shows recent heartbeats without `last_error`.
 
+The restart requirement, asynchronous reload failure mode, worker-generation check, and per-site HTTPS/SNI acceptance commands are documented in [NGINX_APPLY_SAFETY.md](NGINX_APPLY_SAFETY.md).
+
 ## Failure and rollback
 
-Before switching paths, the installer saves the current Nginx entry, systemd unit, default Nginx site, and service state. A failed Nginx validation/reload, agent start, enrollment, or health check restores those entries and the previous edge-agent state. Temporary transaction directories are removed on success and failure.
+Before switching paths, the installer saves the current Nginx entry, systemd unit, default Nginx site, and service state. A failed Nginx validation/restart, agent start, enrollment, or health check restores those entries and the previous edge-agent state. Legacy rollback cold-restarts Nginx with the restored cache path so the running master cannot retain the failed migration state. Temporary transaction directories are removed on success and failure.
 
 For a fresh node, a failure after successful enrollment may consume the one-time token. Generate a new deployment command before retrying. Do not manually combine a partial legacy layout with a marked `/opt/cdn-edge` layout.
 

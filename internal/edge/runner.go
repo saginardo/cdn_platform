@@ -2,11 +2,13 @@ package edge
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"cdn-platform/internal/domain"
 )
@@ -18,7 +20,16 @@ type Runner interface {
 }
 
 type NginxRunner struct {
-	Binary string
+	Binary             string
+	ReloadTimeout      time.Duration
+	ReloadPollInterval time.Duration
+	command            func(string, ...string) ([]byte, error)
+	snapshot           func() (nginxProcessSnapshot, error)
+}
+
+type nginxProcessSnapshot struct {
+	MasterPID int
+	Workers   []int
 }
 
 func (r NginxRunner) Test() error {
@@ -26,7 +37,7 @@ func (r NginxRunner) Test() error {
 	if binary == "" {
 		binary = "nginx"
 	}
-	output, err := exec.Command(binary, "-t").CombinedOutput()
+	output, err := r.run(binary, "-t")
 	if err != nil {
 		return fmt.Errorf("nginx -t: %w: %s", err, output)
 	}
@@ -34,15 +45,16 @@ func (r NginxRunner) Test() error {
 }
 
 func (r NginxRunner) Apply() error {
-	active := exec.Command("systemctl", "is-active", "--quiet", "nginx").Run() == nil
+	_, activeErr := r.run("systemctl", "is-active", "--quiet", "nginx")
+	active := activeErr == nil
 	if active {
 		return r.reload()
 	}
 	// A failed unit retains its failed state after a previous port conflict.
 	// Clearing it here makes a later Publish a real recovery action once the
 	// conflicting listener has been removed.
-	_ = exec.Command("systemctl", "reset-failed", "nginx").Run()
-	output, err := exec.Command("systemctl", "start", "nginx").CombinedOutput()
+	_, _ = r.run("systemctl", "reset-failed", "nginx")
+	output, err := r.run("systemctl", "start", "nginx")
 	if err != nil {
 		return fmt.Errorf("start nginx: %w: %s", err, output)
 	}
@@ -50,15 +62,107 @@ func (r NginxRunner) Apply() error {
 }
 
 func (r NginxRunner) reload() error {
+	before, err := r.processSnapshot()
+	if err != nil {
+		return fmt.Errorf("inspect Nginx workers before reload: %w", err)
+	}
 	binary := r.Binary
 	if binary == "" {
 		binary = "nginx"
 	}
-	output, err := exec.Command(binary, "-s", "reload").CombinedOutput()
+	output, err := r.run(binary, "-s", "reload")
 	if err != nil {
 		return fmt.Errorf("nginx reload: %w: %s", err, output)
 	}
-	return nil
+	return r.waitForNewWorker(before)
+}
+
+func (r NginxRunner) waitForNewWorker(before nginxProcessSnapshot) error {
+	timeout := r.ReloadTimeout
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	pollInterval := r.ReloadPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 100 * time.Millisecond
+	}
+	deadline := time.Now().Add(timeout)
+	var last nginxProcessSnapshot
+	var lastErr error
+	for {
+		last, lastErr = r.processSnapshot()
+		if lastErr == nil && hasNewWorker(before.Workers, last.Workers) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(pollInterval)
+	}
+	if lastErr != nil {
+		return fmt.Errorf("Nginx reload was not adopted within %s: %w", timeout, lastErr)
+	}
+	return fmt.Errorf("Nginx reload was not adopted within %s: master %d workers %v remained master %d workers %v", timeout, before.MasterPID, before.Workers, last.MasterPID, last.Workers)
+}
+
+func hasNewWorker(before, after []int) bool {
+	existing := make(map[int]bool, len(before))
+	for _, pid := range before {
+		existing[pid] = true
+	}
+	for _, pid := range after {
+		if !existing[pid] {
+			return true
+		}
+	}
+	return false
+}
+
+func (r NginxRunner) run(name string, arguments ...string) ([]byte, error) {
+	if r.command != nil {
+		return r.command(name, arguments...)
+	}
+	return exec.Command(name, arguments...).CombinedOutput()
+}
+
+func (r NginxRunner) processSnapshot() (nginxProcessSnapshot, error) {
+	if r.snapshot != nil {
+		return r.snapshot()
+	}
+	return readNginxProcessSnapshot()
+}
+
+func readNginxProcessSnapshot() (nginxProcessSnapshot, error) {
+	pidBytes, err := os.ReadFile("/run/nginx.pid")
+	if err != nil {
+		return nginxProcessSnapshot{}, err
+	}
+	masterPID, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil || masterPID <= 0 {
+		return nginxProcessSnapshot{}, fmt.Errorf("invalid Nginx master PID %q", strings.TrimSpace(string(pidBytes)))
+	}
+	childrenPath := fmt.Sprintf("/proc/%d/task/%d/children", masterPID, masterPID)
+	childrenBytes, err := os.ReadFile(childrenPath)
+	if err != nil {
+		return nginxProcessSnapshot{}, err
+	}
+	workers := make([]int, 0)
+	for _, value := range strings.Fields(string(childrenBytes)) {
+		pid, parseErr := strconv.Atoi(value)
+		if parseErr != nil || pid <= 0 {
+			continue
+		}
+		commandLine, readErr := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		if readErr != nil {
+			continue
+		}
+		title := strings.ReplaceAll(string(commandLine), "\x00", " ")
+		if strings.Contains(title, "nginx: worker process") {
+			workers = append(workers, pid)
+		}
+	}
+	sort.Ints(workers)
+	return nginxProcessSnapshot{MasterPID: masterPID, Workers: workers}, nil
 }
 
 var listenerProcess = regexp.MustCompile(`\("([^"]+)",pid=([0-9]+)`) // ss users:(()) output
@@ -66,7 +170,7 @@ var listenerProcess = regexp.MustCompile(`\("([^"]+)",pid=([0-9]+)`) // ss users
 func (r NginxRunner) PortListeners(ports []int) ([]domain.PortConflict, error) {
 	seen := make(map[string]domain.PortConflict)
 	for _, port := range ports {
-		output, err := exec.Command("ss", "-H", "-ltnp", fmt.Sprintf("( sport = :%d )", port)).CombinedOutput()
+		output, err := r.run("ss", "-H", "-ltnp", fmt.Sprintf("( sport = :%d )", port))
 		if err != nil {
 			return nil, fmt.Errorf("inspect TCP port %d: %w: %s", port, err, output)
 		}

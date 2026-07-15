@@ -2,19 +2,25 @@ package control
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	"cdn-platform/internal/domain"
 	"cdn-platform/internal/integrations"
+	"cdn-platform/internal/nginx"
 )
 
 type HealthManager struct {
 	Server          *Server
 	Client          *http.Client
+	SiteProbe       func(context.Context, domain.Site, domain.Node) (bool, string)
 	alertMu         sync.Mutex
 	noHealthyAlerts map[string]bool
 }
@@ -121,13 +127,52 @@ func (m *HealthManager) reconcileSite(ctx context.Context, site domain.Site, nod
 		if desiredVersion == 0 || node.AppliedVersion < desiredVersion {
 			continue
 		}
-		health, err := m.Server.Store.NodeHealth(node.ID)
+		nodeHealth, err := m.Server.Store.NodeHealth(node.ID)
 		if err != nil {
 			return err
 		}
-		if health.DNSEligible {
-			healthy = append(healthy, node)
+		if !nodeHealth.DNSEligible {
+			continue
 		}
+		state, _, err := m.Server.Store.NodeState(node.ID)
+		if err != nil {
+			return err
+		}
+		hasSiteHealth := nginx.HasSiteHealth(state.NginxConfig, site.ID)
+		if nodeHealth.LastError != "" {
+			// Preserve both hysteresis decisions, but do not multiply a current
+			// reachability failure into one HTTPS timeout per hosted site.
+			if !hasSiteHealth {
+				healthy = append(healthy, node)
+				continue
+			}
+			siteHealth, err := m.Server.Store.SiteNodeHealth(site.ID, node.ID)
+			if err != nil {
+				return err
+			}
+			if siteHealth.DNSEligible {
+				healthy = append(healthy, node)
+			}
+			continue
+		}
+		if hasSiteHealth {
+			prior, err := m.Server.Store.SiteNodeHealth(site.ID, node.ID)
+			if err != nil {
+				return err
+			}
+			probeHealthy, detail := m.siteCheck(ctx, site, node)
+			siteHealth, err := m.Server.Store.RecordSiteNodeHealth(site.ID, node.ID, probeHealthy, detail)
+			if err != nil {
+				return err
+			}
+			if prior.DNSEligible && !siteHealth.DNSEligible && m.Server.Notifier != nil {
+				_ = m.Server.Notifier.Notify(ctx, "CDN alert: site endpoint removed from DNS pool", "Site "+site.Name+" on node "+node.Name+" ("+node.PublicIPv4+") failed three consecutive HTTPS/SNI health checks: "+siteHealth.LastError)
+			}
+			if !siteHealth.DNSEligible {
+				continue
+			}
+		}
+		healthy = append(healthy, node)
 	}
 	if len(healthy) == 0 {
 		if activeAssigned == 0 {
@@ -170,6 +215,64 @@ func (m *HealthManager) check(ctx context.Context, address string) (bool, string
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return false, "health endpoint returned " + response.Status
+	}
+	return true, ""
+}
+
+func (m *HealthManager) siteCheck(ctx context.Context, site domain.Site, node domain.Node) (bool, string) {
+	if m.SiteProbe != nil {
+		return m.SiteProbe(ctx, site, node)
+	}
+	return m.checkSite(ctx, site, node)
+}
+
+func (m *HealthManager) checkSite(ctx context.Context, site domain.Site, node domain.Node) (bool, string) {
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, network, net.JoinHostPort(node.PublicIPv4, "443"))
+		},
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:   5 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Second,
+		DisableKeepAlives:     true,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   8 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	want := nginx.SiteHealthBody(site.ID)
+	for _, domainName := range site.Domains {
+		endpoint := (&url.URL{Scheme: "https", Host: domainName, Path: "/__cdn_health"}).String()
+		request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return false, domainName + ": " + err.Error()
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			return false, domainName + ": " + err.Error()
+		}
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 513))
+		closeErr := response.Body.Close()
+		if readErr != nil {
+			return false, domainName + ": read health response: " + readErr.Error()
+		}
+		if closeErr != nil {
+			return false, domainName + ": close health response: " + closeErr.Error()
+		}
+		if response.StatusCode != http.StatusOK {
+			return false, domainName + ": health endpoint returned " + response.Status
+		}
+		if strings.TrimSpace(string(body)) != want {
+			return false, fmt.Sprintf("%s: unexpected health response %q", domainName, strings.TrimSpace(string(body)))
+		}
 	}
 	return true, ""
 }

@@ -105,6 +105,10 @@ func TestInstallEdgeScriptMigratesLegacyStateWithoutCache(t *testing.T) {
 	if environment := harness.read(t, "opt/cdn-edge/config/edge.env"); !strings.Contains(environment, "EDGE_POLL_SECONDS=45") {
 		t.Fatalf("migration did not retain poll interval:\n%s", environment)
 	}
+	log := harness.read(t, "mock.log")
+	if !strings.Contains(log, "systemctl restart nginx.service") {
+		t.Fatalf("legacy migration did not cold-start the new cache zone:\n%s", log)
+	}
 }
 
 func TestInstallEdgeScriptUpgradesNewLayoutIdempotently(t *testing.T) {
@@ -130,6 +134,26 @@ func TestInstallEdgeScriptUpgradesNewLayoutIdempotently(t *testing.T) {
 	environment = harness.read(t, "opt/cdn-edge/config/edge.env")
 	if !strings.Contains(environment, "EDGE_POLL_SECONDS=75") || !strings.Contains(environment, "ENROLLMENT_TOKEN=\n") {
 		t.Fatalf("upgrade did not update environment safely:\n%s", environment)
+	}
+	log := harness.read(t, "mock.log")
+	if !strings.Contains(log, "systemctl reload nginx.service") {
+		t.Fatalf("new-layout upgrade did not retain zero-downtime reload:\n%s", log)
+	}
+}
+
+func TestInstallEdgeScriptRestoresLegacyNginxAfterRestartFailure(t *testing.T) {
+	harness := newInstallHarness(t)
+	harness.seedLegacy(t)
+
+	output, err := harness.run(t, "", "edge-binary-v2", "nginx-restart-once")
+	if err == nil {
+		t.Fatalf("migration unexpectedly succeeded:\n%s", output)
+	}
+	harness.requireAbsent(t, "opt/cdn-edge")
+	harness.requireContents(t, "etc/nginx/conf.d/cdn-platform.conf", legacyNginxConfiguration)
+	log := harness.read(t, "mock.log")
+	if strings.Count(log, "systemctl restart nginx.service") < 2 {
+		t.Fatalf("rollback did not cold-start the restored legacy configuration:\n%s", log)
 	}
 }
 
@@ -247,20 +271,29 @@ printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
 root="$CDN_EDGE_INSTALL_ROOT"
 active="$root/run/mock-agent-active"
 enabled="$root/run/mock-agent-enabled"
+nginx_active="$root/run/mock-nginx-active"
 command="${1:-}"
 service="${*: -1}"
 case "$command" in
   is-active)
-    if [[ "$service" == "nginx.service" ]]; then exit 0; fi
+    if [[ "$service" == "nginx.service" ]]; then [[ -f "$nginx_active" ]]; exit; fi
     [[ -f "$active" ]]
     ;;
   is-enabled) [[ -f "$enabled" ]] ;;
   stop)
     if [[ "$service" == "cdn-edge-agent.service" ]]; then rm -f "$active"; fi
+    if [[ "$service" == "nginx.service" ]]; then rm -f "$nginx_active"; fi
     ;;
   disable) rm -f "$enabled" ;;
   enable) touch "$enabled" ;;
   start|restart)
+    if [[ "$service" == "nginx.service" ]]; then
+      if [[ "${MOCK_FAILURE:-}" == "nginx-restart-once" && ! -f "$root/run/mock-nginx-restart-failed" ]]; then
+        touch "$root/run/mock-nginx-restart-failed"
+        exit 1
+      fi
+      touch "$nginx_active"
+    fi
     if [[ "$service" == "cdn-edge-agent.service" ]]; then
       if [[ "${MOCK_FAILURE:-}" == "agent" ]]; then exit 1; fi
       touch "$active"
@@ -306,6 +339,7 @@ func (h *installHarness) seedLegacy(t *testing.T) {
 	}
 	h.write("run/mock-agent-active", "")
 	h.write("run/mock-agent-enabled", "")
+	h.write("run/mock-nginx-active", "")
 }
 
 func (h *installHarness) run(t *testing.T, token, binary, failure string) (string, error) {

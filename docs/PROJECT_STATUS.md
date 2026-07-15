@@ -142,6 +142,8 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 9. HTTP(S) 整站透传与 Range 修复：新增 `passthrough` 持久化字段、管理台开关、旧库迁移和 Nginx 无缓存渲染。开启后普通主/备源站位置关闭缓存与请求/响应缓冲，显式转发 `Range` / `If-Range`；完整验收方法见 [PASSTHROUGH_MODE.md](PASSTHROUGH_MODE.md)。
 10. Edge 目录收敛：新装、旧布局迁移和后续升级统一使用 `/opt/cdn-edge`；迁移保留节点身份、证书、应用版本和日志队列，清空可重建缓存，并在 Nginx 或 Agent 验证失败时恢复旧服务状态。完整流程见 [EDGE_DEPLOYMENT.md](EDGE_DEPLOYMENT.md)。
 11. 站点安全删除：删除请求先撤销精确归属的 Cloudflare 记录，再等待已分配 active 节点确认移除 Nginx 配置和证书，最后清理 Certbot lineage 与 SQLite 元数据；失败时保留停用的删除中状态并支持重试，审计、任务和按 TTL 保留的访问日志不受影响。
+12. Nginx reload 假成功：旧目录迁移改变 `cdn_cache` 路径时改为冷重启；Agent reload 后必须观察到新 worker 才确认应用成功，否则回滚且不推进 applied version。根因、restart 边界和验收命令见 [NGINX_APPLY_SAFETY.md](NGINX_APPLY_SAFETY.md)。
+13. 站点级访问健康：控制面除节点 HTTP 探测外，新增直连节点 443、保留真实域名 Host/SNI 并校验证书和站点专属响应体的检查；按站点和节点独立执行 3 次失败摘除、5 次成功恢复，避免端口正常但虚拟主机仍错误时继续把该节点视为健康。
 
 ## 7. 当前问题、风险与下一步
 
@@ -196,7 +198,7 @@ node --check internal/control/web/app.js
 1. 在节点页创建节点，或为现有节点获取部署/升级命令，并在边缘 root 环境运行；详细目录及迁移约束见 [EDGE_DEPLOYMENT.md](EDGE_DEPLOYMENT.md)。
 2. 等待节点成功注册、心跳和 Nginx 健康检查。
 3. 创建/更新站点，完成 DNS-01 TLS 签发，再点击“发布”。
-4. 检查节点的 `applied_version` 追上 `node_states.version`，确认 `nginx -t`、`/__cdn_health`、证书和源站请求。
+4. 检查节点的 `applied_version` 追上 `node_states.version`，确认 `nginx -t`、新 Nginx worker、通用 `http://EDGE_IP/__cdn_health`、站点 `curl --resolve` 专属健康响应、证书和源站请求。完整命令见 [NGINX_APPLY_SAFETY.md](NGINX_APPLY_SAFETY.md)。
 5. 在源站安全组中仅放行“源站 CIDR”接口返回的边缘地址。
 
 ### 关键实时检查
@@ -237,6 +239,7 @@ curl -fsS http://127.0.0.1/__cdn_health
 | `internal/control/install-edge.sh` | 控制面嵌入并提供的边缘新装、旧布局迁移与升级脚本。 |
 | `scripts/compose-backup.sh` | SQLite、ClickHouse、内部 CA、证书和控制配置的 Restic 备份。 |
 | `scripts/restore-control-compose.sh` | 从 Restic 快照恢复完整主控数据。 |
+| `docs/NGINX_APPLY_SAFETY.md` | Nginx reload/restart 边界、新 worker 验证、站点 HTTPS/SNI 健康与故障处理。 |
 
 ## 10. 恢复开发时的第一步
 

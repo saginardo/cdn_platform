@@ -153,7 +153,7 @@ func TestNodeUninstallLifecycleCleansPlatformState(t *testing.T) {
 	if _, _, err := database.NodeState(node.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("node state was retained: %v", err)
 	}
-	for _, table := range []string{"enrollment_tokens", "node_health", "dns_bindings"} {
+	for _, table := range []string{"enrollment_tokens", "node_health", "site_node_health", "dns_bindings"} {
 		var count int
 		if err := database.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE node_id = ?`, node.ID).Scan(&count); err != nil {
 			t.Fatal(err)

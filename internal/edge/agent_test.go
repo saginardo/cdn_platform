@@ -66,6 +66,29 @@ func TestApplyRollsBackConfigAndCertificatesOnFailedValidation(t *testing.T) {
 	}
 }
 
+func TestApplyDoesNotAdvanceVersionWhenReloadIsNotAdopted(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	if err := os.WriteFile(configPath, []byte("old-config"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{applyErr: errors.New("Nginx reload was not adopted"), listeners: [][]domain.PortConflict{nil, nil}}
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: configPath, CertificateDir: filepath.Join(directory, "certs"), Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = agent.apply(domain.DesiredState{Version: 14, NginxConfig: "new-config"})
+	if err == nil || agent.lastApplyReport == nil || agent.lastApplyReport.Code != "nginx_apply_failed" {
+		t.Fatalf("apply result = %v, report = %#v", err, agent.lastApplyReport)
+	}
+	if _, statErr := os.Stat(filepath.Join(directory, "applied-version")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed reload advanced applied version: %v", statErr)
+	}
+	if contents, readErr := os.ReadFile(configPath); readErr != nil || string(contents) != "old-config" {
+		t.Fatalf("old configuration was not restored: %q, %v", contents, readErr)
+	}
+}
+
 func TestApplyRemovesStaleManagedCertificates(t *testing.T) {
 	directory := t.TempDir()
 	certificateDir := filepath.Join(directory, "certs")

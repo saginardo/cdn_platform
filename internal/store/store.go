@@ -204,6 +204,16 @@ CREATE TABLE IF NOT EXISTS node_health (
   last_checked_at TEXT,
   last_error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS site_node_health (
+  site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  consecutive_successes INTEGER NOT NULL DEFAULT 0,
+  dns_eligible INTEGER NOT NULL DEFAULT 0,
+  last_checked_at TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY(site_id, node_id)
+);
 CREATE TABLE IF NOT EXISTS node_uninstall_jobs (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   status TEXT NOT NULL,
@@ -223,6 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON deployment_tasks(created_at D
 CREATE INDEX IF NOT EXISTS idx_publish_task_nodes_node ON publish_task_nodes(node_id, status);
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id);
 `)
 	if err != nil {
 		return err
@@ -754,6 +765,81 @@ func (s *Store) NodeHealth(nodeID string) (NodeHealth, error) {
 		parsed, err := parseTime(checked.String)
 		if err != nil {
 			return NodeHealth{}, err
+		}
+		health.LastCheckedAt = &parsed
+	}
+	return health, nil
+}
+
+type SiteNodeHealth struct {
+	SiteID               string
+	NodeID               string
+	ConsecutiveFailures  int
+	ConsecutiveSuccesses int
+	DNSEligible          bool
+	LastCheckedAt        *time.Time
+	LastError            string
+}
+
+func (s *Store) RecordSiteNodeHealth(siteID, nodeID string, healthy bool, lastError string) (SiteNodeHealth, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return SiteNodeHealth{}, err
+	}
+	defer tx.Rollback()
+	var health SiteNodeHealth
+	var checked sql.NullString
+	err = tx.QueryRow(`SELECT site_id, node_id, consecutive_failures, consecutive_successes, dns_eligible, last_checked_at, last_error FROM site_node_health WHERE site_id = ? AND node_id = ?`, siteID, nodeID).
+		Scan(&health.SiteID, &health.NodeID, &health.ConsecutiveFailures, &health.ConsecutiveSuccesses, &health.DNSEligible, &checked, &health.LastError)
+	if errors.Is(err, sql.ErrNoRows) {
+		health.SiteID = siteID
+		health.NodeID = nodeID
+	} else if err != nil {
+		return SiteNodeHealth{}, err
+	}
+	if healthy {
+		health.ConsecutiveSuccesses++
+		health.ConsecutiveFailures = 0
+		health.LastError = ""
+		if health.ConsecutiveSuccesses >= 5 {
+			health.DNSEligible = true
+		}
+	} else {
+		health.ConsecutiveFailures++
+		health.ConsecutiveSuccesses = 0
+		health.LastError = lastError
+		if health.ConsecutiveFailures >= 3 {
+			health.DNSEligible = false
+		}
+	}
+	checkedAt := now()
+	_, err = tx.Exec(`INSERT INTO site_node_health(site_id, node_id, consecutive_failures, consecutive_successes, dns_eligible, last_checked_at, last_error) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(site_id, node_id) DO UPDATE SET consecutive_failures=excluded.consecutive_failures, consecutive_successes=excluded.consecutive_successes, dns_eligible=excluded.dns_eligible, last_checked_at=excluded.last_checked_at, last_error=excluded.last_error`,
+		siteID, nodeID, health.ConsecutiveFailures, health.ConsecutiveSuccesses, boolInt(health.DNSEligible), stamp(checkedAt), health.LastError)
+	if err != nil {
+		return SiteNodeHealth{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return SiteNodeHealth{}, err
+	}
+	health.LastCheckedAt = &checkedAt
+	return health, nil
+}
+
+func (s *Store) SiteNodeHealth(siteID, nodeID string) (SiteNodeHealth, error) {
+	var health SiteNodeHealth
+	var checked sql.NullString
+	err := s.db.QueryRow(`SELECT site_id, node_id, consecutive_failures, consecutive_successes, dns_eligible, last_checked_at, last_error FROM site_node_health WHERE site_id = ? AND node_id = ?`, siteID, nodeID).
+		Scan(&health.SiteID, &health.NodeID, &health.ConsecutiveFailures, &health.ConsecutiveSuccesses, &health.DNSEligible, &checked, &health.LastError)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SiteNodeHealth{SiteID: siteID, NodeID: nodeID}, nil
+	}
+	if err != nil {
+		return SiteNodeHealth{}, err
+	}
+	if checked.Valid {
+		parsed, err := parseTime(checked.String)
+		if err != nil {
+			return SiteNodeHealth{}, err
 		}
 		health.LastCheckedAt = &parsed
 	}

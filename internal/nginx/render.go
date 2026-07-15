@@ -91,6 +91,12 @@ server {
     set $cdn_site_id "{{.ID}}";
     access_log /opt/cdn-edge/logs/access.json cdn_json;
 
+    location = /__cdn_health {
+        access_log off;
+        add_header Content-Type text/plain;
+        return 200 "{{.HealthBody}}\n";
+    }
+
     {{if .GRPC}}
     location / {
         grpc_pass {{.PrimaryScheme}}://origin_{{.ID}}{{if .BackupHostPort}}_primary{{end}};
@@ -299,6 +305,7 @@ server {
 type renderedSite struct {
 	ID                  string
 	DomainList          string
+	HealthBody          string
 	PrimaryHostPort     string
 	PrimaryTLSName      string
 	PrimaryScheme       string
@@ -347,7 +354,7 @@ func Render(sites []domain.Site) (string, error) {
 			return "", fmt.Errorf("site %s passthrough mode is only supported for HTTP and HTTPS origins", site.Name)
 		}
 		item := renderedSite{
-			ID: site.ID, DomainList: strings.Join(site.Domains, " "), PrimaryHostPort: primary.Host, PrimaryTLSName: site.PrimaryOrigin.TLSServerName,
+			ID: site.ID, DomainList: strings.Join(site.Domains, " "), HealthBody: SiteHealthBody(site.ID), PrimaryHostPort: primary.Host, PrimaryTLSName: site.PrimaryOrigin.TLSServerName,
 			PrimaryScheme: domain.ProxyScheme(primary.Scheme), UseTLS: domain.OriginUsesTLS(primary.Scheme), HostHeader: site.PrimaryOrigin.HostHeader, CacheGeneration: site.CacheGeneration,
 			GRPC: domain.IsGRPCScheme(primary.Scheme), Passthrough: site.Passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB,
 			ReadWriteTimeout: fmt.Sprintf("%ds", readWriteTimeoutSeconds),
@@ -398,6 +405,14 @@ func Render(sites []domain.Site) (string, error) {
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func SiteHealthBody(siteID string) string {
+	return "site=" + siteID
+}
+
+func HasSiteHealth(configuration, siteID string) bool {
+	return strings.Contains(configuration, `return 200 "`+SiteHealthBody(siteID)+`\n";`)
 }
 
 func parseOrigin(origin domain.Origin) (*url.URL, error) {

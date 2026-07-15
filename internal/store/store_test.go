@@ -65,6 +65,49 @@ func TestHealthHysteresis(t *testing.T) {
 	}
 }
 
+func TestSiteNodeHealthHysteresis(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	node, err := store.CreateNode("edge-1", "203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := store.CreateSite(domain.Site{
+		Name: "site-1", Domains: []string{"site.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		health, err := store.RecordSiteNodeHealth(site.ID, node.ID, true, "")
+		if err != nil || health.DNSEligible {
+			t.Fatalf("site node became eligible too early: %#v %v", health, err)
+		}
+	}
+	health, err := store.RecordSiteNodeHealth(site.ID, node.ID, true, "")
+	if err != nil || !health.DNSEligible {
+		t.Fatalf("site node did not become eligible: %#v %v", health, err)
+	}
+	for range 2 {
+		health, err = store.RecordSiteNodeHealth(site.ID, node.ID, false, "TLS mismatch")
+		if err != nil || !health.DNSEligible {
+			t.Fatalf("site node dropped too early: %#v %v", health, err)
+		}
+	}
+	health, err = store.RecordSiteNodeHealth(site.ID, node.ID, false, "TLS mismatch")
+	if err != nil || health.DNSEligible || health.LastError != "TLS mismatch" {
+		t.Fatalf("site node did not drop after three failures: %#v %v", health, err)
+	}
+	loaded, err := store.SiteNodeHealth(site.ID, node.ID)
+	if err != nil || loaded.DNSEligible || loaded.ConsecutiveFailures != 3 || loaded.LastCheckedAt == nil {
+		t.Fatalf("stored site-node health = %#v, %v", loaded, err)
+	}
+}
+
 func TestCreateNodeRejectsNonPublicAddress(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

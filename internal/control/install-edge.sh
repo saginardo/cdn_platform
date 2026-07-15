@@ -188,8 +188,17 @@ rollback() {
       done
     fi
     systemctl daemon-reload >/dev/null 2>&1 || true
-    nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
-    if ((old_nginx_active == 0)); then systemctl stop nginx.service >/dev/null 2>&1 || true; fi
+    if ((old_nginx_active == 1)); then
+      if ((legacy_layout == 1)); then
+        nginx -t >/dev/null 2>&1 && systemctl restart nginx.service >/dev/null 2>&1 || true
+      elif systemctl is-active --quiet nginx.service 2>/dev/null; then
+        nginx -t >/dev/null 2>&1 && systemctl reload nginx.service >/dev/null 2>&1 || true
+      else
+        nginx -t >/dev/null 2>&1 && systemctl start nginx.service >/dev/null 2>&1 || true
+      fi
+    else
+      systemctl stop nginx.service >/dev/null 2>&1 || true
+    fi
     if ((old_agent_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     if ((old_agent_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
   fi
@@ -266,8 +275,21 @@ rm -f "$nginx_entry"
 ln -s "$expected_nginx_target" "$nginx_entry"
 rm -f "$nginx_default"
 nginx -t
-if ! systemctl is-active --quiet nginx.service; then systemctl start nginx.service; fi
-systemctl reload nginx
+if ((legacy_layout == 1)); then
+  if systemctl is-active --quiet nginx.service; then
+    # The legacy cache zone keeps its path in the running master. Replacing
+    # that path requires a cold start; a reload is accepted by the signaling
+    # process but rejected asynchronously by the Nginx master.
+    systemctl restart nginx.service
+  else
+    systemctl start nginx.service
+  fi
+elif systemctl is-active --quiet nginx.service; then
+  systemctl reload nginx.service
+else
+  systemctl start nginx.service
+fi
+systemctl is-active --quiet nginx.service
 
 rm -f "$agent_unit"
 ln -s "$expected_unit_target" "$agent_unit"

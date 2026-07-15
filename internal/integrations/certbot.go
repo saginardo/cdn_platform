@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,10 @@ type IssuedCertificate struct {
 
 type CertificateIssuer interface {
 	Issue(ctx context.Context, name string, domains []string) (IssuedCertificate, error)
+}
+
+type CertificateCleaner interface {
+	Delete(ctx context.Context, name string) error
 }
 
 const (
@@ -39,6 +44,51 @@ type CertbotDNSIssuer struct {
 
 func (c CertbotDNSIssuer) Issue(ctx context.Context, name string, domains []string) (IssuedCertificate, error) {
 	return c.issue(ctx, name, domains, waitForContext)
+}
+
+func (c CertbotDNSIssuer) Delete(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" || filepath.Base(name) != name {
+		return fmt.Errorf("invalid Certbot certificate name")
+	}
+	configDir := c.ConfigDir
+	if configDir == "" {
+		configDir = "/var/lib/cdn-platform/letsencrypt"
+	}
+	workDir := c.WorkDir
+	if workDir == "" {
+		workDir = "/var/lib/cdn-platform/certbot-work"
+	}
+	logsDir := c.LogsDir
+	if logsDir == "" {
+		logsDir = "/var/log/cdn-platform/certbot"
+	}
+	_, renewalErr := os.Stat(filepath.Join(configDir, "renewal", name+".conf"))
+	_, liveErr := os.Stat(filepath.Join(configDir, "live", name))
+	if errors.Is(renewalErr, os.ErrNotExist) && errors.Is(liveErr, os.ErrNotExist) {
+		return nil
+	}
+	if renewalErr != nil && !errors.Is(renewalErr, os.ErrNotExist) {
+		return renewalErr
+	}
+	if liveErr != nil && !errors.Is(liveErr, os.ErrNotExist) {
+		return liveErr
+	}
+	binary := c.Binary
+	if binary == "" {
+		binary = "certbot"
+	}
+	for _, directory := range []string{configDir, workDir, logsDir} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			return err
+		}
+	}
+	output, err := runCertbot(ctx, binary, []string{"delete", "--non-interactive", "--cert-name", name,
+		"--config-dir", configDir, "--work-dir", workDir, "--logs-dir", logsDir})
+	if err != nil {
+		return fmt.Errorf("certbot delete failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
 }
 
 func (c CertbotDNSIssuer) issue(ctx context.Context, name string, domains []string, wait func(context.Context, time.Duration) error) (IssuedCertificate, error) {

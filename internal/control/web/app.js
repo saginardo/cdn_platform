@@ -3,8 +3,13 @@ let nodes = [];
 let sites = [];
 let tlsStatuses = new Map();
 let publishStatuses = new Map();
+let deletionStatuses = new Map();
 let certificatePollTimer = null;
 let publishPollTimer = null;
+let siteDeletePollTimer = null;
+let deletingSiteID = '';
+let deletingSiteName = '';
+let siteDeletePending = false;
 let uninstallPollTimer = null;
 let uninstallNodeID = '';
 let uninstallNodeName = '';
@@ -58,6 +63,7 @@ const byId = (id) => document.getElementById(id);
 const split = (value) => value.split(',').map((item) => item.trim()).filter(Boolean);
 const certificateTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const publishTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
+const deletionTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const nodeStatusLabel = (status) => nodeStatusLabels[status] || status;
 const taskStatusLabel = (status) => taskStatusLabels[status] || status;
 
@@ -93,7 +99,7 @@ async function refresh() {
   renderLogFilterOptions();
   syncRouteFromLocation({ forceForm: !siteFormDirty(), focus: false });
   void refreshOverview();
-  await Promise.all([refreshTLSStatuses(), refreshPublishStatuses()]);
+  await Promise.all([refreshTLSStatuses(), refreshPublishStatuses(), refreshDeletionStatuses()]);
 }
 
 function renderNodeRow(node) {
@@ -130,6 +136,7 @@ function renderSites() {
   byId('site-table').innerHTML = sites.map((site) => {
     const tlsStatus = tlsStatuses.get(site.id);
     const publishStatus = publishStatuses.get(site.id);
+    const deletionStatus = deletionStatuses.get(site.id);
     const siteHash = `#/sites/${encodeURIComponent(site.id)}`;
     return `<article class="site-row">
       <div class="site-identity">
@@ -139,10 +146,10 @@ function renderSites() {
       <dl class="site-facts">
         <div><dt>节点</dt><dd>${numberFormatter.format(site.node_ids.length)} 个</dd></div>
         <div><dt>TLS</dt><dd>${tlsStatusMarkup(tlsStatus)}</dd></div>
-		<div><dt>发布</dt><dd>${publishStatusMarkup(publishStatus)}</dd></div>
+		<div><dt>发布</dt><dd>${site.deleting ? deletionStatusMarkup(deletionStatus) : publishStatusMarkup(publishStatus)}</dd></div>
       </dl>
       <div class="site-actions">
-        <button class="small publish" data-id="${site.id}" ${publishTaskActive(publishStatus?.task) ? 'disabled' : ''}>${site.published ? (publishStatus?.task?.status === 'failed' || publishStatus?.task?.status === 'partial' ? '重新发布' : '发布') : '发布'}</button>
+        ${site.deleting ? `<button class="small danger open-site-delete" data-id="${site.id}">查看删除</button>` : `<button class="small publish" data-id="${site.id}" ${publishTaskActive(publishStatus?.task) ? 'disabled' : ''}>${site.published ? (publishStatus?.task?.status === 'failed' || publishStatus?.task?.status === 'partial' ? '重新发布' : '发布') : '发布'}</button>`}
         <button class="small secondary manage-site" data-id="${site.id}">管理</button>
       </div>
       ${publishDetailMarkup(publishStatus)}
@@ -162,6 +169,13 @@ function publishStatusMarkup(publishStatus) {
   return `<span class="status ${escapeHTML(task.status)}"${task.detail ? ` title="${escapeHTML(task.detail)}"` : ''}>${escapeHTML(label)}</span>`;
 }
 
+function deletionStatusMarkup(deletionStatus) {
+  const task = deletionStatus?.task;
+  if (!task) return '<span class="status applying">删除中</span>';
+  const label = task.status === 'succeeded' ? '已删除' : (task.status === 'failed' || task.status === 'partial' ? '删除受阻' : '删除中');
+  return `<span class="status ${escapeHTML(task.status)}"${task.detail ? ` title="${escapeHTML(task.detail)}"` : ''}>${label}</span>`;
+}
+
 function publishDetailMarkup(publishStatus) {
   const task = publishStatus?.task;
   if (!task || !['failed', 'partial'].includes(task.status) || !(publishStatus.nodes || []).length) return '';
@@ -175,6 +189,7 @@ function publishDetailMarkup(publishStatus) {
 }
 
 function siteStateMarkup(site) {
+  if (site.deleting) return '<span class="status applying">删除中</span>';
   if (!site.enabled) return '<span class="status disabled">已停用</span>';
   if (!site.published) return '<span class="status pending">待发布</span>';
   return '<span class="status active">已发布</span>';
@@ -253,25 +268,41 @@ function renderSiteDetailStatus() {
   if (!site) return;
   const tlsStatus = tlsStatuses.get(site.id);
   const publishStatus = publishStatuses.get(site.id);
+  const deletionStatus = deletionStatuses.get(site.id);
   const certificateTask = tlsStatus?.certificate_task || null;
   const publishButton = byId('site-detail-publish');
   const certificateButton = byId('site-detail-certificate');
+  const deleteButton = byId('site-detail-delete');
 
   byId('site-detail-state').innerHTML = siteStateMarkup(site);
   byId('site-detail-meta').textContent = `${site.domains.join(', ') || '未配置域名'} · ${site.id}`;
   byId('site-summary-tls').innerHTML = tlsStatusMarkup(tlsStatus);
-  byId('site-summary-publish').innerHTML = publishStatusMarkup(publishStatus);
+  byId('site-summary-publish').innerHTML = site.deleting ? deletionStatusMarkup(deletionStatus) : publishStatusMarkup(publishStatus);
   byId('site-operation-tls').innerHTML = tlsStatusMarkup(tlsStatus);
   byId('site-operation-cache').innerHTML = siteCacheMarkup(site);
+  byId('site-operation-delete').innerHTML = site.deleting ? deletionStatusMarkup(deletionStatus) : '撤销托管 DNS，并从边缘节点移除配置和证书';
   byId('site-cache-operation').classList.toggle('hidden', !siteCacheable(site));
   byId('site-publish-detail').innerHTML = publishDetailMarkup(publishStatus);
 
-  [publishButton, certificateButton, byId('site-detail-invalidate'), byId('site-detail-allowlist')].forEach((button) => { button.dataset.id = site.id; });
-  publishButton.disabled = publishTaskActive(publishStatus?.task);
+  [publishButton, certificateButton, byId('site-detail-invalidate'), byId('site-detail-allowlist'), deleteButton].forEach((button) => { button.dataset.id = site.id; });
+  publishButton.disabled = site.deleting || publishTaskActive(publishStatus?.task);
   publishButton.textContent = site.published && ['failed', 'partial'].includes(publishStatus?.task?.status) ? '重新发布' : '发布';
-  certificateButton.disabled = certificateTaskActive(certificateTask);
+  certificateButton.disabled = site.deleting || certificateTaskActive(certificateTask);
   certificateButton.title = certificateTaskActive(certificateTask) ? 'TLS 证书签发正在进行中' : '';
+  byId('site-detail-invalidate').disabled = site.deleting;
+  byId('site-detail-allowlist').disabled = site.deleting;
+  deleteButton.textContent = site.deleting ? '查看删除' : '删除站点';
+  deleteButton.disabled = !site.deleting && (certificateTaskActive(certificateTask) || publishTaskActive(publishStatus?.task));
+  deleteButton.title = deleteButton.disabled ? '请等待当前 TLS 或发布任务完成' : '';
   updateSiteFormPreview(site);
+  setSiteEditorLocked(site.deleting);
+}
+
+function setSiteEditorLocked(locked) {
+  document.querySelectorAll('#site-form input, #site-form select, #site-form textarea').forEach((field) => { field.disabled = locked; });
+  if (!locked) updateOriginTLSFields();
+  if (byId('site-id').value) byId('site-zone').disabled = true;
+  byId('site-submit').disabled = locked;
 }
 
 async function refreshTLSStatuses() {
@@ -301,6 +332,35 @@ async function refreshPublishStatuses() {
   schedulePublishPoll();
 }
 
+async function refreshDeletionStatuses() {
+  const previous = deletionStatuses;
+  const deletingSites = sites.filter((site) => site.deleting);
+  const results = await Promise.all(deletingSites.map(async (site) => {
+    try { return [site.id, await request(`/api/sites/${site.id}/delete-status`)]; } catch (_) { return [site.id, null]; }
+  }));
+  deletionStatuses = new Map(results.filter(([, status]) => status?.task));
+  let completedSite = null;
+  for (const [siteID, status] of deletionStatuses) {
+    const priorStatus = previous.get(siteID)?.task?.status;
+    const currentStatus = status.task?.status;
+    if (deletionTaskActive({ status: priorStatus }) && ['failed', 'partial'].includes(currentStatus)) {
+      const site = sites.find((item) => item.id === siteID);
+      notice(`${site?.name || '站点'} 删除受阻，请查看节点详情。`);
+    }
+    if (currentStatus === 'succeeded') completedSite = sites.find((item) => item.id === siteID) || null;
+  }
+  renderSiteViews();
+  scheduleSiteDeletePoll();
+  if (deletingSiteID && deletionStatuses.has(deletingSiteID)) renderSiteDeleteDialog(deletionStatuses.get(deletingSiteID));
+  if (completedSite) {
+    window.setTimeout(() => {
+      if (deletingSiteID === completedSite.id) closeSiteDelete();
+      if (activeRoute.view === 'sites' && activeRoute.siteID === completedSite.id) navigateTo('#/sites');
+      refresh().then(() => notice(`站点「${completedSite.name}」已删除`, true)).catch((error) => notice(error.message));
+    }, 0);
+  }
+}
+
 function scheduleCertificatePoll() {
   window.clearTimeout(certificatePollTimer);
   certificatePollTimer = null;
@@ -321,6 +381,16 @@ function schedulePublishPoll() {
   }
 }
 
+function scheduleSiteDeletePoll() {
+  window.clearTimeout(siteDeletePollTimer);
+  siteDeletePollTimer = null;
+  if ([...deletionStatuses.values()].some((status) => deletionTaskActive(status?.task))) {
+    siteDeletePollTimer = window.setTimeout(() => {
+      refreshDeletionStatuses().catch((error) => notice(error.message));
+    }, 2000);
+  }
+}
+
 function selectedNodeIDs() {
   return [...document.querySelectorAll('#site-node-selector input:checked')].map((input) => input.value);
 }
@@ -328,6 +398,85 @@ function selectedNodeIDs() {
 function renderNodeSelector(selected = []) {
   const selectedSet = new Set(selected);
   byId('site-node-selector').innerHTML = nodes.filter((node) => !['revoked', 'uninstalling', 'uninstalled'].includes(node.status)).map((node) => `<label class="node-option"><input type="checkbox" value="${node.id}" ${selectedSet.has(node.id) ? 'checked' : ''}>${escapeHTML(node.name)} <code>${escapeHTML(node.public_ipv4)}</code></label>`).join('') || '<span class="muted">请先创建待激活或运行中的节点。</span>';
+}
+
+function siteDeletionStateText(status) {
+  const task = status?.task;
+  if (!task) return '删除尚未开始。确认后会先撤销托管 DNS，再等待边缘节点完成下线。';
+  if (task.status === 'queued') return '删除任务已排队。';
+  if (task.status === 'dispatching') return '正在撤销托管 DNS 并生成边缘配置。';
+  if (task.status === 'applying') return task.detail || '正在等待边缘节点确认移除站点。';
+  if (task.status === 'succeeded') return '站点 DNS、边缘配置和证书材料均已清理。';
+  if (task.status === 'partial') return '部分边缘节点已完成移除，其余节点未确认；修复节点后重试删除。';
+  if (task.status === 'failed') return task.detail || '删除受阻；修复问题后重试。';
+  return task.detail || taskStatusLabel(task.status);
+}
+
+function siteDeletionBlockerText(node) {
+  const conflict = (node.port_conflicts || []).map((item) => `端口 ${item.port} 被 ${item.process}${item.pid ? `（PID ${item.pid}）` : ''} 占用`).join('；');
+  return `${node.node_name || node.node_id}：${conflict || node.detail || '未确认站点已移除'}`;
+}
+
+function setSiteDeleteError(message = '') {
+  byId('site-delete-error').textContent = message;
+  if (message) show('site-delete-error'); else hide('site-delete-error');
+}
+
+function setSiteDeleteBusy(busy) {
+  siteDeletePending = busy;
+  byId('confirm-site-delete').disabled = busy;
+  byId('close-site-delete').disabled = busy;
+}
+
+function renderSiteDeleteDialog(status = null) {
+  const site = sites.find((item) => item.id === deletingSiteID);
+  if (!site) return;
+  const task = status?.task || null;
+  const active = deletionTaskActive(task);
+  const retryable = task && ['failed', 'partial'].includes(task.status);
+  byId('site-delete-meta').textContent = `${site.name} · ${site.domains.join(', ')}`;
+  byId('site-delete-confirm-label').textContent = `输入「${site.name}」以确认`;
+  byId('site-delete-state').textContent = siteDeletionStateText(status);
+  const blockers = (status?.nodes || []).filter((node) => node.status !== 'succeeded');
+  if (blockers.length) {
+    byId('site-delete-blockers').innerHTML = blockers.map((node) => `<li>${escapeHTML(siteDeletionBlockerText(node))}</li>`).join('');
+    show('site-delete-blockers');
+  } else {
+    hide('site-delete-blockers');
+  }
+  byId('site-delete-confirm-wrap').classList.toggle('hidden', active || task?.status === 'succeeded');
+  byId('confirm-site-delete').classList.toggle('hidden', active || task?.status === 'succeeded');
+  byId('confirm-site-delete').textContent = retryable ? '重试删除' : '开始安全删除';
+}
+
+async function openSiteDelete(siteID) {
+  const site = sites.find((item) => item.id === siteID);
+  if (!site) return;
+  deletingSiteID = site.id;
+  deletingSiteName = site.name;
+  byId('site-delete-confirm').value = '';
+  setSiteDeleteError();
+  renderSiteDeleteDialog(deletionStatuses.get(site.id) || null);
+  const dialog = byId('site-delete-dialog');
+  if (!dialog.open) dialog.showModal();
+  if (site.deleting) {
+    try {
+      const status = await request(`/api/sites/${site.id}/delete-status`);
+      if (site.id !== deletingSiteID) return;
+      deletionStatuses.set(site.id, status);
+      renderSiteDeleteDialog(status);
+      scheduleSiteDeletePoll();
+    } catch (error) {
+      if (site.id === deletingSiteID) setSiteDeleteError(error.message);
+    }
+  }
+}
+
+function closeSiteDelete() {
+  deletingSiteID = '';
+  deletingSiteName = '';
+  const dialog = byId('site-delete-dialog');
+  if (dialog.open) dialog.close();
 }
 
 function uninstallBlockerText(blocker) {
@@ -1251,11 +1400,15 @@ byId('logout').addEventListener('click', async () => {
     resetLogSearchForm();
     window.clearTimeout(certificatePollTimer);
     window.clearTimeout(publishPollTimer);
+    window.clearTimeout(siteDeletePollTimer);
     closeNodeUninstall();
+    closeSiteDelete();
     certificatePollTimer = null;
     publishPollTimer = null;
+    siteDeletePollTimer = null;
     tlsStatuses = new Map();
     publishStatuses = new Map();
+    deletionStatuses = new Map();
     sites = [];
     routeDataReady = false;
     siteFormReady = false;
@@ -1342,6 +1495,39 @@ byId('node-uninstall-dialog').addEventListener('close', () => {
   uninstallNodeID = '';
   uninstallNodeName = '';
   uninstallCommand = '';
+});
+byId('site-detail-delete').addEventListener('click', () => openSiteDelete(byId('site-detail-delete').dataset.id));
+byId('close-site-delete').addEventListener('click', closeSiteDelete);
+byId('site-delete-dialog').addEventListener('close', () => {
+  deletingSiteID = '';
+  deletingSiteName = '';
+  siteDeletePending = false;
+});
+byId('confirm-site-delete').addEventListener('click', async () => {
+  if (byId('site-delete-confirm').value !== deletingSiteName) return setSiteDeleteError('请输入完整且完全一致的站点名称。');
+  if (siteDeletePending || !deletingSiteID) return;
+  const siteID = deletingSiteID;
+  setSiteDeleteBusy(true);
+  setSiteDeleteError();
+  try {
+    const status = await request(`/api/sites/${siteID}`, { method: 'DELETE', body: JSON.stringify({ confirmation: byId('site-delete-confirm').value }) });
+    deletionStatuses.set(siteID, status);
+    markSiteFormClean();
+    renderSiteDeleteDialog(status);
+    await refresh();
+    if (siteID === deletingSiteID) notice('站点删除已开始，托管 DNS 已撤销', true);
+  } catch (error) {
+    if (siteID === deletingSiteID) {
+      if (error.data?.deletion?.task) {
+        deletionStatuses.set(siteID, error.data.deletion);
+        renderSiteDeleteDialog(error.data.deletion);
+      }
+      setSiteDeleteError(error.message);
+      await refresh().catch(() => {});
+    }
+  } finally {
+    setSiteDeleteBusy(false);
+  }
 });
 byId('prepare-node-uninstall').addEventListener('click', async () => {
   uninstallCommand = '';
@@ -1499,6 +1685,7 @@ document.addEventListener('click', async (event) => {
     if (button.classList.contains('invalidate')) { const task = await request(`/api/sites/${button.dataset.id}/invalidate-cache`, { method: 'POST' }); await refresh(); notice(`缓存已刷新，任务 ${task.id}`, true); }
     if (button.classList.contains('certificate')) { const task = await request(`/api/sites/${button.dataset.id}/certificate`, { method: 'POST' }); tlsStatuses.set(button.dataset.id, { certificate_task: task, published_after_certificate: false }); renderSiteViews(); scheduleCertificatePoll(); notice(`TLS 任务 ${task.id}：${taskStatusLabel(task.status)}`, true); }
     if (button.classList.contains('manage-site')) navigateTo(`#/sites/${encodeURIComponent(button.dataset.id)}`);
+    if (button.classList.contains('open-site-delete')) await openSiteDelete(button.dataset.id);
     if (button.classList.contains('allowlist')) {
       if (!byId('site-allowlist').classList.contains('hidden')) {
         hide('site-allowlist');

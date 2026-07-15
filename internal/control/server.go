@@ -44,6 +44,7 @@ type Server struct {
 	DNS                integrations.DNSProvider
 	Issuer             integrations.CertificateIssuer
 	CertificateManager *CertificateManager
+	SiteDeleter        *SiteDeletionManager
 	Notifier           integrations.Notifier
 	Logs               logstore.Store
 	ControlURL         string
@@ -85,8 +86,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/sites", s.requireAdmin(s.listSites))
 	mux.HandleFunc("POST /api/sites", s.requireAdmin(s.createSite))
 	mux.HandleFunc("PUT /api/sites/{id}", s.requireAdmin(s.updateSite))
+	mux.HandleFunc("DELETE /api/sites/{id}", s.requireAdmin(s.deleteSite))
 	mux.HandleFunc("POST /api/sites/{id}/publish", s.requireAdmin(s.publishSite))
 	mux.HandleFunc("GET /api/sites/{id}/publish-status", s.requireAdmin(s.publishStatus))
+	mux.HandleFunc("GET /api/sites/{id}/delete-status", s.requireAdmin(s.deleteSiteStatus))
 	mux.HandleFunc("POST /api/sites/{id}/invalidate-cache", s.requireAdmin(s.invalidateCache))
 	mux.HandleFunc("POST /api/sites/{id}/certificate", s.requireAdmin(s.issueCertificate))
 	mux.HandleFunc("GET /api/sites/{id}/certificate-task", s.requireAdmin(s.latestCertificateTask))
@@ -576,6 +579,51 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 	}
 	s.audit(request, adminID(request.Context()), "update", "site", site.ID, site.Name)
 	writeJSON(response, http.StatusOK, site)
+}
+
+func (s *Server) deleteSite(response http.ResponseWriter, request *http.Request) {
+	if s.SiteDeleter == nil {
+		writeError(response, http.StatusNotImplemented, errors.New("site deletion is not configured"))
+		return
+	}
+	site, _, err := s.Store.GetSite(request.PathValue("id"))
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	var input struct {
+		Confirmation string `json:"confirmation"`
+	}
+	if !readJSON(response, request, &input) {
+		return
+	}
+	if input.Confirmation != site.Name {
+		writeError(response, http.StatusBadRequest, errors.New("confirmation must exactly match the site name"))
+		return
+	}
+	status, err := s.SiteDeleter.Start(request.Context(), site.ID, adminID(request.Context()), s.requestIP(request))
+	if err != nil {
+		if errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteDeleting) {
+			writeError(response, http.StatusConflict, err)
+			return
+		}
+		writeJSON(response, http.StatusBadGateway, map[string]any{"error": err.Error(), "deletion": status})
+		return
+	}
+	writeJSON(response, http.StatusAccepted, status)
+}
+
+func (s *Server) deleteSiteStatus(response http.ResponseWriter, request *http.Request) {
+	if s.SiteDeleter == nil {
+		writeError(response, http.StatusNotImplemented, errors.New("site deletion is not configured"))
+		return
+	}
+	status, err := s.SiteDeleter.Status(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
 }
 
 func (s *Server) publishSite(response http.ResponseWriter, request *http.Request) {
@@ -1218,7 +1266,7 @@ func writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) {
+	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) {
 		writeError(response, http.StatusConflict, err)
 		return
 	}

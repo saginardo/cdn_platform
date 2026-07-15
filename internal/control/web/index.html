@@ -419,11 +419,33 @@
                         <div><h3>源站 CIDR</h3><div class="site-operation-state">边缘节点 IPv4 白名单</div></div>
                         <button id="site-detail-allowlist" class="small secondary allowlist" type="button" aria-expanded="false">查看 CIDR</button>
                       </div>
+                      <div class="site-operation site-operation-danger">
+                        <div><h3>删除站点</h3><div id="site-operation-delete" class="site-operation-state">撤销托管 DNS，并从边缘节点移除配置和证书</div></div>
+                        <button id="site-detail-delete" class="small danger" type="button">删除站点</button>
+                      </div>
                     </div>
                     <pre id="site-allowlist" class="secret hidden"></pre>
                   </section>
                 </div>
               </div>
+
+              <dialog id="site-delete-dialog" aria-labelledby="site-delete-title">
+                <div class="dialog-header">
+                  <div><h2 id="site-delete-title">删除站点</h2><p id="site-delete-meta" class="section-meta"></p></div>
+                  <button id="close-site-delete" type="button" class="secondary" aria-label="关闭">关闭</button>
+                </div>
+                <div id="site-delete-state" class="uninstall-state"></div>
+                <div class="uninstall-scope"><strong>清理范围</strong><span>托管 DNS、边缘 Nginx 配置与站点证书、控制面 Certbot lineage 和站点元数据。</span></div>
+                <p id="site-delete-history" class="muted">审计与任务历史会保留，访问日志按现有保留周期过期。</p>
+                <p id="site-delete-error" class="dialog-error hidden" role="alert"></p>
+                <ul id="site-delete-blockers" class="uninstall-blockers hidden"></ul>
+                <label id="site-delete-confirm-wrap" class="confirmation"><span id="site-delete-confirm-label">输入站点名称以确认</span>
+                  <input id="site-delete-confirm" autocomplete="off">
+                </label>
+                <div class="dialog-actions">
+                  <button id="confirm-site-delete" type="button" class="danger">开始安全删除</button>
+                </div>
+              </dialog>
             </section>
           </div>
         </div>

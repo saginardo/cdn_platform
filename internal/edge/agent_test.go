@@ -66,6 +66,84 @@ func TestApplyRollsBackConfigAndCertificatesOnFailedValidation(t *testing.T) {
 	}
 }
 
+func TestApplyRemovesStaleManagedCertificates(t *testing.T) {
+	directory := t.TempDir()
+	certificateDir := filepath.Join(directory, "certs")
+	if err := os.MkdirAll(certificateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staleID := "11111111-1111-4111-8111-111111111111"
+	desiredID := "22222222-2222-4222-8222-222222222222"
+	for _, extension := range []string{".crt", ".key"} {
+		if err := os.WriteFile(filepath.Join(certificateDir, staleID+extension), []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(certificateDir, "operator-note.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{listeners: [][]domain.PortConflict{nil, {{Port: 80, PID: 11, Process: "nginx"}, {Port: 443, PID: 12, Process: "nginx"}}}}
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: filepath.Join(directory, "nginx.conf"), CertificateDir: certificateDir, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{Version: 2, NginxConfig: "new-config", PublicPorts: []int{80, 443}, Certificates: map[string]domain.TLSBundle{
+		desiredID: {CertificatePEM: "desired-cert", PrivateKeyPEM: "desired-key"},
+	}}
+	if err := agent.apply(state); err != nil {
+		t.Fatal(err)
+	}
+	for _, extension := range []string{".crt", ".key"} {
+		if _, err := os.Stat(filepath.Join(certificateDir, staleID+extension)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale %s was retained: %v", extension, err)
+		}
+		if _, err := os.Stat(filepath.Join(certificateDir, desiredID+extension)); err != nil {
+			t.Fatalf("desired %s is missing: %v", extension, err)
+		}
+	}
+	if contents, err := os.ReadFile(filepath.Join(certificateDir, "operator-note.txt")); err != nil || string(contents) != "keep" {
+		t.Fatalf("unmanaged file changed: %q, %v", contents, err)
+	}
+}
+
+func TestApplyRestoresRemovedCertificatesOnFailedValidation(t *testing.T) {
+	directory := t.TempDir()
+	certificateDir := filepath.Join(directory, "certs")
+	configPath := filepath.Join(directory, "nginx.conf")
+	if err := os.MkdirAll(certificateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("old-config"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	staleID := "33333333-3333-4333-8333-333333333333"
+	for _, extension := range []string{".crt", ".key"} {
+		if err := os.WriteFile(filepath.Join(certificateDir, staleID+extension), []byte("stale"+extension), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &fakeRunner{testErr: errors.New("invalid config")}
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: configPath, CertificateDir: certificateDir, Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.apply(domain.DesiredState{Version: 3, NginxConfig: "bad-config", Certificates: map[string]domain.TLSBundle{}}); err == nil {
+		t.Fatal("expected validation failure")
+	}
+	for _, extension := range []string{".crt", ".key"} {
+		contents, err := os.ReadFile(filepath.Join(certificateDir, staleID+extension))
+		if err != nil || string(contents) != "stale"+extension {
+			t.Fatalf("stale %s was not restored: %q, %v", extension, contents, err)
+		}
+	}
+	if contents, err := os.ReadFile(configPath); err != nil || string(contents) != "old-config" {
+		t.Fatalf("old configuration was not restored: %q, %v", contents, err)
+	}
+	if runner.tests != 2 {
+		t.Fatalf("old configuration was not revalidated after certificate restore: tests=%d", runner.tests)
+	}
+}
+
 func TestApplyReportsPortConflictWithoutChangingConfiguration(t *testing.T) {
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "nginx.conf")

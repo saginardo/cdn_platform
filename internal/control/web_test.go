@@ -380,6 +380,10 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		`id="site-detail-certificate"`,
 		`id="site-detail-invalidate"`,
 		`id="site-detail-allowlist"`,
+		`id="site-detail-delete"`,
+		`id="site-delete-dialog"`,
+		`id="site-delete-confirm"`,
+		`id="confirm-site-delete"`,
 	} {
 		if !strings.Contains(page, expected) {
 			t.Fatalf("index.html does not contain %q", expected)
@@ -415,6 +419,11 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		"renderSiteDetailStatus();",
 		"classList.toggle('hidden', !siteCacheable(site))",
 		`class="small secondary manage-site"`,
+		"function renderSiteDeleteDialog(status = null)",
+		"function setSiteEditorLocked(locked)",
+		"/delete-status",
+		"method: 'DELETE'",
+		"site.deleting",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)

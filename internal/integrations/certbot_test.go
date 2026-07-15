@@ -88,6 +88,31 @@ func TestCertbotDNSIssuerStopsWhenRetryWaitIsCanceled(t *testing.T) {
 	}
 }
 
+func TestCertbotDNSIssuerDeleteIsIdempotentAndUsesConfiguredDirectories(t *testing.T) {
+	issuer, statePath := newTestCertbotIssuer(t, "delete")
+	if err := issuer.Delete(context.Background(), "site-missing"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Fatalf("Certbot ran for a missing lineage: %v", err)
+	}
+	renewalDir := filepath.Join(issuer.ConfigDir, "renewal")
+	if err := os.MkdirAll(renewalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(renewalDir, "site-existing.conf"), []byte("lineage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := issuer.Delete(context.Background(), "site-existing"); err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(strings.TrimSpace(readTestFile(t, statePath+".1.args")), "\n")
+	assertArgumentValue(t, args, "--cert-name", "site-existing")
+	assertArgumentValue(t, args, "--config-dir", issuer.ConfigDir)
+	assertArgumentValue(t, args, "--work-dir", issuer.WorkDir)
+	assertArgumentValue(t, args, "--logs-dir", issuer.LogsDir)
+}
+
 func newTestCertbotIssuer(t *testing.T, mode string) (CertbotDNSIssuer, string) {
 	t.Helper()
 	directory := t.TempDir()

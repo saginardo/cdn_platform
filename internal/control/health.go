@@ -43,6 +43,11 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 			return err
 		}
 	}
+	if m.Server.SiteDeleter != nil {
+		if err := m.Server.SiteDeleter.Reconcile(ctx); err != nil {
+			return err
+		}
+	}
 	if m.Server.DNS == nil {
 		return nil
 	}
@@ -90,11 +95,7 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 }
 
 func (m *HealthManager) clearSiteDNS(ctx context.Context, site domain.Site) error {
-	_, zoneID, err := m.Server.Store.GetSite(site.ID)
-	if err != nil {
-		return err
-	}
-	if err := m.Server.DNS.Reconcile(ctx, zoneID, "site="+site.ID, nil); err != nil {
+	if err := m.Server.DNS.Reconcile(ctx, site.ZoneID, "site="+site.ID, nil); err != nil {
 		return fmt.Errorf("remove DNS for disabled site %s: %w", site.Name, err)
 	}
 	return nil
@@ -151,11 +152,7 @@ func (m *HealthManager) reconcileSite(ctx context.Context, site domain.Site, nod
 			})
 		}
 	}
-	_, zoneID, err := m.Server.Store.GetSite(site.ID)
-	if err != nil {
-		return err
-	}
-	if err := m.Server.DNS.Reconcile(ctx, zoneID, "site="+site.ID, desired); err != nil {
+	if err := m.Server.DNS.Reconcile(ctx, site.ZoneID, "site="+site.ID, desired); err != nil {
 		return fmt.Errorf("reconcile DNS for %s: %w", site.Name, err)
 	}
 	return nil

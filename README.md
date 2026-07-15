@@ -4,7 +4,7 @@ A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-
 
 ## What is implemented
 
-- Go control plane with SQLite metadata, Argon2id password login, TOTP, one-time recovery codes, CSRF protection, audit records, and a compact management UI.
+- Go control plane with SQLite metadata, Argon2id password login, TOTP, one-time recovery codes, CSRF protection, audit records, and a compact management UI with confirmation-protected site deletion.
 - Node-first enrollment: create a pending node, copy a 15-minute one-time bootstrap command, then bind all later edge calls to an internally issued mTLS client certificate.
 - Edge agent that writes Nginx configuration and certificates atomically, checks local public-port ownership, runs `nginx -t`, reloads a healthy Nginx or starts a failed/stopped Nginx, and restores the last known-good configuration and TLS files on failure.
 - Nginx OSS cache policy with a 5 GiB default disk cap per edge node, normalized cache generation, cache locking, revalidation, background refresh, stale fallback, HTTP(S) primary/backup origin failover, and cookie/authorization bypass. HTTP(S) sites automatically bypass cache and response buffering for WebSocket upgrades, SSE accept headers, `X-CDN-Stream: 1`, and POST responses; full passthrough mode disables cache and buffering for the entire hostname while forwarding byte ranges. `grpc://` and `grpcs://` origins use native gRPC proxying over the client HTTP/2 listener.
@@ -124,6 +124,12 @@ For an HTTPS/WSS/GRPCS origin reached by IP while its certificate covers only a 
 对于不需要视频缓存、只需要稳定转发 HTTP(S) Range 流量的整站代理，启用“透传模式（仅 HTTP(S)，禁用 Nginx 缓存）”并重新发布。不要在保留 `proxy_cache` 的前提下只补充 `Range` / `If-Range`；这不能保证正确回源范围语义。完整的启用条件、限制、故障根因和 `206` 验证命令见 [docs/PASSTHROUGH_MODE.md](docs/PASSTHROUGH_MODE.md)。
 
 Certificate jobs use `CERTIFICATE_ISSUE_TIMEOUT` (default `10m`) and wait 30 seconds for Cloudflare DNS-01 TXT propagation. When Certbot specifically reports `No TXT record found`, the issuer waits another 30 seconds and retries once. Other failures are returned immediately. A control-plane stop or restart marks an in-flight job as failed rather than retrying it automatically, to avoid duplicate ACME requests; click **Issue TLS** again after the controller is healthy. The authenticated APIs `GET /api/sites/{site-id}/certificate-task` and `GET /api/tasks/{task-id}` expose the persisted task state and failure detail.
+
+## Site deletion
+
+Deleting a site is a persisted retirement workflow rather than a metadata-only operation. Enter the exact site name in the management UI to start it. The controller disables the site, removes only Cloudflare A records whose managed comment identifies that site, publishes desired states without the site, and waits for every currently assigned active edge to confirm the new configuration. It then removes the local Certbot lineage and deletes the site metadata and encrypted certificate from SQLite.
+
+If an active edge fails or times out, the site remains disabled in **Deleting** state and managed DNS stays withdrawn. Repair, drain, or uninstall the affected node, then retry deletion; there is no force-delete path. Audit records and deployment tasks are retained, and ClickHouse access logs continue to expire under their existing TTL. Local Certbot cleanup does not revoke the already-issued certificate at the ACME CA.
 
 ## Runtime behavior
 

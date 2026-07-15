@@ -19,10 +19,12 @@ import (
 )
 
 var (
-	ErrNotFound      = errors.New("not found")
-	ErrTokenInvalid  = errors.New("enrollment token is invalid or expired")
-	ErrCacheDisabled = errors.New("site cache is disabled in passthrough mode")
-	ErrNodeAssigned  = errors.New("node is still assigned to a site")
+	ErrNotFound       = errors.New("not found")
+	ErrTokenInvalid   = errors.New("enrollment token is invalid or expired")
+	ErrCacheDisabled  = errors.New("site cache is disabled in passthrough mode")
+	ErrNodeAssigned   = errors.New("node is still assigned to a site")
+	ErrSiteDeleting   = errors.New("site deletion is in progress")
+	ErrSiteTaskActive = errors.New("site has an active publish or certificate task")
 )
 
 type Store struct {
@@ -109,6 +111,7 @@ CREATE TABLE IF NOT EXISTS sites (
   config_version INTEGER NOT NULL DEFAULT 1,
   published INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER NOT NULL DEFAULT 1,
+  deleting INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -152,6 +155,15 @@ CREATE TABLE IF NOT EXISTS publish_task_nodes (
   port_conflicts_json TEXT NOT NULL DEFAULT '[]',
   reported_at TEXT,
   PRIMARY KEY(task_id, node_id)
+);
+CREATE TABLE IF NOT EXISTS site_deletion_jobs (
+  site_id TEXT PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+  task_id TEXT NOT NULL UNIQUE REFERENCES deployment_tasks(id) ON DELETE CASCADE,
+  phase TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  remote_addr TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS dns_bindings (
   id TEXT PRIMARY KEY,
@@ -221,6 +233,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN passthrough INTEGER NOT NULL DEFAULT 0`)
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN client_max_body_size_mb INTEGER NOT NULL DEFAULT 128`)
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN read_write_timeout_seconds INTEGER NOT NULL DEFAULT 360`)
+	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0`)
 	if _, err := s.db.Exec(`UPDATE sites SET stream_paths_json = '[]' WHERE stream_paths_json <> '[]'`); err != nil {
 		return fmt.Errorf("retire legacy stream paths: %w", err)
 	}
@@ -253,6 +266,11 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 		ON deployment_tasks(site_id)
 		WHERE kind = 'publish_site' AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
 		return fmt.Errorf("create active publish task index: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_delete_site
+		ON deployment_tasks(site_id)
+		WHERE kind = 'delete_site' AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
+		return fmt.Errorf("create active site deletion task index: %w", err)
 	}
 	return s.backfillSiteDomains()
 }
@@ -870,8 +888,8 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 	if err := validateSiteNodes(tx, site.Nodes); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.CreatedAt), stamp(site.UpdatedAt))
+	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, deleting, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.CreatedAt), stamp(site.UpdatedAt))
 	if err != nil {
 		return err
 	}
@@ -882,11 +900,11 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 }
 
 func (s *Store) GetSite(id string) (domain.Site, string, error) {
-	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites WHERE id = ?`, id))
+	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites WHERE id = ?`, id))
 }
 
 func (s *Store) ListSites() ([]domain.Site, error) {
-	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -906,9 +924,9 @@ func scanSite(row scanner) (domain.Site, string, error) {
 	var site domain.Site
 	var zoneID, domains, nodes, primary, streamPaths string
 	var backup sql.NullString
-	var passthrough, published, enabled int
+	var passthrough, published, enabled, deleting int
 	var createdAt, updatedAt string
-	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.ReadWriteTimeoutSeconds, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &createdAt, &updatedAt)
+	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.ReadWriteTimeoutSeconds, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &deleting, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Site{}, "", ErrNotFound
 	}
@@ -947,6 +965,7 @@ func scanSite(row scanner) (domain.Site, string, error) {
 	site.Passthrough = passthrough != 0
 	site.Published = published != 0
 	site.Enabled = enabled != 0
+	site.Deleting = deleting != 0
 	return site, zoneID, nil
 }
 
@@ -954,6 +973,9 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	current, currentZoneID, err := s.GetSite(site.ID)
 	if err != nil {
 		return domain.Site{}, err
+	}
+	if current.Deleting {
+		return domain.Site{}, ErrSiteDeleting
 	}
 	if strings.TrimSpace(zoneID) == "" {
 		return domain.Site{}, errors.New("Cloudflare zone ID is required")
@@ -996,7 +1018,7 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	if err := claimDomains(tx, site.ID, site.Domains); err != nil {
 		return domain.Site{}, err
 	}
-	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, cache_generation=?, config_version=?, published=?, enabled=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.UpdatedAt), site.ID)
+	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, cache_generation=?, config_version=?, published=?, enabled=?, deleting=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.UpdatedAt), site.ID)
 	if err != nil {
 		return domain.Site{}, err
 	}
@@ -1044,7 +1066,7 @@ func claimDomains(tx *sql.Tx, siteID string, domains []string) error {
 }
 
 func (s *Store) MarkSitePublished(siteID string) (domain.Site, error) {
-	result, err := s.db.Exec(`UPDATE sites SET published = 1, updated_at = ? WHERE id = ?`, stamp(now()), siteID)
+	result, err := s.db.Exec(`UPDATE sites SET published = 1, updated_at = ? WHERE id = ? AND deleting = 0`, stamp(now()), siteID)
 	if err != nil {
 		return domain.Site{}, err
 	}
@@ -1053,6 +1075,9 @@ func (s *Store) MarkSitePublished(siteID string) (domain.Site, error) {
 		return domain.Site{}, err
 	}
 	if changed != 1 {
+		if site, _, lookupErr := s.GetSite(siteID); lookupErr == nil && site.Deleting {
+			return domain.Site{}, ErrSiteDeleting
+		}
 		return domain.Site{}, ErrNotFound
 	}
 	site, _, err := s.GetSite(siteID)
@@ -1063,6 +1088,9 @@ func (s *Store) InvalidateSiteCache(siteID string) (domain.Site, error) {
 	site, _, err := s.GetSite(siteID)
 	if err != nil {
 		return domain.Site{}, err
+	}
+	if site.Deleting {
+		return domain.Site{}, ErrSiteDeleting
 	}
 	if site.Passthrough {
 		return domain.Site{}, ErrCacheDisabled
@@ -1102,6 +1130,11 @@ func (s *Store) CreateOrGetActivePublishTask(siteID string, deadline time.Time) 
 	if strings.TrimSpace(siteID) == "" {
 		return domain.DeploymentTask{}, false, errors.New("site ID is required")
 	}
+	if site, _, err := s.GetSite(siteID); err == nil && site.Deleting {
+		return domain.DeploymentTask{}, false, ErrSiteDeleting
+	} else if err != nil && !errors.Is(err, ErrNotFound) {
+		return domain.DeploymentTask{}, false, err
+	}
 	if err := s.ReconcilePublishTasks(); err != nil {
 		return domain.DeploymentTask{}, false, err
 	}
@@ -1139,6 +1172,11 @@ func (s *Store) CreateOrGetActiveCertificateTask(kind, siteID, detail string) (d
 	}
 	if kind != "issue_certificate" && kind != "renew_certificate" {
 		return domain.DeploymentTask{}, false, errors.New("invalid certificate task kind")
+	}
+	if site, _, err := s.GetSite(siteID); err != nil {
+		return domain.DeploymentTask{}, false, err
+	} else if site.Deleting {
+		return domain.DeploymentTask{}, false, ErrSiteDeleting
 	}
 	for range 2 {
 		created := now()
@@ -1263,7 +1301,7 @@ func (s *Store) RecordPublishApply(nodeID string, report domain.ApplyReport) err
 	_, err = s.db.Exec(`UPDATE publish_task_nodes
 		SET status = ?, error_code = ?, detail = ?, port_conflicts_json = ?, reported_at = ?
 		WHERE node_id = ? AND target_version <= ? AND status = ?
-		  AND task_id IN (SELECT id FROM deployment_tasks WHERE kind = 'publish_site' AND status IN (?, ?, ?))`,
+		  AND task_id IN (SELECT id FROM deployment_tasks WHERE kind IN ('publish_site', 'delete_site') AND status IN (?, ?, ?))`,
 		status, report.Code, report.Detail, string(conflicts), stamp(now()), nodeID, report.Version, domain.PublishNodePending,
 		domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying)
 	return err
@@ -1380,36 +1418,7 @@ func (s *Store) PublishStatus(siteID string) (domain.PublishStatus, error) {
 	if err != nil {
 		return domain.PublishStatus{}, err
 	}
-	rows, err := s.db.Query(`SELECT publish_task_nodes.node_id, nodes.name, publish_task_nodes.target_version,
-		publish_task_nodes.status, publish_task_nodes.error_code, publish_task_nodes.detail,
-		publish_task_nodes.port_conflicts_json, publish_task_nodes.reported_at
-		FROM publish_task_nodes JOIN nodes ON nodes.id = publish_task_nodes.node_id
-		WHERE publish_task_nodes.task_id = ? ORDER BY nodes.name`, task.ID)
-	if err != nil {
-		return domain.PublishStatus{}, err
-	}
-	defer rows.Close()
-	result := domain.PublishStatus{Task: &task, Nodes: make([]domain.PublishNodeResult, 0)}
-	for rows.Next() {
-		var node domain.PublishNodeResult
-		var conflicts string
-		var reportedAt sql.NullString
-		if err := rows.Scan(&node.NodeID, &node.NodeName, &node.TargetVersion, &node.Status, &node.ErrorCode, &node.Detail, &conflicts, &reportedAt); err != nil {
-			return domain.PublishStatus{}, err
-		}
-		if err := json.Unmarshal([]byte(conflicts), &node.PortConflicts); err != nil {
-			return domain.PublishStatus{}, fmt.Errorf("decode publish port conflicts: %w", err)
-		}
-		if reportedAt.Valid {
-			value, err := parseTime(reportedAt.String)
-			if err != nil {
-				return domain.PublishStatus{}, err
-			}
-			node.ReportedAt = &value
-		}
-		result.Nodes = append(result.Nodes, node)
-	}
-	return result, rows.Err()
+	return s.deploymentStatus(task)
 }
 
 // HasSuccessfulPublishAfter reports whether a successful publication completed
@@ -1485,7 +1494,13 @@ func (s *Store) SaveNodeStates(updates []NodeStateUpdate) error {
 		return err
 	}
 	defer tx.Rollback()
-	updatedAt := stamp(now())
+	if err := saveNodeStatesTx(tx, updates, stamp(now())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func saveNodeStatesTx(tx *sql.Tx, updates []NodeStateUpdate, updatedAt string) error {
 	for _, update := range updates {
 		if update.NodeID == "" {
 			return errors.New("node state is missing a node ID")
@@ -1498,7 +1513,7 @@ func (s *Store) SaveNodeStates(updates []NodeStateUpdate) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) NodeState(nodeID string) (domain.DesiredState, []byte, error) {

@@ -78,6 +78,7 @@ func main() {
 		}
 	}
 	certificateManager := &control.CertificateManager{Store: database, Publisher: publisher, Issuer: issuer, Notifier: notifier, IssueTimeout: issueTimeout}
+	siteDeleter := &control.SiteDeletionManager{Store: database, Publisher: publisher, DNS: dns, Certificates: issuer}
 	setupCIDRs, err := parseCIDRs(os.Getenv("SETUP_ALLOW_CIDRS"))
 	if err != nil {
 		fatal("SETUP_ALLOW_CIDRS: " + err.Error())
@@ -92,7 +93,7 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Issuer: issuer, CertificateManager: certificateManager, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
+	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	healthManager := &control.HealthManager{Server: server}

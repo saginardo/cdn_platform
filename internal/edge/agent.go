@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"cdn-platform/internal/domain"
+	"github.com/google/uuid"
 )
 
 type Config struct {
@@ -280,27 +281,13 @@ func (a *Agent) apply(state domain.DesiredState) error {
 	if conflicts := foreignListeners(listeners); len(conflicts) > 0 {
 		return a.applyFailed(state.Version, "port_conflict", fmt.Errorf("public port is already held by another service: %s", formatPortConflicts(conflicts)), conflicts)
 	}
-	backups := make(map[string]fileBackup)
-	for siteID, certificate := range state.Certificates {
-		certificatePath := filepath.Join(a.Config.CertificateDir, siteID+".crt")
-		privateKeyPath := filepath.Join(a.Config.CertificateDir, siteID+".key")
-		for _, path := range []string{certificatePath, privateKeyPath} {
-			backup, err := readBackup(path)
-			if err != nil {
-				return a.applyFailed(state.Version, "certificate_backup_failed", err, nil)
-			}
-			backups[path] = backup
-		}
-		if err := atomicWriteFile(certificatePath, []byte(certificate.CertificatePEM), 0o600); err != nil {
-			return a.applyFailed(state.Version, "certificate_write_failed", fmt.Errorf("write certificate for %s: %w", siteID, err), nil)
-		}
-		if err := atomicWriteFile(privateKeyPath, []byte(certificate.PrivateKeyPEM), 0o600); err != nil {
-			restoreBackups(backups)
-			return a.applyFailed(state.Version, "private_key_write_failed", fmt.Errorf("write private key for %s: %w", siteID, err), nil)
-		}
+	backups, code, err := a.stageCertificates(state.Certificates)
+	if err != nil {
+		return a.applyFailed(state.Version, code, err, nil)
 	}
 	previous, previousErr := os.ReadFile(a.Config.NginxConfigPath)
 	if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
+		restoreBackups(backups)
 		return a.applyFailed(state.Version, "config_backup_failed", previousErr, nil)
 	}
 	if err := atomicWriteFile(a.Config.NginxConfigPath, []byte(state.NginxConfig), 0o640); err != nil {
@@ -308,13 +295,13 @@ func (a *Agent) apply(state domain.DesiredState) error {
 		return a.applyFailed(state.Version, "config_write_failed", fmt.Errorf("write Nginx configuration: %w", err), nil)
 	}
 	if err := a.Config.Runner.Test(); err != nil {
-		a.restorePreviousConfig(previous, previousErr)
 		restoreBackups(backups)
+		a.restorePreviousConfig(previous, previousErr)
 		return a.applyFailed(state.Version, "nginx_config_invalid", err, nil)
 	}
 	if err := a.Config.Runner.Apply(); err != nil {
-		a.restorePreviousConfig(previous, previousErr)
 		restoreBackups(backups)
+		a.restorePreviousConfig(previous, previousErr)
 		if listeners, inspectErr := a.Config.Runner.PortListeners(ports); inspectErr == nil {
 			if conflicts := foreignListeners(listeners); len(conflicts) > 0 {
 				return a.applyFailed(state.Version, "port_conflict", fmt.Errorf("public port is already held by another service: %s", formatPortConflicts(conflicts)), conflicts)
@@ -327,13 +314,13 @@ func (a *Agent) apply(state domain.DesiredState) error {
 		return a.applyFailed(state.Version, "port_check_failed", err, nil)
 	}
 	if conflicts := foreignListeners(listeners); len(conflicts) > 0 {
-		a.restorePreviousConfig(previous, previousErr)
 		restoreBackups(backups)
+		a.restorePreviousConfig(previous, previousErr)
 		return a.applyFailed(state.Version, "port_conflict", fmt.Errorf("public port is already held by another service: %s", formatPortConflicts(conflicts)), conflicts)
 	}
 	if !nginxOwnsPorts(listeners, ports) {
-		a.restorePreviousConfig(previous, previousErr)
 		restoreBackups(backups)
+		a.restorePreviousConfig(previous, previousErr)
 		return a.applyFailed(state.Version, "nginx_not_listening", fmt.Errorf("Nginx did not retain all required public listeners after applying configuration: %s", formatPorts(ports)), nil)
 	}
 	if err := atomicWriteFile(filepath.Join(a.Config.StateDir, "applied-version"), []byte(fmt.Sprintf("%d\n", state.Version)), 0o640); err != nil {
@@ -476,6 +463,74 @@ func restoreBackups(backups map[string]fileBackup) {
 			_ = os.Remove(path)
 		}
 	}
+}
+
+func (a *Agent) stageCertificates(certificates map[string]domain.TLSBundle) (map[string]fileBackup, string, error) {
+	if err := os.MkdirAll(a.Config.CertificateDir, 0o750); err != nil {
+		return nil, "certificate_write_failed", err
+	}
+	desiredPaths := make(map[string]bool, len(certificates)*2)
+	for siteID := range certificates {
+		desiredPaths[filepath.Join(a.Config.CertificateDir, siteID+".crt")] = true
+		desiredPaths[filepath.Join(a.Config.CertificateDir, siteID+".key")] = true
+	}
+	entries, err := os.ReadDir(a.Config.CertificateDir)
+	if err != nil {
+		return nil, "certificate_backup_failed", err
+	}
+	stalePaths := make([]string, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !managedSiteCertificateName(entry.Name()) {
+			continue
+		}
+		path := filepath.Join(a.Config.CertificateDir, entry.Name())
+		if !desiredPaths[path] {
+			stalePaths = append(stalePaths, path)
+		}
+	}
+	backups := make(map[string]fileBackup, len(desiredPaths)+len(stalePaths))
+	for path := range desiredPaths {
+		backup, err := readBackup(path)
+		if err != nil {
+			return nil, "certificate_backup_failed", err
+		}
+		backups[path] = backup
+	}
+	for _, path := range stalePaths {
+		backup, err := readBackup(path)
+		if err != nil {
+			return nil, "certificate_backup_failed", err
+		}
+		backups[path] = backup
+	}
+	for siteID, certificate := range certificates {
+		certificatePath := filepath.Join(a.Config.CertificateDir, siteID+".crt")
+		privateKeyPath := filepath.Join(a.Config.CertificateDir, siteID+".key")
+		if err := atomicWriteFile(certificatePath, []byte(certificate.CertificatePEM), 0o600); err != nil {
+			restoreBackups(backups)
+			return nil, "certificate_write_failed", fmt.Errorf("write certificate for %s: %w", siteID, err)
+		}
+		if err := atomicWriteFile(privateKeyPath, []byte(certificate.PrivateKeyPEM), 0o600); err != nil {
+			restoreBackups(backups)
+			return nil, "private_key_write_failed", fmt.Errorf("write private key for %s: %w", siteID, err)
+		}
+	}
+	for _, path := range stalePaths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			restoreBackups(backups)
+			return nil, "certificate_remove_failed", fmt.Errorf("remove stale certificate file %s: %w", filepath.Base(path), err)
+		}
+	}
+	return backups, "", nil
+}
+
+func managedSiteCertificateName(name string) bool {
+	extension := filepath.Ext(name)
+	if extension != ".crt" && extension != ".key" {
+		return false
+	}
+	_, err := uuid.Parse(strings.TrimSuffix(name, extension))
+	return err == nil
 }
 
 func (a *Agent) loadOrCreateKeyAndCSR() (*ecdsa.PrivateKey, []byte, error) {

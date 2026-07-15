@@ -67,6 +67,7 @@ type Site struct {
 	ConfigVersion           int64     `json:"config_version"`
 	Published               bool      `json:"published"`
 	Enabled                 bool      `json:"enabled"`
+	Deleting                bool      `json:"deleting"`
 	CreatedAt               time.Time `json:"created_at"`
 	UpdatedAt               time.Time `json:"updated_at"`
 }

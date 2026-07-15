@@ -234,6 +234,12 @@ printf 'nginx %s\n' "$*" >>"$MOCK_LOG"
 if [[ "${MOCK_FAILURE:-}" == "nginx" && "${1:-}" == "-t" ]]; then exit 1; fi
 exit 0
 `)
+	harness.writeMock(t, "sha256sum", `#!/usr/bin/env bash
+set -euo pipefail
+read -r expected path
+actual=$(shasum -a 256 "$path" | awk '{print $1}')
+[[ "$expected" == "$actual" ]]
+`)
 	harness.writeMock(t, "sleep", "#!/usr/bin/env bash\nexit 0\n")
 	harness.writeMock(t, "systemctl", `#!/usr/bin/env bash
 set -euo pipefail

@@ -22,6 +22,12 @@ type CertificateIssuer interface {
 	Issue(ctx context.Context, name string, domains []string) (IssuedCertificate, error)
 }
 
+const (
+	cloudflareDNSPropagationSeconds = 30
+	missingTXTRecordRetryDelay      = 30 * time.Second
+	missingTXTRecordError           = "No TXT record found"
+)
+
 type CertbotDNSIssuer struct {
 	Binary    string
 	Email     string
@@ -32,6 +38,10 @@ type CertbotDNSIssuer struct {
 }
 
 func (c CertbotDNSIssuer) Issue(ctx context.Context, name string, domains []string) (IssuedCertificate, error) {
+	return c.issue(ctx, name, domains, waitForContext)
+}
+
+func (c CertbotDNSIssuer) issue(ctx context.Context, name string, domains []string, wait func(context.Context, time.Duration) error) (IssuedCertificate, error) {
 	if len(domains) == 0 {
 		return IssuedCertificate{}, fmt.Errorf("at least one domain is required")
 	}
@@ -82,12 +92,17 @@ func (c CertbotDNSIssuer) Issue(ctx context.Context, name string, domains []stri
 	if err := credentials.Close(); err != nil {
 		return IssuedCertificate{}, err
 	}
-	args := []string{"certonly", "--non-interactive", "--agree-tos", "--email", c.Email, "--dns-cloudflare", "--dns-cloudflare-credentials", credentialsPath, "--config-dir", configDir, "--work-dir", workDir, "--logs-dir", logsDir, "--cert-name", name}
+	args := []string{"certonly", "--non-interactive", "--agree-tos", "--email", c.Email, "--dns-cloudflare", "--dns-cloudflare-credentials", credentialsPath, "--dns-cloudflare-propagation-seconds", fmt.Sprintf("%d", cloudflareDNSPropagationSeconds), "--config-dir", configDir, "--work-dir", workDir, "--logs-dir", logsDir, "--cert-name", name}
 	for _, domain := range domains {
 		args = append(args, "-d", domain)
 	}
-	command := exec.CommandContext(ctx, c.Binary, args...)
-	output, err := command.CombinedOutput()
+	output, err := runCertbot(ctx, c.Binary, args)
+	if err != nil && strings.Contains(string(output), missingTXTRecordError) {
+		if waitErr := wait(ctx, missingTXTRecordRetryDelay); waitErr != nil {
+			return IssuedCertificate{}, fmt.Errorf("waiting to retry certbot DNS-01 after missing TXT record: %w", waitErr)
+		}
+		output, err = runCertbot(ctx, c.Binary, args)
+	}
 	if err != nil {
 		return IssuedCertificate{}, fmt.Errorf("certbot DNS-01 failed: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -109,4 +124,19 @@ func (c CertbotDNSIssuer) Issue(ctx context.Context, name string, domains []stri
 		return IssuedCertificate{}, err
 	}
 	return IssuedCertificate{CertificatePEM: certificate, PrivateKeyPEM: privateKey, NotAfter: parsed.NotAfter}, nil
+}
+
+func runCertbot(ctx context.Context, binary string, args []string) ([]byte, error) {
+	return exec.CommandContext(ctx, binary, args...).CombinedOutput()
+}
+
+func waitForContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

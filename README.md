@@ -123,7 +123,7 @@ For an HTTPS/WSS/GRPCS origin reached by IP while its certificate covers only a 
 
 对于不需要视频缓存、只需要稳定转发 HTTP(S) Range 流量的整站代理，启用“透传模式（仅 HTTP(S)，禁用 Nginx 缓存）”并重新发布。不要在保留 `proxy_cache` 的前提下只补充 `Range` / `If-Range`；这不能保证正确回源范围语义。完整的启用条件、限制、故障根因和 `206` 验证命令见 [docs/PASSTHROUGH_MODE.md](docs/PASSTHROUGH_MODE.md)。
 
-Certificate jobs use `CERTIFICATE_ISSUE_TIMEOUT` (default `10m`). A control-plane stop or restart marks an in-flight job as failed rather than retrying it automatically, to avoid duplicate ACME requests; click **Issue TLS** again after the controller is healthy. The authenticated APIs `GET /api/sites/{site-id}/certificate-task` and `GET /api/tasks/{task-id}` expose the persisted task state and failure detail.
+Certificate jobs use `CERTIFICATE_ISSUE_TIMEOUT` (default `10m`) and wait 30 seconds for Cloudflare DNS-01 TXT propagation. When Certbot specifically reports `No TXT record found`, the issuer waits another 30 seconds and retries once. Other failures are returned immediately. A control-plane stop or restart marks an in-flight job as failed rather than retrying it automatically, to avoid duplicate ACME requests; click **Issue TLS** again after the controller is healthy. The authenticated APIs `GET /api/sites/{site-id}/certificate-task` and `GET /api/tasks/{task-id}` expose the persisted task state and failure detail.
 
 ## Runtime behavior
 

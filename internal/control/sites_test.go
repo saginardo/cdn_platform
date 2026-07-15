@@ -91,6 +91,89 @@ func TestSiteClientMaxBodySizeAPI(t *testing.T) {
 	}
 }
 
+func TestSiteReadWriteTimeoutAPI(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-1", "203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	defaultSite := requestSite(t, server, http.MethodPost, "/api/sites", map[string]any{
+		"name": "default-timeout", "zone_id": "zone", "domains": []string{"default-timeout.example.test"}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "stream_paths": []string{"/legacy"}, "enabled": true,
+	})
+	if defaultSite.ReadWriteTimeoutSeconds != domain.DefaultReadWriteTimeoutSeconds {
+		t.Fatalf("omitted read/write timeout = %d", defaultSite.ReadWriteTimeoutSeconds)
+	}
+	if defaultSite.StreamPaths == nil || len(defaultSite.StreamPaths) != 0 {
+		t.Fatalf("legacy stream paths were not retired: %#v", defaultSite.StreamPaths)
+	}
+
+	var longest domain.Site
+	for _, value := range []int{360, 900, 1800, 3600} {
+		created := requestSite(t, server, http.MethodPost, "/api/sites", map[string]any{
+			"name": fmt.Sprintf("timeout-%d", value), "zone_id": "zone", "domains": []string{fmt.Sprintf("timeout-%d.example.test", value)}, "node_ids": []string{node.ID},
+			"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "read_write_timeout_seconds": value, "enabled": true,
+		})
+		if created.ReadWriteTimeoutSeconds != value {
+			t.Fatalf("created read/write timeout = %d, want %d", created.ReadWriteTimeoutSeconds, value)
+		}
+		if value == 3600 {
+			longest = created
+		}
+	}
+
+	updated := requestSite(t, server, http.MethodPut, "/api/sites/"+longest.ID, map[string]any{
+		"name": longest.Name, "zone_id": longest.ZoneID, "domains": longest.Domains, "node_ids": longest.Nodes,
+		"primary_origin": longest.PrimaryOrigin, "stream_paths": []string{"/legacy"}, "enabled": longest.Enabled,
+	})
+	if updated.ReadWriteTimeoutSeconds != 3600 {
+		t.Fatalf("omitted update did not preserve read/write timeout: %#v", updated)
+	}
+	if updated.StreamPaths == nil || len(updated.StreamPaths) != 0 {
+		t.Fatalf("legacy stream paths were not ignored on update: %#v", updated.StreamPaths)
+	}
+
+	for _, value := range []int{0, 359, 361, 7200} {
+		response := requestSiteResponse(t, server, http.MethodPost, "/api/sites", map[string]any{
+			"name": "invalid-timeout", "zone_id": "zone", "domains": []string{"invalid-timeout.example.test"}, "node_ids": []string{node.ID},
+			"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "read_write_timeout_seconds": value, "enabled": true,
+		})
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("read/write timeout %d = %d %s", value, response.Code, response.Body.String())
+		}
+	}
+
+	before, _, err := database.GetSite(longest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := requestSiteResponse(t, server, http.MethodPut, "/api/sites/"+longest.ID, map[string]any{
+		"name": longest.Name, "zone_id": longest.ZoneID, "domains": longest.Domains, "node_ids": longest.Nodes,
+		"primary_origin": longest.PrimaryOrigin, "read_write_timeout_seconds": 901, "enabled": longest.Enabled,
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid timeout update = %d %s", response.Code, response.Body.String())
+	}
+	after, _, err := database.GetSite(longest.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ReadWriteTimeoutSeconds != before.ReadWriteTimeoutSeconds || after.ConfigVersion != before.ConfigVersion {
+		t.Fatalf("invalid timeout update changed site: before=%#v after=%#v", before, after)
+	}
+}
+
 func TestSitePassthroughAPICompatibilityAndCacheInvalidation(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

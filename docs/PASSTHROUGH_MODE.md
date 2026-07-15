@@ -1,6 +1,6 @@
 # HTTP(S) 透传模式与 Range 流量排障
 
-更新时间：2026-07-12
+更新时间：2026-07-15
 
 ## 结论
 
@@ -37,11 +37,11 @@
 
 - 不生成站点级 `proxy_cache` 策略，并显式 `proxy_cache off`。
 - 设置 `proxy_buffering off` 与 `proxy_request_buffering off`。
-- 使用 1 小时的读写超时。
+- 使用站点配置的 6、15、30 或 60 分钟读写空闲超时，默认 6 分钟。
 - 显式转发 `Range $http_range` 与 `If-Range $http_if_range`。
 - 保留 HTTP/1.1 上游连接复用、SNI/TLS 校验和主备源站故障切换。
 
-流式路径仍可独立用于 WebSocket/SSE；它们本来就关闭缓存和缓冲。`passthrough` 的作用是让整站的普通 `location /` 也遵循同样的无缓存转发语义。
+WebSocket/SSE 不再配置路径；WebSocket Upgrade、SSE Accept/控制头和 POST 会自动进入无缓存、无响应缓冲分支。`passthrough` 的作用仍是让整站所有请求都遵循无缓存转发语义，并额外关闭请求缓冲、完整转发 Range 头。
 
 ## 启用与发布
 

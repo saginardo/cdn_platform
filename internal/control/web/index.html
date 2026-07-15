@@ -164,35 +164,120 @@
             </section>
 
             <section id="sites" class="view hidden">
-          <div class="section-heading site-heading">
-            <div class="heading-copy"><h1>站点</h1><p id="site-list-meta" class="section-meta">0 个站点</p></div>
-            <button id="show-site-form">添加站点</button>
-          </div>
-          <form id="site-form" class="form-grid site-form hidden">
-            <input id="site-id" type="hidden">
-            <label>名称 <input id="site-name" required placeholder="example-site"></label>
-            <label>Cloudflare 区域 ID <input id="site-zone" required></label>
-            <label>域名 <input id="site-domains" required placeholder="www.example.com, static.example.com"></label>
-            <fieldset class="node-assignment"><legend>已分配节点</legend><div id="site-node-selector"></div></fieldset>
-            <label>主源站 URL <input id="site-primary-url" required placeholder="https://origin.example.com"></label>
-            <label>主源站 Host 头 <input id="site-primary-host" placeholder="origin.example.com"></label>
-            <label>备用源站 URL <input id="site-backup-url" placeholder="https://backup.example.com"></label>
-            <label>备用源站 Host 头 <input id="site-backup-host" placeholder="backup.example.com"></label>
-            <label>流式路径（WebSocket / SSE）<input id="site-stream-paths" placeholder="/ws, /events"></label>
-            <label>请求体上限
-              <select id="site-client-max-body-size">
-                <option value="128">128 MiB</option>
-                <option value="256">256 MiB</option>
-                <option value="512">512 MiB</option>
-                <option value="1024">1024 MiB</option>
-              </select>
-            </label>
-            <label class="checkbox-label"><input id="site-passthrough" type="checkbox"> 透传模式（仅 HTTP(S)，禁用 Nginx 缓存）</label>
-            <label class="checkbox-label"><input id="site-enabled" type="checkbox" checked> 启用流量</label>
-            <div class="form-actions"><button id="site-submit" type="submit">创建站点</button><button type="button" class="secondary cancel">取消</button></div>
-          </form>
-          <div id="site-allowlist" class="secret hidden"></div>
-          <div id="site-table" class="site-list" aria-live="polite"></div>
+              <div id="site-list-page">
+                <div class="section-heading site-heading">
+                  <div class="heading-copy"><h1>站点</h1><p id="site-list-meta" class="section-meta">0 个站点</p></div>
+                  <button id="show-site-form" type="button">添加站点</button>
+                </div>
+                <div id="site-table" class="site-list" aria-live="polite"></div>
+              </div>
+
+              <div id="site-detail-page" class="site-detail-page hidden">
+                <header class="site-detail-header">
+                  <div class="site-detail-heading">
+                    <button id="site-detail-back" class="site-detail-back secondary" type="button" aria-label="返回站点列表"><span aria-hidden="true">←</span><span>站点</span></button>
+                    <div class="site-detail-title-wrap">
+                      <div class="site-detail-title-line"><h1 id="site-detail-title" tabindex="-1">添加站点</h1><span id="site-detail-state"></span></div>
+                      <p id="site-detail-meta" class="section-meta">创建新的站点配置</p>
+                    </div>
+                  </div>
+                  <button id="site-detail-publish" class="publish hidden" type="button">发布</button>
+                </header>
+
+                <div id="site-detail-missing" class="site-detail-missing hidden" role="status">
+                  <h2>未找到站点</h2>
+                  <p>该站点可能已被删除，或链接中的站点 ID 无效。</p>
+                  <button id="site-missing-back" class="secondary" type="button">返回站点列表</button>
+                </div>
+
+                <div id="site-detail-editor">
+                  <section id="site-summary-section" class="site-detail-section site-summary-section hidden" aria-labelledby="site-summary-title">
+                    <div class="site-detail-section-heading"><h2 id="site-summary-title">配置概览</h2></div>
+                    <dl class="site-detail-summary">
+                      <div><dt>协议</dt><dd id="site-summary-protocol">--</dd></div>
+                      <div><dt>缓存</dt><dd id="site-summary-cache">--</dd></div>
+                      <div><dt>请求体</dt><dd id="site-summary-body">--</dd></div>
+                      <div><dt>空闲超时</dt><dd id="site-summary-timeout">--</dd></div>
+                      <div><dt>节点</dt><dd id="site-summary-nodes">--</dd></div>
+                      <div><dt>TLS</dt><dd id="site-summary-tls">--</dd></div>
+                      <div><dt>发布</dt><dd id="site-summary-publish">--</dd></div>
+                    </dl>
+                    <div id="site-publish-detail"></div>
+                  </section>
+
+                  <form id="site-form" class="site-editor-form">
+                    <input id="site-id" type="hidden">
+                    <section class="site-form-section" aria-labelledby="site-basic-title">
+                      <div class="site-form-section-heading"><h2 id="site-basic-title">基本信息</h2></div>
+                      <div class="site-form-fields">
+                        <label>名称 <input id="site-name" required placeholder="example-site"></label>
+                        <label>Cloudflare 区域 ID <input id="site-zone" required></label>
+                        <label class="site-field-wide">域名 <input id="site-domains" required placeholder="www.example.com, static.example.com"></label>
+                        <label class="checkbox-label"><input id="site-enabled" type="checkbox" checked> 启用流量</label>
+                      </div>
+                    </section>
+
+                    <section class="site-form-section" aria-labelledby="site-origin-title">
+                      <div class="site-form-section-heading"><h2 id="site-origin-title">源站与协议</h2></div>
+                      <div class="site-form-fields">
+                        <label>主源站 URL <input id="site-primary-url" required placeholder="https://origin.example.com"></label>
+                        <label>主源站 Host 头 <input id="site-primary-host" placeholder="origin.example.com"></label>
+                        <label>备用源站 URL <input id="site-backup-url" placeholder="https://backup.example.com"></label>
+                        <label>备用源站 Host 头 <input id="site-backup-host" placeholder="backup.example.com"></label>
+                      </div>
+                    </section>
+
+                    <section class="site-form-section" aria-labelledby="site-policy-title">
+                      <div class="site-form-section-heading"><h2 id="site-policy-title">流量策略</h2></div>
+                      <div class="site-form-fields">
+                        <label>请求体上限
+                          <select id="site-client-max-body-size">
+                            <option value="128">128 MiB</option>
+                            <option value="256">256 MiB</option>
+                            <option value="512">512 MiB</option>
+                            <option value="1024">1024 MiB</option>
+                          </select>
+                        </label>
+                        <label>回源读写空闲超时
+                          <select id="site-read-write-timeout">
+                            <option value="360">6 分钟</option>
+                            <option value="900">15 分钟</option>
+                            <option value="1800">30 分钟</option>
+                            <option value="3600">60 分钟</option>
+                          </select>
+                        </label>
+                        <label class="checkbox-label site-field-wide"><input id="site-passthrough" type="checkbox"> 透传模式（仅 HTTP(S)，禁用 Nginx 缓存）</label>
+                      </div>
+                    </section>
+
+                    <section class="site-form-section" aria-labelledby="site-nodes-title">
+                      <div class="site-form-section-heading"><h2 id="site-nodes-title">节点分配</h2></div>
+                      <fieldset class="node-assignment"><legend>已分配节点</legend><div id="site-node-selector"></div></fieldset>
+                    </section>
+
+                    <div class="site-form-actions"><button id="site-submit" type="submit">创建站点</button><button id="site-cancel" type="button" class="secondary">取消</button></div>
+                  </form>
+
+                  <section id="site-operations" class="site-detail-section site-operations hidden" aria-labelledby="site-operations-title">
+                    <div class="site-detail-section-heading"><h2 id="site-operations-title">站点操作</h2></div>
+                    <div class="site-operation-list">
+                      <div class="site-operation">
+                        <div><h3>TLS 证书</h3><div id="site-operation-tls" class="site-operation-state">--</div></div>
+                        <button id="site-detail-certificate" class="small secondary certificate" type="button">申请 TLS</button>
+                      </div>
+                      <div id="site-cache-operation" class="site-operation">
+                        <div><h3>边缘缓存</h3><div id="site-operation-cache" class="site-operation-state">--</div></div>
+                        <button id="site-detail-invalidate" class="small secondary invalidate" type="button">刷新缓存</button>
+                      </div>
+                      <div class="site-operation site-operation-allowlist">
+                        <div><h3>源站 CIDR</h3><div class="site-operation-state">边缘节点 IPv4 白名单</div></div>
+                        <button id="site-detail-allowlist" class="small secondary allowlist" type="button" aria-expanded="false">查看 CIDR</button>
+                      </div>
+                    </div>
+                    <pre id="site-allowlist" class="secret hidden"></pre>
+                  </section>
+                </div>
+              </div>
             </section>
           </div>
         </div>

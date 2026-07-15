@@ -286,7 +286,7 @@ func TestPublishApplyReportConfirmsAnOlderTargetVersion(t *testing.T) {
 	}
 }
 
-func TestSiteStreamPathsRoundTrip(t *testing.T) {
+func TestSiteReadWriteTimeoutRoundTripAndRetiresStreamPaths(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -298,8 +298,10 @@ func TestSiteStreamPathsRoundTrip(t *testing.T) {
 	}
 	created, err := store.CreateSite(domain.Site{
 		Name: "streaming", Domains: []string{"stream.example.test"}, Nodes: []string{node.ID},
-		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true},
-		StreamPaths:   []string{"/ws/", "/events"}, Enabled: true,
+		PrimaryOrigin:           domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		StreamPaths:             []string{"/ws/", "/events"},
+		ReadWriteTimeoutSeconds: 1800,
+		Enabled:                 true,
 	}, "zone")
 	if err != nil {
 		t.Fatal(err)
@@ -308,8 +310,75 @@ func TestSiteStreamPathsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(loaded.StreamPaths) != 2 || loaded.StreamPaths[0] != "/events" || loaded.StreamPaths[1] != "/ws" {
-		t.Fatalf("unexpected stream paths: %#v", loaded.StreamPaths)
+	if loaded.ReadWriteTimeoutSeconds != 1800 {
+		t.Fatalf("stored read/write timeout = %d", loaded.ReadWriteTimeoutSeconds)
+	}
+	if loaded.StreamPaths == nil || len(loaded.StreamPaths) != 0 {
+		t.Fatalf("retired stream paths should be empty: %#v", loaded.StreamPaths)
+	}
+	loaded.ReadWriteTimeoutSeconds = 3600
+	updated, err := store.UpdateSite(loaded, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ReadWriteTimeoutSeconds != 3600 {
+		t.Fatalf("updated read/write timeout = %d", updated.ReadWriteTimeoutSeconds)
+	}
+}
+
+func TestOpenClearsRetiredStreamPathsFromExistingDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-1", "203.0.113.10")
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	created, err := database.CreateSite(domain.Site{
+		Name: "legacy-streaming", Domains: []string{"legacy-stream.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`UPDATE sites SET stream_paths_json = '["/events","/ws"]' WHERE id = ?`, created.ID); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	loaded, _, err := migrated.GetSite(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.StreamPaths == nil || len(loaded.StreamPaths) != 0 {
+		t.Fatalf("legacy stream paths were not cleared: %#v", loaded.StreamPaths)
+	}
+	var stored string
+	if err := migrated.db.QueryRow(`SELECT stream_paths_json FROM sites WHERE id = ?`, created.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "[]" {
+		t.Fatalf("retired stream paths remain in SQLite: %s", stored)
 	}
 }
 
@@ -443,18 +512,18 @@ func TestOpenMigratesSiteColumnsForExistingDatabase(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			t.Fatal(err)
 		}
-		if name == "stream_paths_json" || name == "passthrough" || name == "client_max_body_size_mb" {
+		if name == "stream_paths_json" || name == "passthrough" || name == "client_max_body_size_mb" || name == "read_write_timeout_seconds" {
 			found[name] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !found["stream_paths_json"] || !found["passthrough"] || !found["client_max_body_size_mb"] {
+	if !found["stream_paths_json"] || !found["passthrough"] || !found["client_max_body_size_mb"] || !found["read_write_timeout_seconds"] {
 		t.Fatalf("site columns were not added to legacy table: %#v", found)
 	}
 	site, _, err := migrated.GetSite("legacy-site")
-	if err != nil || site.Passthrough || site.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB {
-		t.Fatalf("legacy site defaults: passthrough=%t client_max_body_size_mb=%d err=%v", site.Passthrough, site.ClientMaxBodySizeMB, err)
+	if err != nil || site.Passthrough || site.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB || site.ReadWriteTimeoutSeconds != domain.DefaultReadWriteTimeoutSeconds {
+		t.Fatalf("legacy site defaults: passthrough=%t client_max_body_size_mb=%d read_write_timeout_seconds=%d err=%v", site.Passthrough, site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, err)
 	}
 }

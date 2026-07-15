@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -19,6 +18,11 @@ func NormalizeAndValidateSite(site *Site) error {
 		return err
 	}
 	site.ClientMaxBodySizeMB = clientMaxBodySizeMB
+	readWriteTimeoutSeconds, err := NormalizeReadWriteTimeoutSeconds(site.ReadWriteTimeoutSeconds)
+	if err != nil {
+		return err
+	}
+	site.ReadWriteTimeoutSeconds = readWriteTimeoutSeconds
 	if len(site.Domains) == 0 {
 		return fmt.Errorf("at least one domain is required")
 	}
@@ -59,21 +63,13 @@ func NormalizeAndValidateSite(site *Site) error {
 	if err := ValidateOrigin(&site.PrimaryOrigin); err != nil {
 		return fmt.Errorf("primary origin: %w", err)
 	}
-	streamPaths, err := NormalizeStreamPaths(site.StreamPaths)
-	if err != nil {
-		return err
-	}
 	primary, _ := url.Parse(site.PrimaryOrigin.URL)
 	if site.Passthrough && primary.Scheme != "http" && primary.Scheme != "https" {
 		return fmt.Errorf("passthrough mode is only supported for HTTP and HTTPS origins")
 	}
-	if IsGRPCScheme(primary.Scheme) && len(streamPaths) > 0 {
-		return fmt.Errorf("stream paths can only be used with HTTP, HTTPS, WS, or WSS origins")
-	}
-	if IsWebSocketScheme(primary.Scheme) && len(streamPaths) > 0 {
-		return fmt.Errorf("WS and WSS origins proxy the entire hostname and must not set stream paths")
-	}
-	site.StreamPaths = streamPaths
+	// Path-specific streaming was retired. Keep the API field stable while making
+	// old values inert and consistently returning an empty JSON array.
+	site.StreamPaths = []string{}
 	if site.BackupOrigin != nil {
 		if err := ValidateOrigin(site.BackupOrigin); err != nil {
 			return fmt.Errorf("backup origin: %w", err)
@@ -102,6 +98,25 @@ func ValidateClientMaxBodySizeMB(value int) error {
 		return nil
 	default:
 		return fmt.Errorf("client max body size must be one of 128, 256, 512, or 1024 MiB")
+	}
+}
+
+func NormalizeReadWriteTimeoutSeconds(value int) (int, error) {
+	if value == 0 {
+		value = DefaultReadWriteTimeoutSeconds
+	}
+	if err := ValidateReadWriteTimeoutSeconds(value); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
+func ValidateReadWriteTimeoutSeconds(value int) error {
+	switch value {
+	case 360, 900, 1800, 3600:
+		return nil
+	default:
+		return fmt.Errorf("read/write timeout must be one of 360, 900, 1800, or 3600 seconds")
 	}
 }
 
@@ -162,52 +177,6 @@ func ProxyScheme(scheme string) string {
 	default:
 		return scheme
 	}
-}
-
-func NormalizeStreamPaths(paths []string) ([]string, error) {
-	if len(paths) > 20 {
-		return nil, fmt.Errorf("at most 20 stream paths are allowed")
-	}
-	seen := make(map[string]struct{}, len(paths))
-	result := make([]string, 0, len(paths))
-	for _, path := range paths {
-		path = strings.TrimSpace(path)
-		if path == "" {
-			continue
-		}
-		if len(path) > 256 || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") {
-			return nil, fmt.Errorf("stream path %q must be an absolute path up to 256 characters", path)
-		}
-		if path != "/" {
-			path = strings.TrimRight(path, "/")
-		}
-		if path == "" {
-			path = "/"
-		}
-		if strings.Contains(path, "//") {
-			return nil, fmt.Errorf("stream path %q must not contain an empty segment", path)
-		}
-		for _, segment := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
-			if segment == "." || segment == ".." {
-				return nil, fmt.Errorf("stream path %q must not contain dot segments", path)
-			}
-		}
-		for _, character := range path {
-			if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || strings.ContainsRune("/-._~", character)) {
-				return nil, fmt.Errorf("stream path %q contains an unsupported character", path)
-			}
-		}
-		if _, exists := seen[path]; exists {
-			return nil, fmt.Errorf("duplicate stream path %q", path)
-		}
-		seen[path] = struct{}{}
-		result = append(result, path)
-	}
-	sort.Strings(result)
-	if len(result) > 1 && result[0] == "/" {
-		return nil, fmt.Errorf("stream path / cannot be combined with other stream paths")
-	}
-	return result, nil
 }
 
 func ValidHostname(value string) bool {

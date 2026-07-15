@@ -435,16 +435,17 @@ func (s *Server) listSites(response http.ResponseWriter, request *http.Request) 
 }
 
 type siteRequest struct {
-	Name                string         `json:"name"`
-	ZoneID              string         `json:"zone_id"`
-	Domains             []string       `json:"domains"`
-	NodeIDs             []string       `json:"node_ids"`
-	PrimaryOrigin       domain.Origin  `json:"primary_origin"`
-	BackupOrigin        *domain.Origin `json:"backup_origin"`
-	StreamPaths         *[]string      `json:"stream_paths"`
-	Passthrough         *bool          `json:"passthrough"`
-	ClientMaxBodySizeMB *int           `json:"client_max_body_size_mb"`
-	Enabled             *bool          `json:"enabled"`
+	Name                    string         `json:"name"`
+	ZoneID                  string         `json:"zone_id"`
+	Domains                 []string       `json:"domains"`
+	NodeIDs                 []string       `json:"node_ids"`
+	PrimaryOrigin           domain.Origin  `json:"primary_origin"`
+	BackupOrigin            *domain.Origin `json:"backup_origin"`
+	StreamPaths             *[]string      `json:"stream_paths"`
+	Passthrough             *bool          `json:"passthrough"`
+	ClientMaxBodySizeMB     *int           `json:"client_max_body_size_mb"`
+	ReadWriteTimeoutSeconds *int           `json:"read_write_timeout_seconds"`
+	Enabled                 *bool          `json:"enabled"`
 }
 
 func (input siteRequest) site(id string) domain.Site {
@@ -464,7 +465,11 @@ func (input siteRequest) site(id string) domain.Site {
 	if input.ClientMaxBodySizeMB != nil {
 		clientMaxBodySizeMB = *input.ClientMaxBodySizeMB
 	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin, BackupOrigin: input.BackupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, Enabled: enabled}
+	readWriteTimeoutSeconds := domain.DefaultReadWriteTimeoutSeconds
+	if input.ReadWriteTimeoutSeconds != nil {
+		readWriteTimeoutSeconds = *input.ReadWriteTimeoutSeconds
+	}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin, BackupOrigin: input.BackupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, Enabled: enabled}
 }
 
 func (input siteRequest) validateClientMaxBodySize() error {
@@ -474,12 +479,23 @@ func (input siteRequest) validateClientMaxBodySize() error {
 	return domain.ValidateClientMaxBodySizeMB(*input.ClientMaxBodySizeMB)
 }
 
+func (input siteRequest) validateReadWriteTimeout() error {
+	if input.ReadWriteTimeoutSeconds == nil {
+		return nil
+	}
+	return domain.ValidateReadWriteTimeoutSeconds(*input.ReadWriteTimeoutSeconds)
+}
+
 func (s *Server) createSite(response http.ResponseWriter, request *http.Request) {
 	var input siteRequest
 	if !readJSON(response, request, &input) {
 		return
 	}
 	if err := input.validateClientMaxBodySize(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	if err := input.validateReadWriteTimeout(); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
@@ -506,18 +522,22 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
+	if err := input.validateReadWriteTimeout(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
 	siteInput := input.site(request.PathValue("id"))
 	if input.Enabled == nil {
 		siteInput.Enabled = current.Enabled
-	}
-	if input.StreamPaths == nil {
-		siteInput.StreamPaths = current.StreamPaths
 	}
 	if input.Passthrough == nil {
 		siteInput.Passthrough = current.Passthrough
 	}
 	if input.ClientMaxBodySizeMB == nil {
 		siteInput.ClientMaxBodySizeMB = current.ClientMaxBodySizeMB
+	}
+	if input.ReadWriteTimeoutSeconds == nil {
+		siteInput.ReadWriteTimeoutSeconds = current.ReadWriteTimeoutSeconds
 	}
 	site, err := s.Store.UpdateSite(siteInput, input.ZoneID)
 	if err != nil {

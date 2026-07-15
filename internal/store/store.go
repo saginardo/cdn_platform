@@ -101,9 +101,10 @@ CREATE TABLE IF NOT EXISTS sites (
   node_ids_json TEXT NOT NULL,
   primary_origin_json TEXT NOT NULL,
   backup_origin_json TEXT,
-  stream_paths_json TEXT NOT NULL DEFAULT '[]',
+	stream_paths_json TEXT NOT NULL DEFAULT '[]',
 	passthrough INTEGER NOT NULL DEFAULT 0,
 	client_max_body_size_mb INTEGER NOT NULL DEFAULT 128,
+	read_write_timeout_seconds INTEGER NOT NULL DEFAULT 360,
   cache_generation INTEGER NOT NULL DEFAULT 1,
   config_version INTEGER NOT NULL DEFAULT 1,
   published INTEGER NOT NULL DEFAULT 0,
@@ -219,6 +220,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN stream_paths_json TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN passthrough INTEGER NOT NULL DEFAULT 0`)
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN client_max_body_size_mb INTEGER NOT NULL DEFAULT 128`)
+	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN read_write_timeout_seconds INTEGER NOT NULL DEFAULT 360`)
+	if _, err := s.db.Exec(`UPDATE sites SET stream_paths_json = '[]' WHERE stream_paths_json <> '[]'`); err != nil {
+		return fmt.Errorf("retire legacy stream paths: %w", err)
+	}
 	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN applied_version INTEGER NOT NULL DEFAULT 0`)
 	_, _ = s.db.Exec(`ALTER TABLE deployment_tasks ADD COLUMN deadline_at TEXT`)
 	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN public_ports_json TEXT NOT NULL DEFAULT '[]'`)
@@ -865,8 +870,8 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 	if err := validateSiteNodes(tx, site.Nodes); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, cache_generation, config_version, published, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.CreatedAt), stamp(site.UpdatedAt))
+	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.CreatedAt), stamp(site.UpdatedAt))
 	if err != nil {
 		return err
 	}
@@ -877,11 +882,11 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 }
 
 func (s *Store) GetSite(id string) (domain.Site, string, error) {
-	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites WHERE id = ?`, id))
+	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites WHERE id = ?`, id))
 }
 
 func (s *Store) ListSites() ([]domain.Site, error) {
-	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, cache_generation, config_version, published, enabled, created_at, updated_at FROM sites ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -903,7 +908,7 @@ func scanSite(row scanner) (domain.Site, string, error) {
 	var backup sql.NullString
 	var passthrough, published, enabled int
 	var createdAt, updatedAt string
-	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &createdAt, &updatedAt)
+	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.ReadWriteTimeoutSeconds, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Site{}, "", ErrNotFound
 	}
@@ -991,7 +996,7 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	if err := claimDomains(tx, site.ID, site.Domains); err != nil {
 		return domain.Site{}, err
 	}
-	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, cache_generation=?, config_version=?, published=?, enabled=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.UpdatedAt), site.ID)
+	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, cache_generation=?, config_version=?, published=?, enabled=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), stamp(site.UpdatedAt), site.ID)
 	if err != nil {
 		return domain.Site{}, err
 	}

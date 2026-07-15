@@ -12,6 +12,12 @@ let uninstallCommand = '';
 let uninstallActionPending = false;
 let overviewLoading = false;
 let overviewLoaded = false;
+let routeDataReady = false;
+let activeRoute = { view: 'overview', page: 'main', siteID: '' };
+let acceptedHash = '#/overview';
+let pendingApprovedHash = '';
+let siteFormBaseline = '';
+let siteFormReady = false;
 
 const nodeStatusLabels = {
   pending: '待激活',
@@ -31,6 +37,7 @@ const taskStatusLabels = {
   rolled_back: '已回滚',
 };
 const defaultClientMaxBodySizeMB = 128;
+const defaultReadWriteTimeoutSeconds = 360;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const compactNumberFormatter = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
 const consoleViews = new Set(['overview', 'nodes', 'sites']);
@@ -70,10 +77,11 @@ function hide(id) { byId(id).classList.add('hidden'); }
 
 async function refresh() {
   [nodes, sites] = await Promise.all([request('/api/nodes'), request('/api/sites')]);
+  routeDataReady = true;
   byId('site-list-meta').textContent = `${numberFormatter.format(sites.length)} 个站点 · ${numberFormatter.format(sites.filter((site) => site.enabled && site.published).length)} 个已发布`;
   byId('node-table').innerHTML = nodes.map(renderNodeRow).join('');
   renderSites();
-  renderNodeSelector(selectedNodeIDs());
+  syncRouteFromLocation({ forceForm: !siteFormDirty(), focus: false });
   void refreshOverview();
   await Promise.all([refreshTLSStatuses(), refreshPublishStatuses()]);
 }
@@ -112,30 +120,29 @@ function renderSites() {
   byId('site-table').innerHTML = sites.map((site) => {
     const tlsStatus = tlsStatuses.get(site.id);
     const publishStatus = publishStatuses.get(site.id);
-    const task = tlsStatus?.certificate_task || null;
-    const active = certificateTaskActive(task);
+    const siteHash = `#/sites/${encodeURIComponent(site.id)}`;
     return `<article class="site-row">
       <div class="site-identity">
-        <div class="site-name-line"><h2>${escapeHTML(site.name)}</h2>${siteStateMarkup(site)}</div>
+        <div class="site-name-line"><h2><a class="site-name-link" href="${siteHash}">${escapeHTML(site.name)}</a></h2>${siteStateMarkup(site)}</div>
         <div class="site-domain-list">${site.domains.map((domain) => `<span>${escapeHTML(domain)}</span>`).join('')}</div>
       </div>
       <dl class="site-facts">
-        <div><dt>协议</dt><dd>${escapeHTML(siteProtocol(site))}</dd></div>
         <div><dt>节点</dt><dd>${numberFormatter.format(site.node_ids.length)} 个</dd></div>
-        <div><dt>缓存</dt><dd>${siteCacheMarkup(site)}</dd></div>
-        <div><dt>请求体</dt><dd>${numberFormatter.format(site.client_max_body_size_mb ?? defaultClientMaxBodySizeMB)} MiB</dd></div>
         <div><dt>TLS</dt><dd>${tlsStatusMarkup(tlsStatus)}</dd></div>
 		<div><dt>发布</dt><dd>${publishStatusMarkup(publishStatus)}</dd></div>
       </dl>
-		${publishDetailMarkup(publishStatus)}
       <div class="site-actions">
         <button class="small publish" data-id="${site.id}" ${publishTaskActive(publishStatus?.task) ? 'disabled' : ''}>${site.published ? (publishStatus?.task?.status === 'failed' || publishStatus?.task?.status === 'partial' ? '重新发布' : '发布') : '发布'}</button>
-        <button class="small secondary edit-site" data-id="${site.id}">编辑</button>
-        <button class="small secondary certificate" data-id="${site.id}" ${active ? 'disabled title="TLS 证书签发正在进行中"' : ''}>申请 TLS</button>
-        <details class="action-menu"><summary>更多</summary><div class="action-menu-panel">${siteCacheable(site) ? `<button class="menu-action invalidate" data-id="${site.id}">刷新缓存</button>` : ''}<button class="menu-action allowlist" data-id="${site.id}">源站 CIDR</button></div></details>
+        <button class="small secondary manage-site" data-id="${site.id}">管理</button>
       </div>
+      ${publishDetailMarkup(publishStatus)}
     </article>`;
   }).join('') || '<div class="site-empty">暂无站点</div>';
+}
+
+function renderSiteViews() {
+  renderSites();
+  renderSiteDetailStatus();
 }
 
 function publishStatusMarkup(publishStatus) {
@@ -166,8 +173,7 @@ function siteStateMarkup(site) {
 function siteCacheMarkup(site) {
   if (site.passthrough) return '<span class="fact-muted">透传</span>';
   if (!siteCacheable(site)) return '<span class="fact-muted">不缓存</span>';
-  const streamSuffix = site.stream_paths?.length ? '<small>流式路径除外</small>' : '';
-  return `<span>v${numberFormatter.format(site.cache_generation)}</span>${streamSuffix}`;
+  return `<span>v${numberFormatter.format(site.cache_generation)}</span>`;
 }
 
 function tlsStatusMarkup(tlsStatus) {
@@ -189,13 +195,59 @@ function siteProtocol(site) {
   const scheme = originScheme(site);
   if (scheme === 'grpc' || scheme === 'grpcs') return 'gRPC';
   if (scheme === 'ws' || scheme === 'wss') return 'WebSocket';
-  if (site.stream_paths?.length) return 'HTTP + WebSocket / SSE';
-  return 'HTTP';
+  return 'HTTP / WS / SSE';
 }
 
 function siteCacheable(site) {
   const scheme = originScheme(site);
-  return !site.passthrough && (scheme === 'http' || scheme === 'https') && !(site.stream_paths || []).includes('/');
+  return !site.passthrough && (scheme === 'http' || scheme === 'https');
+}
+
+function updateSiteFormPreview(savedSite = null) {
+  if (!siteFormReady || activeRoute.view !== 'sites' || activeRoute.page === 'list') return;
+  const payload = siteFormPayload();
+  const draft = {
+    ...(savedSite || {}),
+    primary_origin: payload.primary_origin,
+    passthrough: payload.passthrough,
+    cache_generation: savedSite?.cache_generation ?? 0,
+    client_max_body_size_mb: payload.client_max_body_size_mb,
+    read_write_timeout_seconds: payload.read_write_timeout_seconds,
+    node_ids: payload.node_ids,
+  };
+  const scheme = originScheme(draft);
+  byId('site-summary-protocol').textContent = siteProtocol(draft);
+  byId('site-summary-cache').innerHTML = siteCacheMarkup(draft);
+  byId('site-summary-body').textContent = `${numberFormatter.format(payload.client_max_body_size_mb)} MiB`;
+  byId('site-summary-timeout').textContent = scheme === 'grpc' || scheme === 'grpcs' ? '不适用于 gRPC' : `${numberFormatter.format(payload.read_write_timeout_seconds / 60)} 分钟`;
+  byId('site-summary-nodes').textContent = `${numberFormatter.format(payload.node_ids.length)} 个`;
+}
+
+function renderSiteDetailStatus() {
+  if (activeRoute.view !== 'sites' || activeRoute.page !== 'detail' || !routeDataReady) return;
+  const site = sites.find((item) => item.id === activeRoute.siteID);
+  if (!site) return;
+  const tlsStatus = tlsStatuses.get(site.id);
+  const publishStatus = publishStatuses.get(site.id);
+  const certificateTask = tlsStatus?.certificate_task || null;
+  const publishButton = byId('site-detail-publish');
+  const certificateButton = byId('site-detail-certificate');
+
+  byId('site-detail-state').innerHTML = siteStateMarkup(site);
+  byId('site-detail-meta').textContent = `${site.domains.join(', ') || '未配置域名'} · ${site.id}`;
+  byId('site-summary-tls').innerHTML = tlsStatusMarkup(tlsStatus);
+  byId('site-summary-publish').innerHTML = publishStatusMarkup(publishStatus);
+  byId('site-operation-tls').innerHTML = tlsStatusMarkup(tlsStatus);
+  byId('site-operation-cache').innerHTML = siteCacheMarkup(site);
+  byId('site-cache-operation').classList.toggle('hidden', !siteCacheable(site));
+  byId('site-publish-detail').innerHTML = publishDetailMarkup(publishStatus);
+
+  [publishButton, certificateButton, byId('site-detail-invalidate'), byId('site-detail-allowlist')].forEach((button) => { button.dataset.id = site.id; });
+  publishButton.disabled = publishTaskActive(publishStatus?.task);
+  publishButton.textContent = site.published && ['failed', 'partial'].includes(publishStatus?.task?.status) ? '重新发布' : '发布';
+  certificateButton.disabled = certificateTaskActive(certificateTask);
+  certificateButton.title = certificateTaskActive(certificateTask) ? 'TLS 证书签发正在进行中' : '';
+  updateSiteFormPreview(site);
 }
 
 async function refreshTLSStatuses() {
@@ -203,7 +255,7 @@ async function refreshTLSStatuses() {
     try { return [site.id, await request(`/api/sites/${site.id}/tls-status`)]; } catch (_) { return [site.id, null]; }
   }));
   tlsStatuses = new Map(results.filter(([, status]) => status));
-  renderSites();
+  renderSiteViews();
   scheduleCertificatePoll();
 }
 
@@ -221,7 +273,7 @@ async function refreshPublishStatuses() {
       notice(`${site?.name || '站点'} 发布${taskStatusLabel(currentTask.status)}，请查看节点详情。`);
     }
   }
-  renderSites();
+  renderSiteViews();
   schedulePublishPoll();
 }
 
@@ -562,10 +614,30 @@ async function boot() {
   } catch (error) { show('setup-panel'); }
 }
 
-function viewFromLocation() {
-  const view = window.location.hash.replace(/^#\/?/, '');
-  return consoleViews.has(view) ? view : 'overview';
+function parseRouteHash(hash) {
+  const path = hash.replace(/^#\/?/, '').replace(/\/+$/, '');
+  const segments = path.split('/').filter(Boolean);
+  if (segments[0] === 'sites') {
+    if (segments.length === 1) return { view: 'sites', page: 'list', siteID: '' };
+    if (segments.length === 2 && segments[1] === 'new') return { view: 'sites', page: 'new', siteID: '' };
+    if (segments.length === 2) {
+      try { return { view: 'sites', page: 'detail', siteID: decodeURIComponent(segments[1]) }; } catch (_) { return { view: 'sites', page: 'missing', siteID: segments[1] }; }
+    }
+  }
+  const view = segments.length === 1 && consoleViews.has(segments[0]) ? segments[0] : 'overview';
+  return { view, page: 'main', siteID: '' };
 }
+
+function routeFromLocation() { return parseRouteHash(window.location.hash); }
+
+function routeHash(route) {
+  if (route.view !== 'sites') return `#/${route.view}`;
+  if (route.page === 'new') return '#/sites/new';
+  if (route.page === 'detail' || route.page === 'missing') return `#/sites/${encodeURIComponent(route.siteID)}`;
+  return '#/sites';
+}
+
+function routeKey(route) { return `${route.view}:${route.page}:${route.siteID}`; }
 
 function sidebarOpen() { return document.body.classList.contains('sidebar-open'); }
 
@@ -589,19 +661,132 @@ function setSidebarOpen(open, restoreFocus = false) {
   }
 }
 
-function activateView(view) {
+function renderSiteRoute(route, { populateForm = false, routeChanged = false } = {}) {
+  const detailPage = route.page !== 'list';
+  byId('site-list-page').classList.toggle('hidden', detailPage);
+  byId('site-detail-page').classList.toggle('hidden', !detailPage);
+  if (!detailPage) {
+    siteFormReady = false;
+    hide('site-allowlist');
+    return;
+  }
+
+  if (route.page === 'new') {
+    show('site-detail-editor');
+    hide('site-detail-missing');
+    hide('site-summary-section');
+    hide('site-operations');
+    hide('site-detail-publish');
+    byId('site-detail-title').textContent = '添加站点';
+    byId('site-detail-meta').textContent = '创建新的站点配置';
+    byId('site-detail-state').textContent = '';
+    if (populateForm || !siteFormReady || byId('site-id').value) prepareNewSiteForm();
+    return;
+  }
+
+  if (!routeDataReady) {
+    hide('site-detail-editor');
+    hide('site-detail-missing');
+    hide('site-detail-publish');
+    byId('site-detail-title').textContent = '加载站点…';
+    byId('site-detail-meta').textContent = route.siteID;
+    byId('site-detail-state').textContent = '';
+    return;
+  }
+
+  const site = sites.find((item) => item.id === route.siteID);
+  if (!site) {
+    siteFormReady = false;
+    hide('site-detail-editor');
+    show('site-detail-missing');
+    hide('site-detail-publish');
+    byId('site-detail-title').textContent = '未找到站点';
+    byId('site-detail-meta').textContent = route.siteID;
+    byId('site-detail-state').textContent = '';
+    return;
+  }
+
+  show('site-detail-editor');
+  hide('site-detail-missing');
+  show('site-summary-section');
+  show('site-operations');
+  show('site-detail-publish');
+  byId('site-detail-title').textContent = site.name;
+  if (routeChanged) {
+    hide('site-allowlist');
+    byId('site-detail-allowlist').setAttribute('aria-expanded', 'false');
+  }
+  if (populateForm || !siteFormReady || byId('site-id').value !== site.id) populateSiteForm(site);
+  renderSiteDetailStatus();
+}
+
+function activateRoute(route, { forceForm = false, focus = true } = {}) {
+  const previousRoute = activeRoute;
+  const routeChanged = routeKey(previousRoute) !== routeKey(route);
+  activeRoute = route;
   const restoreSidebarFocus = sidebarOpen();
   document.querySelectorAll('.nav').forEach((button) => {
-    const active = button.dataset.view === view;
+    const active = button.dataset.view === route.view;
     button.classList.toggle('active', active);
     if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
   });
-  document.querySelectorAll('.view').forEach((section) => section.classList.toggle('hidden', section.id !== view));
-  byId('mobile-page-title').textContent = viewLabels[view] || viewLabels.overview;
+  document.querySelectorAll('.view').forEach((section) => section.classList.toggle('hidden', section.id !== route.view));
+  if (route.view === 'sites') renderSiteRoute(route, { populateForm: forceForm || routeChanged, routeChanged });
+  const site = route.view === 'sites' && route.page === 'detail' ? sites.find((item) => item.id === route.siteID) : null;
+  const mobileTitle = route.page === 'new' ? '添加站点' : (site?.name || viewLabels[route.view] || viewLabels.overview);
+  byId('mobile-page-title').textContent = mobileTitle;
   setSidebarOpen(false, restoreSidebarFocus);
+  if (focus && routeChanged && route.view === 'sites' && route.page !== 'list') {
+    window.requestAnimationFrame(() => byId('site-detail-title').focus());
+  }
 }
 
-function syncViewFromLocation() { activateView(viewFromLocation()); }
+function syncRouteFromLocation(options = {}) {
+  const route = routeFromLocation();
+  activateRoute(route, options);
+  acceptedHash = routeHash(route);
+}
+
+function confirmDiscardChanges() {
+  return !siteFormDirty() || window.confirm('有未保存的更改，确定离开吗？');
+}
+
+function navigateTo(hash) {
+  const destination = routeHash(parseRouteHash(hash));
+  if (destination === acceptedHash) {
+    activateRoute(parseRouteHash(destination));
+    return true;
+  }
+  if (!confirmDiscardChanges()) return false;
+  markSiteFormClean();
+  pendingApprovedHash = destination;
+  if (window.location.hash === destination) {
+    pendingApprovedHash = '';
+    syncRouteFromLocation();
+  } else {
+    window.location.hash = destination;
+  }
+  return true;
+}
+
+function handleHashChange() {
+  const destination = routeHash(routeFromLocation());
+  if (pendingApprovedHash === destination) {
+    pendingApprovedHash = '';
+    syncRouteFromLocation();
+    return;
+  }
+  const routeChanged = destination !== acceptedHash;
+  if (routeChanged && !confirmDiscardChanges()) {
+    pendingApprovedHash = '';
+    window.history.pushState(null, '', acceptedHash);
+    activateRoute(parseRouteHash(acceptedHash), { focus: false });
+    return;
+  }
+  if (routeChanged) markSiteFormClean();
+  pendingApprovedHash = '';
+  syncRouteFromLocation();
+}
 
 function showApp() {
   hide('setup-panel');
@@ -610,7 +795,7 @@ function showApp() {
   show('app');
   show('logout');
   byId('auth-notice').textContent = '';
-  syncViewFromLocation();
+  syncRouteFromLocation();
   syncSidebarMode();
   refresh().catch((error) => notice(error.message));
 }
@@ -634,7 +819,33 @@ byId('login-form').addEventListener('submit', async (event) => {
   } catch (error) { notice(error.message); }
 });
 
-byId('logout').addEventListener('click', async () => { try { await request('/api/logout', { method: 'POST' }); } finally { window.clearTimeout(certificatePollTimer); window.clearTimeout(publishPollTimer); closeNodeUninstall(); certificatePollTimer = null; publishPollTimer = null; tlsStatuses = new Map(); publishStatuses = new Map(); overviewLoaded = false; csrf = ''; setSidebarOpen(false); byId('notice').textContent = ''; hide('app'); hide('logout'); show('auth-shell'); show('login-panel'); byId('login-password').focus(); } });
+byId('logout').addEventListener('click', async () => {
+  if (!confirmDiscardChanges()) return;
+  markSiteFormClean();
+  try {
+    await request('/api/logout', { method: 'POST' });
+  } finally {
+    window.clearTimeout(certificatePollTimer);
+    window.clearTimeout(publishPollTimer);
+    closeNodeUninstall();
+    certificatePollTimer = null;
+    publishPollTimer = null;
+    tlsStatuses = new Map();
+    publishStatuses = new Map();
+    sites = [];
+    routeDataReady = false;
+    siteFormReady = false;
+    overviewLoaded = false;
+    csrf = '';
+    setSidebarOpen(false);
+    byId('notice').textContent = '';
+    hide('app');
+    hide('logout');
+    show('auth-shell');
+    show('login-panel');
+    byId('login-password').focus();
+  }
+});
 
 byId('sidebar-toggle').addEventListener('click', () => setSidebarOpen(!sidebarOpen()));
 byId('sidebar-close').addEventListener('click', () => setSidebarOpen(false, true));
@@ -647,14 +858,22 @@ byId('refresh-overview').addEventListener('click', refreshOverview);
 
 document.querySelectorAll('.nav').forEach((button) => button.addEventListener('click', () => {
   const hash = `#/${button.dataset.view}`;
-  if (window.location.hash === hash) activateView(button.dataset.view);
-  else window.location.hash = hash;
+  if (acceptedHash === hash) activateRoute(parseRouteHash(hash));
+  else navigateTo(hash);
 }));
-window.addEventListener('hashchange', syncViewFromLocation);
+window.addEventListener('hashchange', handleHashChange);
+window.addEventListener('beforeunload', (event) => {
+  if (!siteFormDirty()) return;
+  event.preventDefault();
+  event.returnValue = '';
+});
 
 byId('show-node-form').addEventListener('click', () => show('node-form'));
-byId('show-site-form').addEventListener('click', () => resetSiteForm());
-document.querySelectorAll('.cancel').forEach((button) => button.addEventListener('click', () => { button.closest('form').classList.add('hidden'); if (button.closest('form').id === 'site-form') resetSiteForm(false); }));
+byId('show-site-form').addEventListener('click', () => navigateTo('#/sites/new'));
+byId('site-detail-back').addEventListener('click', () => navigateTo('#/sites'));
+byId('site-missing-back').addEventListener('click', () => navigateTo('#/sites'));
+byId('site-cancel').addEventListener('click', () => navigateTo('#/sites'));
+document.querySelectorAll('.cancel').forEach((button) => button.addEventListener('click', () => button.closest('form').classList.add('hidden')));
 
 byId('close-node-uninstall').addEventListener('click', closeNodeUninstall);
 byId('node-uninstall-dialog').addEventListener('close', () => {
@@ -722,30 +941,68 @@ byId('node-form').addEventListener('submit', async (event) => {
 
 byId('site-form').addEventListener('submit', async (event) => {
   event.preventDefault();
-  const backup = byId('site-backup-url').value.trim();
-  const payload = { name: byId('site-name').value, zone_id: byId('site-zone').value, domains: split(byId('site-domains').value), node_ids: selectedNodeIDs(), primary_origin: { url: byId('site-primary-url').value, host_header: byId('site-primary-host').value, enabled: true }, stream_paths: split(byId('site-stream-paths').value), passthrough: byId('site-passthrough').checked, client_max_body_size_mb: Number(byId('site-client-max-body-size').value), enabled: byId('site-enabled').checked };
-  if (backup) payload.backup_origin = { url: backup, host_header: byId('site-backup-host').value, enabled: true };
+  const payload = siteFormPayload();
   const siteID = byId('site-id').value;
+  const submitButton = byId('site-submit');
+  submitButton.disabled = true;
   try {
-    await request(siteID ? `/api/sites/${siteID}` : '/api/sites', { method: siteID ? 'PUT' : 'POST', body: JSON.stringify(payload) });
-    resetSiteForm(false); hide('site-form'); await refresh();
+    const savedSite = await request(siteID ? `/api/sites/${siteID}` : '/api/sites', { method: siteID ? 'PUT' : 'POST', body: JSON.stringify(payload) });
+    markSiteFormClean();
+    await refresh();
+    if (!siteID) navigateTo(`#/sites/${encodeURIComponent(savedSite.id)}`);
     notice(siteID ? '站点已更新，请发布以应用新配置。' : '站点已创建，请在发布前申请 TLS 证书。', true);
-  } catch (error) { notice(error.message); }
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    submitButton.disabled = false;
+  }
 });
 
-function resetSiteForm(showForm = true) {
+function siteFormPayload() {
+  const backup = byId('site-backup-url').value.trim();
+  const payload = {
+    name: byId('site-name').value,
+    zone_id: byId('site-zone').value,
+    domains: split(byId('site-domains').value),
+    node_ids: selectedNodeIDs(),
+    primary_origin: { url: byId('site-primary-url').value, host_header: byId('site-primary-host').value, enabled: true },
+    passthrough: byId('site-passthrough').checked,
+    client_max_body_size_mb: Number(byId('site-client-max-body-size').value),
+    read_write_timeout_seconds: Number(byId('site-read-write-timeout').value),
+    enabled: byId('site-enabled').checked,
+  };
+  if (backup) payload.backup_origin = { url: backup, host_header: byId('site-backup-host').value, enabled: true };
+  return payload;
+}
+
+function siteFormSnapshot() {
+  return JSON.stringify({ site_id: byId('site-id').value, payload: siteFormPayload() });
+}
+
+function siteFormDirty() {
+  return siteFormReady && activeRoute.view === 'sites' && activeRoute.page !== 'list' && siteFormSnapshot() !== siteFormBaseline;
+}
+
+function markSiteFormClean() {
+  siteFormBaseline = siteFormReady ? siteFormSnapshot() : '';
+}
+
+function prepareNewSiteForm() {
   byId('site-form').reset();
   byId('site-id').value = '';
   byId('site-zone').disabled = false;
   byId('site-client-max-body-size').value = String(defaultClientMaxBodySizeMB);
+  byId('site-read-write-timeout').value = String(defaultReadWriteTimeoutSeconds);
   byId('site-passthrough').checked = false;
   byId('site-enabled').checked = true;
   byId('site-submit').textContent = '创建站点';
   renderNodeSelector();
-  if (showForm) show('site-form');
+  siteFormReady = true;
+  markSiteFormClean();
+  updateSiteFormPreview();
 }
 
-function editSite(site) {
+function populateSiteForm(site) {
   byId('site-id').value = site.id;
   byId('site-name').value = site.name;
   byId('site-zone').value = site.zone_id;
@@ -755,14 +1012,19 @@ function editSite(site) {
   byId('site-primary-host').value = site.primary_origin.host_header || '';
   byId('site-backup-url').value = site.backup_origin?.url || '';
   byId('site-backup-host').value = site.backup_origin?.host_header || '';
-  byId('site-stream-paths').value = (site.stream_paths || []).join(', ');
   byId('site-client-max-body-size').value = String(site.client_max_body_size_mb ?? defaultClientMaxBodySizeMB);
+  byId('site-read-write-timeout').value = String(site.read_write_timeout_seconds ?? defaultReadWriteTimeoutSeconds);
   byId('site-passthrough').checked = Boolean(site.passthrough);
   byId('site-enabled').checked = site.enabled;
   byId('site-submit').textContent = '保存更改';
   renderNodeSelector(site.node_ids);
-  show('site-form');
+  siteFormReady = true;
+  markSiteFormClean();
+  updateSiteFormPreview(site);
 }
+
+byId('site-form').addEventListener('input', () => updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null));
+byId('site-form').addEventListener('change', () => updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null));
 
 document.addEventListener('click', async (event) => {
   const button = event.target.closest('button'); if (!button || !button.dataset.id) return;
@@ -772,9 +1034,19 @@ document.addEventListener('click', async (event) => {
     if (button.classList.contains('node-uninstall') || button.classList.contains('node-delete')) await openNodeUninstall(button.dataset.id);
     if (button.classList.contains('publish')) { const task = await request(`/api/sites/${button.dataset.id}/publish`, { method: 'POST' }); await refresh(); notice(`发布任务 ${task.id}：${taskStatusLabel(task.status)}`, true); }
     if (button.classList.contains('invalidate')) { const task = await request(`/api/sites/${button.dataset.id}/invalidate-cache`, { method: 'POST' }); await refresh(); notice(`缓存已刷新，任务 ${task.id}`, true); }
-    if (button.classList.contains('certificate')) { const task = await request(`/api/sites/${button.dataset.id}/certificate`, { method: 'POST' }); tlsStatuses.set(button.dataset.id, { certificate_task: task, published_after_certificate: false }); renderSites(); scheduleCertificatePoll(); notice(`TLS 任务 ${task.id}：${taskStatusLabel(task.status)}`, true); }
-    if (button.classList.contains('edit-site')) { const site = sites.find((item) => item.id === button.dataset.id); if (site) editSite(site); }
-    if (button.classList.contains('allowlist')) { const result = await request(`/api/sites/${button.dataset.id}/origin-allowlist`); byId('site-allowlist').textContent = `源站防火墙或安全组应只允许以下边缘节点 IPv4 CIDR。添加、移除或撤销节点后请同步更新。\n\n${result.ipv4_cidrs.join('\n')}`; show('site-allowlist'); }
+    if (button.classList.contains('certificate')) { const task = await request(`/api/sites/${button.dataset.id}/certificate`, { method: 'POST' }); tlsStatuses.set(button.dataset.id, { certificate_task: task, published_after_certificate: false }); renderSiteViews(); scheduleCertificatePoll(); notice(`TLS 任务 ${task.id}：${taskStatusLabel(task.status)}`, true); }
+    if (button.classList.contains('manage-site')) navigateTo(`#/sites/${encodeURIComponent(button.dataset.id)}`);
+    if (button.classList.contains('allowlist')) {
+      if (!byId('site-allowlist').classList.contains('hidden')) {
+        hide('site-allowlist');
+        button.setAttribute('aria-expanded', 'false');
+      } else {
+        const result = await request(`/api/sites/${button.dataset.id}/origin-allowlist`);
+        byId('site-allowlist').textContent = `源站防火墙或安全组应只允许以下边缘节点 IPv4 CIDR。添加、移除或撤销节点后请同步更新。\n\n${result.ipv4_cidrs.join('\n')}`;
+        show('site-allowlist');
+        button.setAttribute('aria-expanded', 'true');
+      }
+    }
   } catch (error) { notice(error.message); }
 });
 

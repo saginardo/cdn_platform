@@ -35,6 +35,39 @@ func TestClientMaxBodySizeDefaultsAndPresetValidation(t *testing.T) {
 	}
 }
 
+func TestReadWriteTimeoutDefaultsAndPresetValidation(t *testing.T) {
+	newSite := func(value int) Site {
+		return Site{
+			Name:                    "example",
+			Domains:                 []string{"example.test"},
+			Nodes:                   []string{"node-1"},
+			PrimaryOrigin:           Origin{URL: "https://origin.example.test"},
+			ReadWriteTimeoutSeconds: value,
+		}
+	}
+
+	defaultSite := newSite(0)
+	if err := NormalizeAndValidateSite(&defaultSite); err != nil {
+		t.Fatal(err)
+	}
+	if defaultSite.ReadWriteTimeoutSeconds != DefaultReadWriteTimeoutSeconds {
+		t.Fatalf("default read/write timeout = %d", defaultSite.ReadWriteTimeoutSeconds)
+	}
+
+	for _, value := range []int{360, 900, 1800, 3600} {
+		site := newSite(value)
+		if err := NormalizeAndValidateSite(&site); err != nil {
+			t.Fatalf("expected %d seconds to be accepted: %v", value, err)
+		}
+	}
+	for _, value := range []int{-1, 1, 359, 361, 7200} {
+		site := newSite(value)
+		if err := NormalizeAndValidateSite(&site); err == nil {
+			t.Fatalf("expected %d seconds to be rejected", value)
+		}
+	}
+}
+
 func TestSiteDomainRejectsIPAddress(t *testing.T) {
 	site := Site{
 		Name:    "example",
@@ -66,34 +99,19 @@ func TestOriginSupportsWebSocketAndGRPCSchemes(t *testing.T) {
 	}
 }
 
-func TestStreamPathsAreNormalizedAndRestrictedForGRPC(t *testing.T) {
+func TestStreamPathsAreRetiredForAPICompatibility(t *testing.T) {
 	site := Site{
 		Name:          "streaming",
 		Domains:       []string{"stream.example.test"},
 		Nodes:         []string{"node-1"},
 		PrimaryOrigin: Origin{URL: "https://origin.example.test"},
-		StreamPaths:   []string{"/events/", "/ws"},
+		StreamPaths:   []string{"/bad path", "/../ws"},
 	}
 	if err := NormalizeAndValidateSite(&site); err != nil {
 		t.Fatal(err)
 	}
-	if len(site.StreamPaths) != 2 || site.StreamPaths[0] != "/events" || site.StreamPaths[1] != "/ws" {
-		t.Fatalf("unexpected normalized paths: %#v", site.StreamPaths)
-	}
-	for _, paths := range [][]string{{"/bad path"}, {"/../ws"}, {"/ws?token=1"}} {
-		site.StreamPaths = paths
-		if err := NormalizeAndValidateSite(&site); err == nil {
-			t.Fatalf("expected %v to be rejected", paths)
-		}
-	}
-	site.PrimaryOrigin = Origin{URL: "grpcs://grpc.example.test:443"}
-	site.StreamPaths = []string{"/"}
-	if err := NormalizeAndValidateSite(&site); err == nil {
-		t.Fatal("expected gRPC site stream paths to be rejected")
-	}
-	site.PrimaryOrigin = Origin{URL: "wss://ws.example.test"}
-	if err := NormalizeAndValidateSite(&site); err == nil {
-		t.Fatal("expected WebSocket site stream paths to be rejected")
+	if site.StreamPaths == nil || len(site.StreamPaths) != 0 {
+		t.Fatalf("retired stream paths should normalize to an empty array: %#v", site.StreamPaths)
 	}
 }
 

@@ -68,6 +68,30 @@ func TestReadWriteTimeoutDefaultsAndPresetValidation(t *testing.T) {
 	}
 }
 
+func TestSiteDNSTTLValidation(t *testing.T) {
+	newSite := func(value *int) Site {
+		return Site{Name: "example", Domains: []string{"example.test"}, Nodes: []string{"node-1"}, PrimaryOrigin: Origin{URL: "https://origin.example.test"}, DNSTTLSeconds: value}
+	}
+	inherited := newSite(nil)
+	if err := NormalizeAndValidateSite(&inherited); err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []int{60, 61, 180, 300} {
+		ttl := value
+		site := newSite(&ttl)
+		if err := NormalizeAndValidateSite(&site); err != nil {
+			t.Fatalf("expected TTL %d to be accepted: %v", value, err)
+		}
+	}
+	for _, value := range []int{-1, 0, 59, 301} {
+		ttl := value
+		site := newSite(&ttl)
+		if err := NormalizeAndValidateSite(&site); err == nil {
+			t.Fatalf("expected TTL %d to be rejected", value)
+		}
+	}
+}
+
 func TestSiteDomainRejectsIPAddress(t *testing.T) {
 	site := Site{
 		Name:    "example",

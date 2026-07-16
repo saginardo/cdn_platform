@@ -23,6 +23,11 @@ func NormalizeAndValidateSite(site *Site) error {
 		return err
 	}
 	site.ReadWriteTimeoutSeconds = readWriteTimeoutSeconds
+	if site.DNSTTLSeconds != nil {
+		if err := ValidateDNSTTLSeconds(*site.DNSTTLSeconds); err != nil {
+			return err
+		}
+	}
 	if len(site.Domains) == 0 {
 		return fmt.Errorf("at least one domain is required")
 	}
@@ -118,6 +123,13 @@ func ValidateReadWriteTimeoutSeconds(value int) error {
 	default:
 		return fmt.Errorf("read/write timeout must be one of 360, 900, 1800, or 3600 seconds")
 	}
+}
+
+func ValidateDNSTTLSeconds(value int) error {
+	if value < MinDNSTTLSeconds || value > MaxDNSTTLSeconds {
+		return fmt.Errorf("DNS TTL must be between %d and %d seconds", MinDNSTTLSeconds, MaxDNSTTLSeconds)
+	}
+	return nil
 }
 
 func ValidateOrigin(origin *Origin) error {

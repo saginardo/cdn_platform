@@ -92,6 +92,55 @@ func TestSiteClientMaxBodySizeAPI(t *testing.T) {
 	}
 }
 
+func TestSiteDNSTTLAPIHandlesOverrideInheritanceAndOmission(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-ttl", "203.0.113.81")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	base := map[string]any{
+		"name": "ttl", "zone_id": "zone", "domains": []string{"ttl.example.test"}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "enabled": true,
+	}
+	created := requestSite(t, server, http.MethodPost, "/api/sites", base)
+	if created.DNSTTLSeconds != nil {
+		t.Fatalf("omitted TTL did not inherit: %#v", created.DNSTTLSeconds)
+	}
+	base["dns_ttl_seconds"] = 180
+	updated := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+	if updated.DNSTTLSeconds == nil || *updated.DNSTTLSeconds != 180 {
+		t.Fatalf("TTL override = %#v", updated.DNSTTLSeconds)
+	}
+	delete(base, "dns_ttl_seconds")
+	preserved := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+	if preserved.DNSTTLSeconds == nil || *preserved.DNSTTLSeconds != 180 {
+		t.Fatalf("omitted update did not preserve TTL: %#v", preserved.DNSTTLSeconds)
+	}
+	base["dns_ttl_seconds"] = nil
+	inherited := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+	if inherited.DNSTTLSeconds != nil {
+		t.Fatalf("explicit null did not restore inheritance: %#v", inherited.DNSTTLSeconds)
+	}
+	for _, value := range []int{59, 301} {
+		base["dns_ttl_seconds"] = value
+		response := requestSiteResponse(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("TTL %d = %d %s", value, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestOriginAllowlistIncludesPublishedAndDraftAssignments(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

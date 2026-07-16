@@ -32,6 +32,10 @@ let acceptedHash = '#/overview';
 let pendingApprovedHash = '';
 let siteFormBaseline = '';
 let siteFormReady = false;
+let settingsData = null;
+let settingsFormBaseline = '';
+let settingsFormReady = false;
+let settingsLoading = false;
 
 const nodeStatusLabels = {
   pending: '待激活',
@@ -52,10 +56,11 @@ const taskStatusLabels = {
 };
 const defaultClientMaxBodySizeMB = 128;
 const defaultReadWriteTimeoutSeconds = 360;
+const defaultDNSTTLSeconds = 60;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const compactNumberFormatter = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
-const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites']);
-const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点' };
+const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites', 'settings']);
+const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点', settings: '设置' };
 const mobileSidebarQuery = window.matchMedia('(max-width: 800px)');
 const overviewStatusColors = ['#3274d9', '#168a7a', '#6d5bc5', '#d29224', '#c44f4f', '#2b8fa3', '#8b99a2'];
 
@@ -90,8 +95,140 @@ function notice(message, success = false) {
 function show(id) { byId(id).classList.remove('hidden'); }
 function hide(id) { byId(id).classList.add('hidden'); }
 
+function settingsSourceLabel(source) {
+  if (source === 'database') return '当前来源：控制台设置';
+  if (source === 'environment') return '当前来源：环境变量';
+  return '当前未配置';
+}
+
+function applySettingsData(data, { populate = false } = {}) {
+  settingsData = data;
+  if (populate || !settingsFormReady) populateSettingsForms();
+  if (siteFormReady && byId('site-dns-ttl-inherit').checked) {
+    byId('site-dns-ttl').value = String(settingsData?.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds);
+    updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null);
+  }
+}
+
+async function refreshSettings({ force = false, preserveDirtySections = [] } = {}) {
+  const draft = settingsFormReady ? settingsFormState() : null;
+  const preserved = new Set(preserveDirtySections.filter((section) => settingsSectionDirty(section)));
+  settingsLoading = true;
+  try {
+    const data = await request('/api/settings');
+    applySettingsData(data, { populate: force || !settingsFormsDirty() });
+    if (draft && preserved.size) restoreSettingsDraft(draft, preserved);
+  } finally {
+    settingsLoading = false;
+  }
+}
+
+function populateSettingsForms() {
+  if (!settingsData) return;
+  byId('settings-dns-ttl').value = String(settingsData.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds);
+  byId('dns-settings-state').textContent = `有效范围 60–300 秒`;
+  byId('cloudflare-settings-source').textContent = settingsSourceLabel(settingsData.cloudflare?.source);
+  byId('settings-cloudflare-token').value = '';
+  byId('settings-cloudflare-token').placeholder = settingsData.cloudflare?.configured ? '已配置，输入新 Token 以替换' : '输入 API Token';
+  byId('reset-cloudflare-settings').disabled = !settingsData.cloudflare?.override_configured;
+  byId('test-cloudflare-settings').disabled = !settingsData.cloudflare?.configured;
+
+  const smtp = settingsData.smtp || {};
+  byId('smtp-settings-source').textContent = settingsSourceLabel(smtp.source);
+  byId('settings-smtp-enabled').checked = Boolean(smtp.enabled);
+  byId('settings-smtp-host').value = smtp.host || '';
+  byId('settings-smtp-port').value = String(smtp.port || (smtp.security === 'tls' ? 465 : 587));
+  byId('settings-smtp-security').value = smtp.security || 'starttls';
+  byId('settings-smtp-username').value = smtp.username || '';
+  byId('settings-smtp-password').value = '';
+  byId('settings-smtp-password').placeholder = smtp.password_configured ? '已保存，留空保持不变' : '';
+  byId('settings-smtp-from').value = smtp.from_address || '';
+  byId('settings-smtp-recipients').value = (smtp.recipients || []).join(', ');
+  byId('reset-smtp-settings').disabled = !smtp.override_configured;
+  syncSMTPControls();
+  settingsFormReady = true;
+  markSettingsFormClean();
+}
+
+function smtpSettingsPayload() {
+  const payload = {
+    enabled: byId('settings-smtp-enabled').checked,
+    host: byId('settings-smtp-host').value,
+    port: Number(byId('settings-smtp-port').value),
+    security: byId('settings-smtp-security').value,
+    username: byId('settings-smtp-username').value,
+    from_address: byId('settings-smtp-from').value,
+    recipients: split(byId('settings-smtp-recipients').value),
+  };
+  const password = byId('settings-smtp-password').value;
+  if (password) payload.password = password;
+  return payload;
+}
+
+function settingsFormState() {
+  return {
+    dns: { default_ttl_seconds: Number(byId('settings-dns-ttl').value) },
+    cloudflare: { token: byId('settings-cloudflare-token').value },
+    smtp: smtpSettingsPayload(),
+  };
+}
+
+function settingsFormSnapshot() {
+  return JSON.stringify(settingsFormState());
+}
+
+function settingsSectionDirty(section) {
+  if (!settingsFormReady || !settingsFormBaseline) return false;
+  const baseline = JSON.parse(settingsFormBaseline);
+  return JSON.stringify(settingsFormState()[section]) !== JSON.stringify(baseline[section]);
+}
+
+function restoreSettingsDraft(draft, sections) {
+  if (sections.has('dns')) byId('settings-dns-ttl').value = String(draft.dns.default_ttl_seconds);
+  if (sections.has('cloudflare')) byId('settings-cloudflare-token').value = draft.cloudflare.token;
+  if (sections.has('smtp')) {
+    const smtp = draft.smtp;
+    byId('settings-smtp-enabled').checked = smtp.enabled;
+    byId('settings-smtp-host').value = smtp.host;
+    byId('settings-smtp-port').value = String(smtp.port);
+    byId('settings-smtp-security').value = smtp.security;
+    byId('settings-smtp-username').value = smtp.username;
+    byId('settings-smtp-password').value = smtp.password || '';
+    byId('settings-smtp-from').value = smtp.from_address;
+    byId('settings-smtp-recipients').value = smtp.recipients.join(', ');
+    syncSMTPControls();
+  }
+}
+
+function settingsFormsDirty() {
+  return settingsFormReady && activeRoute.view === 'settings' && settingsFormSnapshot() !== settingsFormBaseline;
+}
+
+function markSettingsFormClean() {
+  settingsFormBaseline = settingsFormReady ? settingsFormSnapshot() : '';
+}
+
+function setSettingsBusy(formID, busy) {
+  const form = byId(formID);
+  form.classList.toggle('is-busy', busy);
+  form.querySelectorAll('button, input, select').forEach((control) => { control.disabled = busy; });
+  if (!busy && settingsData) {
+    byId('reset-cloudflare-settings').disabled = !settingsData.cloudflare?.override_configured;
+    byId('test-cloudflare-settings').disabled = !settingsData.cloudflare?.configured;
+    byId('reset-smtp-settings').disabled = !settingsData.smtp?.override_configured;
+    syncSMTPControls();
+  }
+}
+
+function syncSMTPControls() {
+  byId('test-smtp-settings').disabled = byId('smtp-settings-form').classList.contains('is-busy') || !byId('settings-smtp-enabled').checked;
+}
+
 async function refresh() {
-  [nodes, sites] = await Promise.all([request('/api/nodes'), request('/api/sites')]);
+  const [loadedNodes, loadedSites, loadedSettings] = await Promise.all([request('/api/nodes'), request('/api/sites'), request('/api/settings')]);
+  nodes = loadedNodes;
+  sites = loadedSites;
+  applySettingsData(loadedSettings, { populate: !settingsFormsDirty() });
   routeDataReady = true;
   byId('site-list-meta').textContent = `${numberFormatter.format(sites.length)} 个站点 · ${numberFormatter.format(sites.filter((site) => site.enabled && site.published).length)} 个已发布`;
   byId('node-table').innerHTML = nodes.map(renderNodeRow).join('');
@@ -252,6 +389,7 @@ function updateSiteFormPreview(savedSite = null) {
     cache_generation: savedSite?.cache_generation ?? 0,
     client_max_body_size_mb: payload.client_max_body_size_mb,
     read_write_timeout_seconds: payload.read_write_timeout_seconds,
+    dns_ttl_seconds: payload.dns_ttl_seconds,
     node_ids: payload.node_ids,
   };
   const scheme = originScheme(draft);
@@ -259,6 +397,8 @@ function updateSiteFormPreview(savedSite = null) {
   byId('site-summary-cache').innerHTML = siteCacheMarkup(draft);
   byId('site-summary-body').textContent = `${numberFormatter.format(payload.client_max_body_size_mb)} MiB`;
   byId('site-summary-timeout').textContent = scheme === 'grpc' || scheme === 'grpcs' ? '不适用于 gRPC' : `${numberFormatter.format(payload.read_write_timeout_seconds / 60)} 分钟`;
+  const effectiveDNSTTL = payload.dns_ttl_seconds ?? settingsData?.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds;
+  byId('site-summary-dns-ttl').textContent = payload.dns_ttl_seconds == null ? `${numberFormatter.format(effectiveDNSTTL)} 秒（全局）` : `${numberFormatter.format(effectiveDNSTTL)} 秒`;
   byId('site-summary-nodes').textContent = `${numberFormatter.format(payload.node_ids.length)} 个`;
 }
 
@@ -301,6 +441,7 @@ function renderSiteDetailStatus() {
 function setSiteEditorLocked(locked) {
   document.querySelectorAll('#site-form input, #site-form select, #site-form textarea').forEach((field) => { field.disabled = locked; });
   if (!locked) updateOriginTLSFields();
+  syncSiteDNSTTLControl();
   if (byId('site-id').value) byId('site-zone').disabled = true;
   byId('site-submit').disabled = locked;
 }
@@ -1279,6 +1420,11 @@ function renderSiteRoute(route, { populateForm = false, routeChanged = false } =
   renderSiteDetailStatus();
 }
 
+function renderSettingsRoute({ routeChanged = false } = {}) {
+  if (routeChanged && settingsData) populateSettingsForms();
+  if (!settingsData && !settingsLoading) void refreshSettings({ force: true }).catch((error) => notice(error.message));
+}
+
 function activateRoute(route, { forceForm = false, focus = true } = {}) {
   const previousRoute = activeRoute;
   const routeChanged = routeKey(previousRoute) !== routeKey(route);
@@ -1294,6 +1440,7 @@ function activateRoute(route, { forceForm = false, focus = true } = {}) {
   if (route.view === 'overview') renderOverviewRoute(route, { routeChanged });
   if (route.view === 'logs') renderLogsRoute({ routeChanged });
   if (route.view === 'sites') renderSiteRoute(route, { populateForm: forceForm || routeChanged, routeChanged });
+  if (route.view === 'settings') renderSettingsRoute({ routeChanged });
   const site = route.view === 'sites' && route.page === 'detail' ? sites.find((item) => item.id === route.siteID) : null;
   const analyticsSite = route.view === 'overview' && route.page === 'site-analytics' ? sites.find((item) => item.id === route.siteID) : null;
   const mobileTitle = route.page === 'new' ? '添加站点' : (site?.name || analyticsSite?.name || viewLabels[route.view] || viewLabels.overview);
@@ -1303,6 +1450,7 @@ function activateRoute(route, { forceForm = false, focus = true } = {}) {
     if (route.view === 'sites' && route.page !== 'list') window.requestAnimationFrame(() => byId('site-detail-title').focus());
     if (route.view === 'overview' && route.page === 'site-analytics') window.requestAnimationFrame(() => byId('overview-site-title').focus());
     if (route.view === 'logs') window.requestAnimationFrame(() => byId('logs-title').focus());
+    if (route.view === 'settings') window.requestAnimationFrame(() => byId('settings-title').focus());
   }
 }
 
@@ -1313,7 +1461,7 @@ function syncRouteFromLocation(options = {}) {
 }
 
 function confirmDiscardChanges() {
-  return !siteFormDirty() || window.confirm('有未保存的更改，确定离开吗？');
+  return (!siteFormDirty() && !settingsFormsDirty()) || window.confirm('有未保存的更改，确定离开吗？');
 }
 
 function navigateTo(hash) {
@@ -1324,6 +1472,7 @@ function navigateTo(hash) {
   }
   if (!confirmDiscardChanges()) return false;
   markSiteFormClean();
+  markSettingsFormClean();
   pendingApprovedHash = destination;
   if (window.location.hash === destination) {
     pendingApprovedHash = '';
@@ -1348,7 +1497,10 @@ function handleHashChange() {
     activateRoute(parseRouteHash(acceptedHash), { focus: false });
     return;
   }
-  if (routeChanged) markSiteFormClean();
+  if (routeChanged) {
+    markSiteFormClean();
+    markSettingsFormClean();
+  }
   pendingApprovedHash = '';
   syncRouteFromLocation();
 }
@@ -1388,6 +1540,7 @@ byId('login-form').addEventListener('submit', async (event) => {
 byId('logout').addEventListener('click', async () => {
   if (!confirmDiscardChanges()) return;
   markSiteFormClean();
+  markSettingsFormClean();
   try {
     await request('/api/logout', { method: 'POST' });
   } finally {
@@ -1412,6 +1565,9 @@ byId('logout').addEventListener('click', async () => {
     sites = [];
     routeDataReady = false;
     siteFormReady = false;
+    settingsData = null;
+    settingsFormReady = false;
+    settingsFormBaseline = '';
     overviewLoaded = false;
     overviewData = null;
     csrf = '';
@@ -1474,9 +1630,114 @@ document.querySelectorAll('.nav').forEach((button) => button.addEventListener('c
   if (acceptedHash === hash) activateRoute(parseRouteHash(hash));
   else navigateTo(hash);
 }));
+
+byId('dns-settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  setSettingsBusy('dns-settings-form', true);
+  try {
+    await request('/api/settings/dns', { method: 'PUT', body: JSON.stringify({ default_ttl_seconds: Number(byId('settings-dns-ttl').value) }) });
+    await refreshSettings({ force: true, preserveDirtySections: ['cloudflare', 'smtp'] });
+    notice('DNS 设置已保存', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('dns-settings-form', false);
+  }
+});
+
+byId('cloudflare-settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const token = byId('settings-cloudflare-token').value.trim();
+  if (!token) return notice('请输入新的 Cloudflare API Token');
+  setSettingsBusy('cloudflare-settings-form', true);
+  try {
+    await request('/api/settings/cloudflare', { method: 'PUT', body: JSON.stringify({ token }) });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'smtp'] });
+    notice('Cloudflare API Token 已验证并保存', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('cloudflare-settings-form', false);
+  }
+});
+
+byId('test-cloudflare-settings').addEventListener('click', async () => {
+  setSettingsBusy('cloudflare-settings-form', true);
+  try {
+    await request('/api/settings/cloudflare/test', { method: 'POST', body: '{}' });
+    notice('Cloudflare 当前配置验证通过', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('cloudflare-settings-form', false);
+  }
+});
+
+byId('reset-cloudflare-settings').addEventListener('click', async () => {
+  if (!window.confirm('确定删除控制台 Token，并恢复使用环境变量吗？')) return;
+  setSettingsBusy('cloudflare-settings-form', true);
+  try {
+    await request('/api/settings/cloudflare', { method: 'DELETE' });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'smtp'] });
+    notice('Cloudflare 已恢复环境变量配置', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('cloudflare-settings-form', false);
+  }
+});
+
+byId('smtp-settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  setSettingsBusy('smtp-settings-form', true);
+  try {
+    await request('/api/settings/smtp', { method: 'PUT', body: JSON.stringify(smtpSettingsPayload()) });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare'] });
+    notice('SMTP 设置已保存', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('smtp-settings-form', false);
+  }
+});
+
+byId('test-smtp-settings').addEventListener('click', async () => {
+  if (!byId('smtp-settings-form').reportValidity()) return;
+  setSettingsBusy('smtp-settings-form', true);
+  try {
+    await request('/api/settings/smtp/test', { method: 'POST', body: JSON.stringify(smtpSettingsPayload()) });
+    notice('SMTP 测试邮件已发送', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('smtp-settings-form', false);
+  }
+});
+
+byId('reset-smtp-settings').addEventListener('click', async () => {
+  if (!window.confirm('确定删除控制台 SMTP 配置，并恢复使用环境变量吗？')) return;
+  setSettingsBusy('smtp-settings-form', true);
+  try {
+    await request('/api/settings/smtp', { method: 'DELETE' });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare'] });
+    notice('SMTP 已恢复环境变量配置', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('smtp-settings-form', false);
+  }
+});
+
+byId('settings-smtp-enabled').addEventListener('change', syncSMTPControls);
+byId('settings-smtp-security').addEventListener('change', () => {
+  const port = Number(byId('settings-smtp-port').value);
+  if (port === 465 || port === 587) byId('settings-smtp-port').value = byId('settings-smtp-security').value === 'tls' ? '465' : '587';
+});
 window.addEventListener('hashchange', handleHashChange);
 window.addEventListener('beforeunload', (event) => {
-  if (!siteFormDirty()) return;
+  if (!siteFormDirty() && !settingsFormsDirty()) return;
   event.preventDefault();
   event.returnValue = '';
 });
@@ -1616,6 +1877,7 @@ function siteFormPayload() {
     passthrough: byId('site-passthrough').checked,
     client_max_body_size_mb: Number(byId('site-client-max-body-size').value),
     read_write_timeout_seconds: Number(byId('site-read-write-timeout').value),
+    dns_ttl_seconds: byId('site-dns-ttl-inherit').checked ? null : Number(byId('site-dns-ttl').value),
     enabled: byId('site-enabled').checked,
   };
   if (backup) payload.backup_origin = { url: backup, host_header: byId('site-backup-host').value, tls_server_name: originURLUsesTLS(backup) ? byId('site-backup-tls-name').value : '', enabled: true };
@@ -1641,6 +1903,9 @@ function prepareNewSiteForm() {
   byId('site-client-max-body-size').value = String(defaultClientMaxBodySizeMB);
   byId('site-read-write-timeout').value = String(defaultReadWriteTimeoutSeconds);
   byId('site-passthrough').checked = false;
+  byId('site-dns-ttl-inherit').checked = true;
+  byId('site-dns-ttl').value = String(settingsData?.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds);
+  syncSiteDNSTTLControl();
   byId('site-enabled').checked = true;
   byId('site-submit').textContent = '创建站点';
   renderNodeSelector();
@@ -1664,6 +1929,9 @@ function populateSiteForm(site) {
   byId('site-client-max-body-size').value = String(site.client_max_body_size_mb ?? defaultClientMaxBodySizeMB);
   byId('site-read-write-timeout').value = String(site.read_write_timeout_seconds ?? defaultReadWriteTimeoutSeconds);
   byId('site-passthrough').checked = Boolean(site.passthrough);
+  byId('site-dns-ttl-inherit').checked = site.dns_ttl_seconds == null;
+  byId('site-dns-ttl').value = String(site.dns_ttl_seconds ?? settingsData?.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds);
+  syncSiteDNSTTLControl();
   byId('site-enabled').checked = site.enabled;
   byId('site-submit').textContent = '保存更改';
   renderNodeSelector(site.node_ids);
@@ -1674,6 +1942,13 @@ function populateSiteForm(site) {
 
 byId('site-form').addEventListener('input', () => updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null));
 byId('site-form').addEventListener('change', () => updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null));
+byId('site-dns-ttl-inherit').addEventListener('change', syncSiteDNSTTLControl);
+
+function syncSiteDNSTTLControl() {
+  const inherit = byId('site-dns-ttl-inherit').checked;
+  byId('site-dns-ttl-wrap').classList.toggle('hidden', inherit);
+  byId('site-dns-ttl').disabled = inherit || byId('site-name').disabled;
+}
 
 document.addEventListener('click', async (event) => {
   const button = event.target.closest('button'); if (!button || !button.dataset.id) return;

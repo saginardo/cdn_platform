@@ -409,11 +409,22 @@ dialog::backdrop { background: rgb(23 33 43 / 38%); }
 .site-detail-missing { padding: 3rem 0; text-align: center; }
 .site-detail-missing p { margin: .5rem 0 1.1rem; color: var(--text-muted); }
 
+.settings-page { width: min(100%, 960px); }
+.settings-section { gap: 0; padding: 1.2rem 0; border-bottom: 1px solid var(--line); }
+.settings-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .85rem; }
+.settings-section-heading > div { min-width: 0; }
+.settings-section-heading h2 { margin: 0; color: #263743; font-size: 1rem; line-height: 1.35; }
+.settings-source { display: block; margin-top: .25rem; color: var(--text-muted); font-size: .8rem; overflow-wrap: anywhere; }
+.settings-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem 1rem; }
+.settings-field-wide { grid-column: 1 / -1; }
+.settings-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .55rem; margin-top: 1rem; }
+.settings-section.is-busy { opacity: .7; pointer-events: none; }
+
 .secret { margin: 1rem 0; padding: .85rem; white-space: pre-wrap; word-break: break-word; border: 1px solid #decf97; border-radius: 6px; background: #fff8d9; color: #514413; }
 .hidden { display: none !important; }
 
 @media (min-width: 1500px) {
-  .site-detail-summary { grid-template-columns: repeat(7, minmax(0, 1fr)); }
+  .site-detail-summary { grid-template-columns: repeat(8, minmax(0, 1fr)); }
   #node-form { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
@@ -521,6 +532,11 @@ dialog::backdrop { background: rgb(23 33 43 / 38%); }
   .site-field-wide { grid-column: auto; }
   .site-form-actions { justify-content: stretch; }
   .site-form-actions button { flex: 1 1 0; }
+  .settings-fields { grid-template-columns: 1fr; }
+  .settings-field-wide { grid-column: auto; }
+  .settings-section-heading { align-items: flex-start; }
+  .settings-actions { justify-content: stretch; }
+  .settings-actions button { flex: 1 1 100%; }
   dialog { width: calc(100% - 1rem); padding: 1rem; }
   .dialog-actions { justify-content: stretch; }
   .dialog-actions button { flex: 1 1 auto; }

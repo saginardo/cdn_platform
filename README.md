@@ -9,6 +9,7 @@ A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-
 - Edge agent that writes Nginx configuration and certificates atomically, checks local public-port ownership, runs `nginx -t`, reloads a healthy Nginx or starts a failed/stopped Nginx, confirms a reload actually spawned a new worker generation, and restores the last known-good configuration and TLS files on failure.
 - Nginx OSS cache policy with a 5 GiB default disk cap per edge node, normalized cache generation, cache locking, revalidation, background refresh, stale fallback, HTTP(S) primary/backup origin failover, and cookie/authorization bypass. HTTP(S) sites automatically bypass cache and response buffering for WebSocket upgrades, SSE accept headers, `X-CDN-Stream: 1`, and POST responses; full passthrough mode disables cache and buffering for the entire hostname while forwarding byte ranges. `grpc://` and `grpcs://` origins use native gRPC proxying over the client HTTP/2 listener.
 - Cloudflare DNS-only A-record reconciliation after node reachability and per-site HTTPS/SNI/certificate health hysteresis: 3 failed probes remove a node; 5 successful probes restore it. If every node is bad, DNS is deliberately left unchanged.
+- Authenticated runtime settings for a 60-300 second DNS TTL, per-site published TTL overrides, an encrypted Cloudflare API token override, and encrypted STARTTLS or implicit-TLS SMTP notification settings. Database overrides take precedence over environment fallbacks without a controller restart.
 - DNS-01 certificates through Certbot's Cloudflare plugin; certificate private keys remain encrypted in SQLite and are only delivered over mTLS.
 - ClickHouse raw request logs with a 7-day TTL and minute aggregates with a 30-day TTL. Edge logs locally queue while the control plane is unavailable.
 - SMTP alert interface and encrypted restic S3-compatible daily backups for the SQLite database, control configuration/TLS material, internal CA, and certificate material.
@@ -73,6 +74,8 @@ sudo docker compose up -d
 sudo docker compose ps
 ```
 
+Keep `CLOUDFLARE_API_TOKEN` in `control.env` for the first control-certificate bootstrap and rollback. After administrator setup, the **Settings** view can store an encrypted runtime override. That override is used by DNS reconciliation, site certificate jobs, and subsequent control-certificate renewals; deleting it restores the environment value. SMTP follows the same whole-profile override and reset model.
+
 The bundled ClickHouse configuration is tuned for the 2-core, 4 GiB control host: it limits the background scheduler and disables high-volume internal profiling tables such as `system.metric_log` and `system.trace_log`. CDN access logs, minute aggregates, query diagnostics, part diagnostics, errors, and asynchronous-insert diagnostics remain enabled. User-level ClickHouse limits and profiler switches are installed separately under `users.d`.
 
 Firewall policy on the control VPS:
@@ -112,11 +115,11 @@ If Nginx validation or reload fails before cleanup is committed, the script rest
 
 ## First site
 
-1. Add the site with its Cloudflare Zone ID, hostname(s), assigned node IDs, primary origin, and optional backup origin. Generated HTTPS sites default to a 128 MiB request-body limit; the site form can raise it to the fixed 256, 512, or 1024 MiB presets. HTTP/HTTPS/WebSocket proxying defaults to a 360-second upstream read/write idle timeout, selectable as 6, 15, 30, or 60 minutes. WebSocket and SSE need no path declaration: WebSocket uses `Upgrade`, browser SSE uses `Accept: text/event-stream`, [OpenAI-style streaming](https://developers.openai.com/api/docs/guides/streaming-responses) is passed through for every POST, and nonstandard clients may send `X-CDN-Stream: 1`. Use HTTP(S) origins for normal sites, passthrough mode for an entire hostname that must not use disk cache, `ws://` or `wss://` for an all-WebSocket site, and `grpc://` or `grpcs://` for an all-gRPC hostname.
+1. Add the site with its Cloudflare Zone ID, hostname(s), assigned node IDs, primary origin, and optional backup origin. Sites inherit the global DNS TTL unless their draft selects a 60-300 second override; that override becomes live only when the site is published. Generated HTTPS sites default to a 128 MiB request-body limit; the site form can raise it to the fixed 256, 512, or 1024 MiB presets. HTTP/HTTPS/WebSocket proxying defaults to a 360-second upstream read/write idle timeout, selectable as 6, 15, 30, or 60 minutes. WebSocket and SSE need no path declaration: WebSocket uses `Upgrade`, browser SSE uses `Accept: text/event-stream`, [OpenAI-style streaming](https://developers.openai.com/api/docs/guides/streaming-responses) is passed through for every POST, and nonstandard clients may send `X-CDN-Stream: 1`. Use HTTP(S) origins for normal sites, passthrough mode for an entire hostname that must not use disk cache, `ws://` or `wss://` for an all-WebSocket site, and `grpc://` or `grpcs://` for an all-gRPC hostname.
 2. In Cloudflare, keep these hostname records as DNS-only. The control plane only manages records tagged with `cdn-platform:site=<site-id>;...`; it refuses a hostname already occupied by an untagged or another site's A record.
 3. Run **Issue TLS**. The control VPS queues an asynchronous DNS-01 job via the scoped Cloudflare token and stores the resulting certificate encrypted. The Sites view polls its status; reloading the page does not cancel it. Only one active certificate job may exist per site, so repeated clicks reuse that job.
 4. Run **Publish**. The controller builds each affected node's desired state and waits up to 90 seconds for assigned active nodes to validate and apply it. The Sites view shows per-node conflicts or timeout details; after resolving a conflict, click **Republish**.
-5. Wait for an edge to be active and pass five node and per-site HTTPS probes. The controller then creates 60-second DNS-only A records.
+5. Wait for an edge to be active and pass five node and per-site HTTPS probes. The controller then creates DNS-only A records using the site's published TTL override or the global default of 60 seconds.
 6. Fetch `GET /api/sites/{site-id}/origin-allowlist` from the authenticated API and install those `/32` CIDRs in the source origin firewall/security group. This prevents direct origin bypass.
 
 The generic edge health endpoint is `http://EDGE_IPV4/__cdn_health`. Published configurations also expose a site-specific `https://SITE_DOMAIN/__cdn_health`; the controller connects it directly to each assigned Edge IP while retaining the real Host, SNI, and certificate verification. Expose port 80 and 443 publicly on edge nodes. The origin itself should permit inbound traffic only from the returned edge CIDRs.
@@ -147,7 +150,7 @@ Administrator -> Control API/UI -> Cloudflare DNS / Certbot DNS-01 / SMTP / SQLi
 Edge agent --- mTLS ---> desired state, heartbeat, batched access logs
 ```
 
-The desired failure window is about 2-5 minutes: a node needs three 15-second failed probes before it is removed, then recursive resolver caching applies to the 60-second DNS TTL. When every assigned node appears unhealthy, records are retained and an alert is sent rather than intentionally publishing an empty answer set.
+The failure window is roughly 1-2 minutes with a 60-second TTL and can approach 6 minutes with a 300-second TTL: a node needs three 15-second failed probes before it is removed, then recursive resolver caching applies to the effective TTL. When every assigned node appears unhealthy, records are retained and an alert is sent rather than intentionally publishing an empty answer set.
 
 ## Backup and restore
 

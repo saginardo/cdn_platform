@@ -259,7 +259,7 @@ func TestEmbeddedConsoleUsesDedicatedLogSearchRoute(t *testing.T) {
 	}
 	script := string(scriptContents)
 	for _, expected := range []string{
-		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites'])",
+		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites', 'settings'])",
 		"function runLogSearch({ offset = 0, keepWindow = false } = {})",
 		"request(`/api/logs?${params.toString()}`",
 		"function renderLogRows(logs)",
@@ -340,7 +340,7 @@ func TestEmbeddedConsolePreservesSelectedViewInURLHash(t *testing.T) {
 	}
 	script := string(contents)
 	for _, expected := range []string{
-		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites'])",
+		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites', 'settings'])",
 		"function parseRouteHash(hash)",
 		"hash.replace(/^#\\/?/, '')",
 		"if (segments.length === 2 && segments[1] === 'new')",
@@ -369,6 +369,9 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		`id="site-summary-cache"`,
 		`id="site-summary-body"`,
 		`id="site-summary-timeout"`,
+		`id="site-summary-dns-ttl"`,
+		`id="site-dns-ttl-inherit"`,
+		`id="site-dns-ttl" type="number" min="60" max="300"`,
 		`id="site-basic-title">基本信息`,
 		`id="site-origin-title">源站与协议`,
 		`id="site-primary-tls-name-wrap" class="hidden"`,
@@ -415,7 +418,7 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		"function confirmDiscardChanges()",
 		"window.addEventListener('beforeunload'",
 		"window.history.pushState(null, '', acceptedHash)",
-		"if (routeChanged) markSiteFormClean();",
+		"markSettingsFormClean();",
 		"renderSiteDetailStatus();",
 		"classList.toggle('hidden', !siteCacheable(site))",
 		`class="small secondary manage-site"`,
@@ -500,7 +503,7 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	}
 	script := string(scriptContents)
 	for _, expected := range []string{
-		"const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点' }",
+		"const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点', settings: '设置' }",
 		"function setSidebarOpen(open, restoreFocus = false)",
 		"setAttribute('aria-expanded', String(open))",
 		"event.key === 'Escape'",
@@ -508,6 +511,56 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+}
+
+func TestEmbeddedConsoleIncludesRuntimeSettingsForms(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`class="nav" data-view="settings">设置`,
+		`id="settings" class="view hidden"`,
+		`id="settings-dns-ttl" type="number" min="60" max="300"`,
+		`id="settings-cloudflare-token" type="password"`,
+		`id="settings-smtp-security"`,
+		`<option value="starttls">STARTTLS</option>`,
+		`<option value="tls">隐式 TLS</option>`,
+		`id="test-smtp-settings"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"request('/api/settings')",
+		"request('/api/settings/cloudflare'",
+		"request('/api/settings/smtp/test'",
+		"function settingsFormsDirty()",
+		"preserveDirtySections: ['cloudflare', 'smtp']",
+		"function restoreSettingsDraft(draft, sections)",
+		"dns_ttl_seconds: byId('site-dns-ttl-inherit').checked ? null",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(styleContents)
+	for _, expected := range []string{".settings-page", ".settings-fields", ".settings-actions"} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
 		}
 	}
 }

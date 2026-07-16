@@ -1,0 +1,137 @@
+package store
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"cdn-platform/internal/domain"
+)
+
+func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	settings, err := database.ControlSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.DNSDefaultTTLSeconds != domain.DefaultDNSTTLSeconds || settings.SMTP.Override {
+		t.Fatalf("unexpected defaults: %#v", settings)
+	}
+	if err := database.SaveDNSDefaultTTL(120); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveDNSDefaultTTL(301); err == nil {
+		t.Fatal("accepted DNS TTL above maximum")
+	}
+	smtp := SMTPSettings{Enabled: true, Host: "smtp.example.test", Port: 465, Username: "mailer", FromAddress: "cdn@example.test", Recipients: []string{"ops@example.test"}, Security: "tls"}
+	if err := database.SaveSMTPSettings(smtp, []byte("encrypted-password"), true); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = database.ControlSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.DNSDefaultTTLSeconds != 120 || !settings.SMTP.Override || settings.SMTP.Host != smtp.Host || len(settings.SMTP.Recipients) != 1 {
+		t.Fatalf("unexpected saved settings: %#v", settings)
+	}
+	stored, err := database.Secret(SecretSMTPPassword)
+	if err != nil || !bytes.Equal(stored, []byte("encrypted-password")) {
+		t.Fatalf("stored SMTP secret = %q, %v", stored, err)
+	}
+	if err := database.ClearSMTPSettings(); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = database.ControlSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.SMTP.Override {
+		t.Fatalf("SMTP override not cleared: %#v", settings.SMTP)
+	}
+	if _, err := database.Secret(SecretSMTPPassword); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SMTP password remains after reset: %v", err)
+	}
+}
+
+func TestReadSecretUsesLiveReadOnlyDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.SetSecret(SecretCloudflareAPIToken, []byte("ciphertext")); err != nil {
+		t.Fatal(err)
+	}
+	var readOnlyPaths []string
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(candidate); err == nil {
+			if err := os.Chmod(candidate, 0o444); err != nil {
+				t.Fatal(err)
+			}
+			readOnlyPaths = append(readOnlyPaths, candidate)
+		}
+	}
+	defer func() {
+		for _, candidate := range readOnlyPaths {
+			_ = os.Chmod(candidate, 0o644)
+		}
+	}()
+	loaded, err := ReadSecret(path, SecretCloudflareAPIToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(loaded, []byte("ciphertext")) {
+		t.Fatalf("read-only secret = %q", loaded)
+	}
+}
+
+func TestSiteDNSTTLIsolatedByPublishedSnapshot(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge", "203.0.113.90")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ttl := 180
+	site, err := database.CreateSite(domain.Site{
+		Name: "ttl-site", Domains: []string{"ttl.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true, DNSTTLSeconds: &ttl,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if site.DNSTTLSeconds == nil || *site.DNSTTLSeconds != 180 {
+		t.Fatalf("created TTL = %#v", site.DNSTTLSeconds)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedTTL := 300
+	draft.DNSTTLSeconds = &updatedTTL
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	publication, err := database.SitePublication(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publication.Site.DNSTTLSeconds == nil || *publication.Site.DNSTTLSeconds != 180 {
+		t.Fatalf("draft TTL leaked into publication: %#v", publication.Site.DNSTTLSeconds)
+	}
+}

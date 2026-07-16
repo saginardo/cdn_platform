@@ -48,6 +48,9 @@ const (
 	DefaultClientMaxBodySizeMB     = 128
 	MaxClientMaxBodySizeMB         = 1024
 	DefaultReadWriteTimeoutSeconds = 360
+	DefaultDNSTTLSeconds           = 60
+	MinDNSTTLSeconds               = 60
+	MaxDNSTTLSeconds               = 300
 )
 
 type Site struct {
@@ -63,6 +66,7 @@ type Site struct {
 	Passthrough             bool      `json:"passthrough"`
 	ClientMaxBodySizeMB     int       `json:"client_max_body_size_mb"`
 	ReadWriteTimeoutSeconds int       `json:"read_write_timeout_seconds"`
+	DNSTTLSeconds           *int      `json:"dns_ttl_seconds"`
 	CacheGeneration         int64     `json:"cache_generation"`
 	ConfigVersion           int64     `json:"config_version"`
 	Published               bool      `json:"published"`

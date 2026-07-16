@@ -42,9 +42,11 @@ type Server struct {
 	CA                 *InternalCA
 	Publisher          Publisher
 	DNS                integrations.DNSProvider
+	Cloudflare         *integrations.CloudflareDNS
 	Issuer             integrations.CertificateIssuer
 	CertificateManager *CertificateManager
 	SiteDeleter        *SiteDeletionManager
+	Settings           *SettingsManager
 	Notifier           integrations.Notifier
 	Logs               logstore.Store
 	ControlURL         string
@@ -73,6 +75,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/session", s.requireAdmin(s.session))
 	mux.HandleFunc("GET /api/overview", s.requireAdmin(s.overview))
 	mux.HandleFunc("GET /api/logs", s.requireAdmin(s.searchLogs))
+	mux.HandleFunc("GET /api/settings", s.requireAdmin(s.getSettings))
+	mux.HandleFunc("PUT /api/settings/dns", s.requireAdmin(s.updateDNSSettings))
+	mux.HandleFunc("PUT /api/settings/cloudflare", s.requireAdmin(s.updateCloudflareSettings))
+	mux.HandleFunc("DELETE /api/settings/cloudflare", s.requireAdmin(s.clearCloudflareSettings))
+	mux.HandleFunc("POST /api/settings/cloudflare/test", s.requireAdmin(s.testCloudflareSettings))
+	mux.HandleFunc("PUT /api/settings/smtp", s.requireAdmin(s.updateSMTPSettings))
+	mux.HandleFunc("DELETE /api/settings/smtp", s.requireAdmin(s.clearSMTPSettings))
+	mux.HandleFunc("POST /api/settings/smtp/test", s.requireAdmin(s.testSMTPSettings))
 	mux.HandleFunc("GET /api/nodes", s.requireAdmin(s.listNodes))
 	mux.HandleFunc("POST /api/nodes", s.requireAdmin(s.createNode))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
@@ -446,6 +456,25 @@ type originRequest struct {
 	Enabled       bool    `json:"enabled"`
 }
 
+type optionalNullableInt struct {
+	Present bool
+	Value   *int
+}
+
+func (value *optionalNullableInt) UnmarshalJSON(encoded []byte) error {
+	value.Present = true
+	if strings.TrimSpace(string(encoded)) == "null" {
+		value.Value = nil
+		return nil
+	}
+	var decoded int
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return err
+	}
+	value.Value = &decoded
+	return nil
+}
+
 func (input originRequest) origin(current *domain.Origin) domain.Origin {
 	tlsServerName := ""
 	if input.TLSServerName != nil {
@@ -457,17 +486,18 @@ func (input originRequest) origin(current *domain.Origin) domain.Origin {
 }
 
 type siteRequest struct {
-	Name                    string         `json:"name"`
-	ZoneID                  string         `json:"zone_id"`
-	Domains                 []string       `json:"domains"`
-	NodeIDs                 []string       `json:"node_ids"`
-	PrimaryOrigin           originRequest  `json:"primary_origin"`
-	BackupOrigin            *originRequest `json:"backup_origin"`
-	StreamPaths             *[]string      `json:"stream_paths"`
-	Passthrough             *bool          `json:"passthrough"`
-	ClientMaxBodySizeMB     *int           `json:"client_max_body_size_mb"`
-	ReadWriteTimeoutSeconds *int           `json:"read_write_timeout_seconds"`
-	Enabled                 *bool          `json:"enabled"`
+	Name                    string              `json:"name"`
+	ZoneID                  string              `json:"zone_id"`
+	Domains                 []string            `json:"domains"`
+	NodeIDs                 []string            `json:"node_ids"`
+	PrimaryOrigin           originRequest       `json:"primary_origin"`
+	BackupOrigin            *originRequest      `json:"backup_origin"`
+	StreamPaths             *[]string           `json:"stream_paths"`
+	Passthrough             *bool               `json:"passthrough"`
+	ClientMaxBodySizeMB     *int                `json:"client_max_body_size_mb"`
+	ReadWriteTimeoutSeconds *int                `json:"read_write_timeout_seconds"`
+	DNSTTLSeconds           optionalNullableInt `json:"dns_ttl_seconds"`
+	Enabled                 *bool               `json:"enabled"`
 }
 
 func (input siteRequest) site(id string, current *domain.Site) domain.Site {
@@ -497,12 +527,19 @@ func (input siteRequest) site(id string, current *domain.Site) domain.Site {
 		currentPrimary = &current.PrimaryOrigin
 		currentBackup = current.BackupOrigin
 	}
+	var dnsTTLSeconds *int
+	if input.DNSTTLSeconds.Present {
+		dnsTTLSeconds = input.DNSTTLSeconds.Value
+	} else if current != nil && current.DNSTTLSeconds != nil {
+		value := *current.DNSTTLSeconds
+		dnsTTLSeconds = &value
+	}
 	var backupOrigin *domain.Origin
 	if input.BackupOrigin != nil {
 		backup := input.BackupOrigin.origin(currentBackup)
 		backupOrigin = &backup
 	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, Enabled: enabled}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, Enabled: enabled}
 }
 
 func (input siteRequest) validateClientMaxBodySize() error {

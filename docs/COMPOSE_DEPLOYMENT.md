@@ -12,7 +12,7 @@ The installer creates one operational and backup boundary:
   compose.yaml
   .env
   config/
-    control.env                control secrets and runtime settings
+    control.env                bootstrap secrets and runtime fallbacks
     backup.env                 restic and backup schedule settings
     restic-password            restic repository password
   data/
@@ -50,6 +50,8 @@ curl -fsS https://control.example.com/healthz
 ```
 
 The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 at startup; a configured `EDGE_BINARY_SHA256` must match or startup fails.
+
+The authenticated **Settings** view stores runtime overrides in SQLite. Cloudflare Token and SMTP password values are encrypted with `CONTROL_ENCRYPTION_KEY`; API responses never return them. Database overrides take precedence over `CLOUDFLARE_API_TOKEN` and `SMTP_*`, while reset actions restore those environment fallbacks. Retain the environment Cloudflare token because a fresh installation needs it before the UI and database exist. Control-certificate bootstrap and renewal containers mount the control database read-only and refresh their temporary Certbot credentials before each certificate operation.
 
 When a release changes generated Nginx paths, deploy the new controller without publishing site changes, migrate every legacy edge using its generated deployment/upgrade command, and only then run `docker compose run --rm --no-deps control publish-all`. Existing desired state is retained across the controller restart, so this order keeps legacy nodes on their last working configuration during migration.
 

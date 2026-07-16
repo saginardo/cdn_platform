@@ -55,6 +55,7 @@
             <button class="nav" data-view="logs">日志</button>
             <button class="nav" data-view="nodes">节点</button>
             <button class="nav" data-view="sites">站点</button>
+            <button class="nav" data-view="settings">设置</button>
           </nav>
           <button id="logout" class="sidebar-logout secondary hidden" title="退出登录">退出登录</button>
         </aside>
@@ -342,6 +343,7 @@
                       <div><dt>缓存</dt><dd id="site-summary-cache">--</dd></div>
                       <div><dt>请求体</dt><dd id="site-summary-body">--</dd></div>
                       <div><dt>空闲超时</dt><dd id="site-summary-timeout">--</dd></div>
+                      <div><dt>DNS TTL</dt><dd id="site-summary-dns-ttl">--</dd></div>
                       <div><dt>节点</dt><dd id="site-summary-nodes">--</dd></div>
                       <div><dt>TLS</dt><dd id="site-summary-tls">--</dd></div>
                       <div><dt>发布</dt><dd id="site-summary-publish">--</dd></div>
@@ -393,6 +395,10 @@
                           </select>
                         </label>
                         <label class="checkbox-label site-field-wide"><input id="site-passthrough" type="checkbox"> 透传模式（仅 HTTP(S)，禁用 Nginx 缓存）</label>
+                        <label class="checkbox-label site-field-wide"><input id="site-dns-ttl-inherit" type="checkbox" checked> 跟随全局 DNS TTL</label>
+                        <label id="site-dns-ttl-wrap" class="hidden">DNS TTL（秒）
+                          <input id="site-dns-ttl" type="number" min="60" max="300" step="1" value="60" inputmode="numeric">
+                        </label>
                       </div>
                     </section>
 
@@ -446,6 +452,68 @@
                   <button id="confirm-site-delete" type="button" class="danger">开始安全删除</button>
                 </div>
               </dialog>
+            </section>
+
+            <section id="settings" class="view hidden">
+              <div class="settings-page">
+                <div class="dashboard-heading">
+                  <div><h1 id="settings-title" tabindex="-1">设置</h1><p class="section-meta">控制面运行参数与外部集成</p></div>
+                </div>
+
+                <form id="dns-settings-form" class="settings-section">
+                  <div class="settings-section-heading">
+                    <div><h2>DNS</h2><span id="dns-settings-state" class="settings-source">--</span></div>
+                  </div>
+                  <div class="settings-fields">
+                    <label>全局默认 TTL（秒）
+                      <input id="settings-dns-ttl" type="number" min="60" max="300" step="1" value="60" inputmode="numeric" required>
+                    </label>
+                  </div>
+                  <div class="settings-actions"><button id="save-dns-settings" type="submit">保存 DNS 设置</button></div>
+                </form>
+
+                <form id="cloudflare-settings-form" class="settings-section">
+                  <div class="settings-section-heading">
+                    <div><h2>Cloudflare</h2><span id="cloudflare-settings-source" class="settings-source">--</span></div>
+                  </div>
+                  <div class="settings-fields">
+                    <label class="settings-field-wide">API Token
+                      <input id="settings-cloudflare-token" type="password" autocomplete="new-password">
+                    </label>
+                  </div>
+                  <div class="settings-actions">
+                    <button id="save-cloudflare-settings" type="submit">验证并保存</button>
+                    <button id="test-cloudflare-settings" class="secondary" type="button">验证当前配置</button>
+                    <button id="reset-cloudflare-settings" class="secondary" type="button">恢复环境变量</button>
+                  </div>
+                </form>
+
+                <form id="smtp-settings-form" class="settings-section">
+                  <div class="settings-section-heading">
+                    <div><h2>SMTP</h2><span id="smtp-settings-source" class="settings-source">--</span></div>
+                    <label class="checkbox-label"><input id="settings-smtp-enabled" type="checkbox"> 启用发信</label>
+                  </div>
+                  <div class="settings-fields">
+                    <label>服务器 <input id="settings-smtp-host" autocomplete="off"></label>
+                    <label>端口 <input id="settings-smtp-port" type="number" min="1" max="65535" step="1" value="587" inputmode="numeric"></label>
+                    <label>安全连接
+                      <select id="settings-smtp-security">
+                        <option value="starttls">STARTTLS</option>
+                        <option value="tls">隐式 TLS</option>
+                      </select>
+                    </label>
+                    <label>用户名 <input id="settings-smtp-username" autocomplete="username"></label>
+                    <label>密码 <input id="settings-smtp-password" type="password" autocomplete="new-password"></label>
+                    <label>发件人 <input id="settings-smtp-from" type="email" autocomplete="email"></label>
+                    <label class="settings-field-wide">收件人 <input id="settings-smtp-recipients" type="text" autocomplete="off" placeholder="ops@example.com, admin@example.com"></label>
+                  </div>
+                  <div class="settings-actions">
+                    <button id="save-smtp-settings" type="submit">保存 SMTP 设置</button>
+                    <button id="test-smtp-settings" class="secondary" type="button">发送测试邮件</button>
+                    <button id="reset-smtp-settings" class="secondary" type="button">恢复环境变量</button>
+                  </div>
+                </form>
+              </div>
             </section>
           </div>
         </div>

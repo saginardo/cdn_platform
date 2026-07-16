@@ -78,7 +78,12 @@ func (c CloudflareDNS) Reconcile(ctx context.Context, zoneID, owner string, desi
 				return fmt.Errorf("refusing to manage DNS name %s because record %s (%s) is not owned by %s", desiredRecord.Name, existingRecord.ID, recordTypeLabel(existingRecord), owner)
 			}
 		}
-		if _, found := managed[key]; found {
+		if existingRecord, found := managed[key]; found {
+			if existingRecord.TTL != desiredRecord.TTL || existingRecord.Proxied != desiredRecord.Proxied {
+				if err := c.updateRecord(ctx, zoneID, token, existingRecord.ID, desiredRecord); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if err := c.createRecord(ctx, zoneID, token, desiredRecord); err != nil {
@@ -91,6 +96,47 @@ func (c CloudflareDNS) Reconcile(ctx context.Context, zoneID, owner string, desi
 		}
 		if err := c.deleteRecord(ctx, zoneID, token, existingRecord.ID); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (c CloudflareDNS) ValidateToken(ctx context.Context, token string, zoneIDs []string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("Cloudflare API token is required")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+"/user/tokens/verify", nil)
+	if err != nil {
+		return err
+	}
+	response, err := c.doWithRetry(ctx, request, token)
+	if err != nil {
+		return fmt.Errorf("verify Cloudflare API token: %w", err)
+	}
+	var payload cloudflareResponse[struct {
+		Status string `json:"status"`
+	}]
+	decodeErr := json.NewDecoder(response.Body).Decode(&payload)
+	response.Body.Close()
+	if decodeErr != nil {
+		return decodeErr
+	}
+	if !payload.Success || payload.Result.Status != "active" {
+		return fmt.Errorf("Cloudflare API token is not active: %s", payload.message())
+	}
+	seen := make(map[string]struct{}, len(zoneIDs))
+	for _, zoneID := range zoneIDs {
+		zoneID = strings.TrimSpace(zoneID)
+		if zoneID == "" {
+			continue
+		}
+		if _, found := seen[zoneID]; found {
+			continue
+		}
+		seen[zoneID] = struct{}{}
+		if _, err := c.listRecords(ctx, zoneID, token, ""); err != nil {
+			return fmt.Errorf("read Cloudflare zone %s: %w", zoneID, err)
 		}
 	}
 	return nil
@@ -212,6 +258,33 @@ func (c CloudflareDNS) createRecord(ctx context.Context, zoneID, token string, r
 	}
 	if !payload.Success {
 		return fmt.Errorf("Cloudflare create DNS record: %s", payload.message())
+	}
+	return nil
+}
+
+func (c CloudflareDNS) updateRecord(ctx context.Context, zoneID, token, recordID string, record DNSRecord) error {
+	body, err := json.Marshal(struct {
+		Type string `json:"type"`
+		DNSRecord
+	}{Type: "A", DNSRecord: record})
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.baseURL()+"/zones/"+url.PathEscape(zoneID)+"/dns_records/"+url.PathEscape(recordID), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	response, err := c.doWithRetry(ctx, request, token)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	var payload cloudflareResponse[json.RawMessage]
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return err
+	}
+	if !payload.Success {
+		return fmt.Errorf("Cloudflare update DNS record: %s", payload.message())
 	}
 	return nil
 }

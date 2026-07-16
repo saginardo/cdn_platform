@@ -4,7 +4,6 @@ umask 077
 
 : "${CONTROL_TLS_DOMAIN:?CONTROL_TLS_DOMAIN is required}"
 : "${ACME_EMAIL:?ACME_EMAIL is required}"
-: "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required}"
 
 config_dir=/var/lib/cdn-control-tls
 logs_dir=/var/log/cdn-control-tls
@@ -13,13 +12,16 @@ live_dir="$config_dir/live/$CONTROL_TLS_DOMAIN"
 mode="${1:-issue}"
 
 mkdir -p "$config_dir" "$logs_dir" /tmp/certbot-work "$(dirname "$credentials")"
-printf 'dns_cloudflare_api_token = %s\n' "$CLOUDFLARE_API_TOKEN" >"$credentials"
-chmod 0600 "$credentials"
+
+write_credentials() {
+  cdn-control cloudflare-credentials "$credentials"
+}
 
 issue() {
   if [[ -s "$live_dir/fullchain.pem" && -s "$live_dir/privkey.pem" ]]; then
     return
   fi
+  write_credentials
   certbot certonly --non-interactive --agree-tos --email "$ACME_EMAIL" \
     --dns-cloudflare --dns-cloudflare-credentials "$credentials" \
     --config-dir "$config_dir" --work-dir /tmp/certbot-work --logs-dir "$logs_dir" \
@@ -27,6 +29,7 @@ issue() {
 }
 
 renew() {
+  write_credentials
   certbot renew --non-interactive --no-random-sleep-on-renew \
     --config-dir "$config_dir" --work-dir /tmp/certbot-work --logs-dir "$logs_dir" \
     --cert-name "$CONTROL_TLS_DOMAIN"

@@ -149,3 +149,87 @@ func TestCloudflareDNSRemoveNodeDeletesOnlyExactManagedRecords(t *testing.T) {
 		t.Fatalf("deleted records = %#v", deleted)
 	}
 }
+
+func TestCloudflareDNSUpdatesTTLWithoutReplacingRecord(t *testing.T) {
+	patches := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.Method {
+		case http.MethodGet:
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"success":     true,
+				"result":      []DNSRecord{{ID: "managed", Type: "A", Name: "cdn.example.test", Content: "203.0.113.10", Comment: "cdn-platform:site=site-1;node=node-1", TTL: 60}},
+				"result_info": map[string]any{"total_pages": 1},
+			})
+		case http.MethodPatch:
+			patches++
+			if !strings.HasSuffix(request.URL.Path, "/managed") {
+				t.Fatalf("PATCH path = %s", request.URL.Path)
+			}
+			var record DNSRecord
+			if err := json.NewDecoder(request.Body).Decode(&record); err != nil {
+				t.Fatal(err)
+			}
+			if record.TTL != 300 || record.Content != "203.0.113.10" || record.Comment == "" || record.Proxied {
+				t.Fatalf("PATCH record = %#v", record)
+			}
+			_ = json.NewEncoder(response).Encode(map[string]any{"success": true, "result": map[string]any{}})
+		default:
+			t.Fatalf("unexpected method %s", request.Method)
+		}
+	}))
+	defer server.Close()
+	dns := CloudflareDNS{BaseURL: server.URL, Token: func() (string, error) { return "token", nil }}
+	desired := []DNSRecord{{Name: "cdn.example.test", Content: "203.0.113.10", Comment: "cdn-platform:site=site-1;node=node-1", TTL: 300}}
+	if err := dns.Reconcile(context.Background(), "zone", "site=site-1", desired); err != nil {
+		t.Fatal(err)
+	}
+	if patches != 1 {
+		t.Fatalf("PATCH count = %d", patches)
+	}
+}
+
+func TestCloudflareDNSDoesNotWriteUnchangedTTL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			t.Fatalf("unexpected method %s", request.Method)
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"success":     true,
+			"result":      []DNSRecord{{ID: "managed", Type: "A", Name: "cdn.example.test", Content: "203.0.113.10", Comment: "cdn-platform:site=site-1;node=node-1", TTL: 120}},
+			"result_info": map[string]any{"total_pages": 1},
+		})
+	}))
+	defer server.Close()
+	dns := CloudflareDNS{BaseURL: server.URL, Token: func() (string, error) { return "token", nil }}
+	if err := dns.Reconcile(context.Background(), "zone", "site=site-1", []DNSRecord{{Name: "cdn.example.test", Content: "203.0.113.10", Comment: "cdn-platform:site=site-1;node=node-1", TTL: 120}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloudflareDNSValidatesTokenAndDistinctZones(t *testing.T) {
+	zoneReads := make(map[string]int)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer candidate" {
+			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		if request.URL.Path == "/user/tokens/verify" {
+			_ = json.NewEncoder(response).Encode(map[string]any{"success": true, "result": map[string]any{"status": "active"}})
+			return
+		}
+		if strings.HasSuffix(request.URL.Path, "/dns_records") {
+			parts := strings.Split(request.URL.Path, "/")
+			zoneReads[parts[2]]++
+			_ = json.NewEncoder(response).Encode(map[string]any{"success": true, "result": []DNSRecord{}, "result_info": map[string]any{"total_pages": 1}})
+			return
+		}
+		t.Fatalf("unexpected path %s", request.URL.Path)
+	}))
+	defer server.Close()
+	dns := CloudflareDNS{BaseURL: server.URL}
+	if err := dns.ValidateToken(context.Background(), "candidate", []string{"zone-a", "zone-b", "zone-a", ""}); err != nil {
+		t.Fatal(err)
+	}
+	if zoneReads["zone-a"] != 1 || zoneReads["zone-b"] != 1 || len(zoneReads) != 2 {
+		t.Fatalf("zone reads = %#v", zoneReads)
+	}
+}

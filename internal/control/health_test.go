@@ -116,13 +116,30 @@ func TestPendingSiteDraftDoesNotChangePublishedHealthOrDNS(t *testing.T) {
 	}
 	draft.Domains = []string{"draft.example.test"}
 	draft.Enabled = false
+	draftTTL := 300
+	draft.DNSTTLSeconds = &draftTTL
 	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewSettingsManager(database, cipher, EnvironmentSettings{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := settings.SaveDNSDefaultTTL(120); err != nil {
 		t.Fatal(err)
 	}
 	probedDomain := ""
 	dns := &MemoryDNS{}
 	manager := HealthManager{
-		Server: &Server{Store: database, DNS: dns},
+		Server: &Server{Store: database, DNS: dns, Settings: settings},
 		Client: healthyNodeClient(),
 		SiteProbe: func(_ context.Context, published domain.Site, _ domain.Node) (bool, string) {
 			probedDomain = published.Domains[0]
@@ -136,7 +153,7 @@ func TestPendingSiteDraftDoesNotChangePublishedHealthOrDNS(t *testing.T) {
 		t.Fatalf("health probe used draft domain %q", probedDomain)
 	}
 	records := dns.Zones["zone-1"]
-	if len(records) != 1 || records[0].Name != "old.example.test" || records[0].Content != node.PublicIPv4 {
+	if len(records) != 1 || records[0].Name != "old.example.test" || records[0].Content != node.PublicIPv4 || records[0].TTL != 120 {
 		t.Fatalf("DNS did not retain the published snapshot: %#v", records)
 	}
 }

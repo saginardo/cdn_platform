@@ -208,10 +208,16 @@ func (m *HealthManager) reconcileSite(ctx context.Context, site domain.Site, nod
 	}
 	m.clearNoHealthyAlert(site.ID)
 	desired := make([]integrations.DNSRecord, 0, len(healthy)*len(site.Domains))
+	ttl := domain.DefaultDNSTTLSeconds
+	if m.Server.Settings != nil {
+		ttl = m.Server.Settings.DNSTTL(site)
+	} else if site.DNSTTLSeconds != nil {
+		ttl = *site.DNSTTLSeconds
+	}
 	for _, node := range healthy {
 		for _, domainName := range site.Domains {
 			desired = append(desired, integrations.DNSRecord{
-				Name: domainName, Content: node.PublicIPv4, TTL: 60, Proxied: false,
+				Name: domainName, Content: node.PublicIPv4, TTL: ttl, Proxied: false,
 				Comment: integrations.ManagedRecordPrefix + "site=" + site.ID + ";node=" + node.ID,
 			})
 		}

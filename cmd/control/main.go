@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -32,6 +34,10 @@ func main() {
 		publishAll()
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "cloudflare-credentials" {
+		writeCloudflareCredentials(os.Args[2])
+		return
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	dataDir := env("CONTROL_DATA_DIR", "/var/lib/cdn-platform")
 	key := os.Getenv("CONTROL_ENCRYPTION_KEY")
@@ -51,15 +57,16 @@ func main() {
 	if err != nil {
 		fatal("load internal CA: " + err.Error())
 	}
-	cloudflareToken := os.Getenv("CLOUDFLARE_API_TOKEN")
-	token := func() (string, error) {
-		if cloudflareToken == "" {
-			return "", fmt.Errorf("CLOUDFLARE_API_TOKEN is not configured")
-		}
-		return cloudflareToken, nil
+	environment, err := settingsFromEnv()
+	if err != nil {
+		fatal(err.Error())
 	}
-	dns := integrations.CloudflareDNS{Token: token}
-	issuer := integrations.CertbotDNSIssuer{Email: os.Getenv("ACME_EMAIL"), ConfigDir: filepath.Join(dataDir, "letsencrypt"), Token: token}
+	settings, err := control.NewSettingsManager(database, cipher, environment)
+	if err != nil {
+		fatal("load settings: " + err.Error())
+	}
+	dns := &integrations.CloudflareDNS{Token: settings.CloudflareToken}
+	issuer := integrations.CertbotDNSIssuer{Email: os.Getenv("ACME_EMAIL"), ConfigDir: filepath.Join(dataDir, "letsencrypt"), Token: settings.CloudflareToken}
 	var logs logstore.Store = logstore.Noop{}
 	if os.Getenv("CLICKHOUSE_DISABLED") != "1" {
 		clickhouse := logstore.ClickHouse{Endpoint: env("CLICKHOUSE_URL", "http://127.0.0.1:8123"), Database: env("CLICKHOUSE_DATABASE", "cdn_platform"), Username: os.Getenv("CLICKHOUSE_USER"), Password: os.Getenv("CLICKHOUSE_PASSWORD")}
@@ -69,7 +76,7 @@ func main() {
 		logs = clickhouse
 	}
 	publisher := control.Publisher{Store: database, Cipher: cipher}
-	notifier := notifierFromEnv()
+	var notifier integrations.Notifier = settings
 	issueTimeout := 10 * time.Minute
 	if value := strings.TrimSpace(os.Getenv("CERTIFICATE_ISSUE_TIMEOUT")); value != "" {
 		issueTimeout, err = time.ParseDuration(value)
@@ -93,7 +100,7 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
+	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Cloudflare: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Settings: settings, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	healthManager := &control.HealthManager{Server: server}
@@ -147,12 +154,81 @@ func publishAll() {
 	}
 }
 
-func notifierFromEnv() integrations.Notifier {
-	to := split(os.Getenv("SMTP_TO"))
-	if len(to) == 0 {
-		return integrations.NoopNotifier{}
+func writeCloudflareCredentials(path string) {
+	token := strings.TrimSpace(os.Getenv("CLOUDFLARE_API_TOKEN"))
+	dataDir := env("CONTROL_DATA_DIR", "/var/lib/cdn-platform")
+	ciphertext, err := store.ReadSecret(filepath.Join(dataDir, "control.db"), store.SecretCloudflareAPIToken)
+	if err == nil {
+		key := os.Getenv("CONTROL_ENCRYPTION_KEY")
+		if key == "" {
+			fatal("CONTROL_ENCRYPTION_KEY is required to decrypt the Cloudflare API token")
+		}
+		cipher, err := control.NewCipher(key)
+		if err != nil {
+			fatal(err.Error())
+		}
+		plaintext, err := cipher.Decrypt(ciphertext)
+		if err != nil {
+			fatal("decrypt Cloudflare API token: " + err.Error())
+		}
+		token = strings.TrimSpace(string(plaintext))
+	} else if !errors.Is(err, store.ErrNotFound) {
+		fatal("read Cloudflare API token: " + err.Error())
 	}
-	return integrations.SMTPNotifier{Host: os.Getenv("SMTP_HOST"), Port: env("SMTP_PORT", "587"), Username: os.Getenv("SMTP_USER"), Password: os.Getenv("SMTP_PASSWORD"), From: os.Getenv("SMTP_FROM"), To: to, StartTLS: true}
+	if token == "" || strings.ContainsAny(token, "\r\n") {
+		fatal("CLOUDFLARE_API_TOKEN is not configured")
+	}
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".cloudflare-credentials-*")
+	if err != nil {
+		fatal("create Cloudflare credentials: " + err.Error())
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		fatal("secure Cloudflare credentials: " + err.Error())
+	}
+	if _, err := fmt.Fprintf(temporary, "dns_cloudflare_api_token = %s\n", token); err != nil {
+		temporary.Close()
+		fatal("write Cloudflare credentials: " + err.Error())
+	}
+	if err := temporary.Close(); err != nil {
+		fatal("close Cloudflare credentials: " + err.Error())
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		fatal("install Cloudflare credentials: " + err.Error())
+	}
+}
+
+func settingsFromEnv() (control.EnvironmentSettings, error) {
+	recipients := split(os.Getenv("SMTP_TO"))
+	security := strings.ToLower(env("SMTP_SECURITY", integrations.SMTPSecurityStartTLS))
+	if security != integrations.SMTPSecurityStartTLS && security != integrations.SMTPSecurityTLS {
+		if len(recipients) != 0 {
+			return control.EnvironmentSettings{}, fmt.Errorf("SMTP_SECURITY must be starttls or tls")
+		}
+		security = integrations.SMTPSecurityStartTLS
+	}
+	port := 587
+	if security == integrations.SMTPSecurityTLS {
+		port = 465
+	}
+	if value := strings.TrimSpace(os.Getenv("SMTP_PORT")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 1 || parsed > 65535 {
+			if len(recipients) != 0 {
+				return control.EnvironmentSettings{}, fmt.Errorf("SMTP_PORT must be between 1 and 65535")
+			}
+		} else {
+			port = parsed
+		}
+	}
+	return control.EnvironmentSettings{
+		CloudflareAPIToken: os.Getenv("CLOUDFLARE_API_TOKEN"),
+		SMTP:               control.SMTPProfile{Enabled: len(recipients) != 0, Host: os.Getenv("SMTP_HOST"), Port: port, Username: os.Getenv("SMTP_USER"), FromAddress: os.Getenv("SMTP_FROM"), Recipients: recipients, Security: security},
+		SMTPPassword:       os.Getenv("SMTP_PASSWORD"),
+	}, nil
 }
 func env(name, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(name)); value != "" {

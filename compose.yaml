@@ -45,6 +45,7 @@ services:
       TZ: Asia/Shanghai
       CERTBOT_CREDENTIALS_PATH: /tmp/cloudflare.ini
     volumes:
+      - ./data/control:/var/lib/cdn-platform:ro
       - ./data/control-tls:/var/lib/cdn-control-tls
       - ./logs/certbot-control:/var/log/cdn-control-tls
     tmpfs:
@@ -95,6 +96,7 @@ services:
       control-cert-bootstrap:
         condition: service_completed_successfully
     volumes:
+      - ./data/control:/var/lib/cdn-platform:ro
       - ./data/control-tls:/var/lib/cdn-control-tls
       - ./logs/certbot-control:/var/log/cdn-control-tls
     tmpfs:

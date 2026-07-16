@@ -35,6 +35,7 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 		"opt/cdn-edge/data/edge-client.crt",
 		"opt/cdn-edge/data/edge-ca.crt",
 		"opt/cdn-edge/systemd/cdn-edge-agent.service",
+		"opt/cdn-edge/systemd/cdn-edge-updater@.service",
 	} {
 		harness.requirePath(t, path)
 	}
@@ -42,6 +43,7 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 	harness.requireLink(t, "etc/nginx/conf.d/cdn-platform.conf", "opt/cdn-edge/config/nginx/cdn-platform.conf")
 	harness.requirePath(t, "etc/nginx/modules-enabled/99-cdn-platform-stream.conf")
 	harness.requireLink(t, "etc/systemd/system/cdn-edge-agent.service", "opt/cdn-edge/systemd/cdn-edge-agent.service")
+	harness.requireLink(t, "etc/systemd/system/cdn-edge-updater@.service", "opt/cdn-edge/systemd/cdn-edge-updater@.service")
 	harness.requireContents(t, "opt/cdn-edge/bin/cdn-edge-agent", "edge-binary-v1")
 	if configuration := harness.read(t, "opt/cdn-edge/config/nginx/cdn-platform.conf"); !strings.Contains(configuration, "location = /__cdn_health") {
 		t.Fatalf("fresh install did not create the health-only Nginx configuration:\n%s", configuration)
@@ -147,6 +149,32 @@ func TestInstallEdgeScriptUpgradesNewLayoutIdempotently(t *testing.T) {
 	}
 }
 
+func TestInstallEdgeScriptOnlineUpgradeWaitsForAgentReadiness(t *testing.T) {
+	harness := newInstallHarness(t)
+	if output, err := harness.run(t, "first-token", "edge-binary-v1", ""); err != nil {
+		t.Fatalf("first install failed: %v\n%s", err, output)
+	}
+	output, err := harness.runOnline(t, "edge-binary-v2", "")
+	if err != nil {
+		t.Fatalf("online upgrade failed: %v\n%s", err, output)
+	}
+	harness.requireContents(t, "opt/cdn-edge/bin/cdn-edge-agent", "edge-binary-v2")
+	harness.requireLink(t, "etc/systemd/system/cdn-edge-updater@.service", "opt/cdn-edge/systemd/cdn-edge-updater@.service")
+}
+
+func TestInstallEdgeScriptOnlineUpgradeRollsBackWithoutReadiness(t *testing.T) {
+	harness := newInstallHarness(t)
+	if output, err := harness.run(t, "first-token", "edge-binary-v1", ""); err != nil {
+		t.Fatalf("first install failed: %v\n%s", err, output)
+	}
+	output, err := harness.runOnline(t, "edge-binary-v2", "readiness")
+	if err == nil || !strings.Contains(output, "did not confirm a control-plane heartbeat") {
+		t.Fatalf("online upgrade without readiness was not rejected: %v\n%s", err, output)
+	}
+	harness.requireContents(t, "opt/cdn-edge/bin/cdn-edge-agent", "edge-binary-v1")
+	harness.requireLink(t, "etc/systemd/system/cdn-edge-agent.service", "opt/cdn-edge/systemd/cdn-edge-agent.service")
+}
+
 func TestInstallEdgeScriptRestoresLegacyNginxAfterRestartFailure(t *testing.T) {
 	harness := newInstallHarness(t)
 	harness.seedLegacy(t)
@@ -215,22 +243,24 @@ server {
 `
 
 type installHarness struct {
-	root        string
-	mockBin     string
-	logPath     string
-	binaryPath  string
-	servicePath string
+	root               string
+	mockBin            string
+	logPath            string
+	binaryPath         string
+	servicePath        string
+	updaterServicePath string
 }
 
 func newInstallHarness(t *testing.T) *installHarness {
 	t.Helper()
 	root := t.TempDir()
 	harness := &installHarness{
-		root:        root,
-		mockBin:     filepath.Join(root, "mock-bin"),
-		logPath:     filepath.Join(root, "mock.log"),
-		binaryPath:  filepath.Join(root, "download-binary"),
-		servicePath: filepath.Join(root, "download-service"),
+		root:               root,
+		mockBin:            filepath.Join(root, "mock-bin"),
+		logPath:            filepath.Join(root, "mock.log"),
+		binaryPath:         filepath.Join(root, "download-binary"),
+		servicePath:        filepath.Join(root, "download-service"),
+		updaterServicePath: filepath.Join(root, "download-updater-service"),
 	}
 	for _, directory := range []string{"tmp", "run", "mock-bin", "etc/nginx/conf.d", "etc/nginx/sites-enabled", "etc/systemd/system"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
@@ -238,6 +268,9 @@ func newInstallHarness(t *testing.T) *installHarness {
 		}
 	}
 	if err := os.WriteFile(harness.servicePath, []byte(bootstrapEdgeService), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(harness.updaterServicePath, []byte(bootstrapEdgeUpdaterService), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	harness.writeMock(t, "curl", `#!/usr/bin/env bash
@@ -256,6 +289,7 @@ if [[ -z "$output" ]]; then exit 0; fi
 case "$url" in
   https://downloads.example.test/edge) cp "$MOCK_BINARY" "$output" ;;
   https://edge-control.example.test/install-edge.service) cp "$MOCK_SERVICE" "$output" ;;
+	  https://edge-control.example.test/install-edge-updater.service) cp "$MOCK_UPDATER_SERVICE" "$output" ;;
   *) echo "unexpected URL: $url" >&2; exit 1 ;;
 esac
 `)
@@ -310,6 +344,10 @@ case "$command" in
           [[ -s "$root/opt/cdn-edge/data/$file" ]] || printf '%s\n' "$file" >"$root/opt/cdn-edge/data/$file"
         done
       fi
+	  if [[ -n "${MOCK_READINESS_FILE:-}" && "${MOCK_FAILURE:-}" != "readiness" ]]; then
+		mkdir -p "$(dirname "$MOCK_READINESS_FILE")"
+		shasum -a 256 "$MOCK_BINARY" | awk '{print $1}' >"$MOCK_READINESS_FILE"
+	  fi
     fi
     ;;
   reload)
@@ -358,7 +396,10 @@ func (h *installHarness) run(t *testing.T, token, binary, failure string) (strin
 	if token != "" {
 		arguments = append(arguments, "--enrollment-token", token)
 	}
-	arguments = append(arguments, "--binary-url", "https://downloads.example.test/edge", "--binary-sha256", digest)
+	serviceDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(bootstrapEdgeService)))
+	updaterServiceDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(bootstrapEdgeUpdaterService)))
+	arguments = append(arguments, "--binary-url", "https://downloads.example.test/edge", "--binary-sha256", digest,
+		"--service-sha256", serviceDigest, "--updater-service-sha256", updaterServiceDigest)
 	command := exec.Command("bash", arguments...)
 	command.Stdin = strings.NewReader(bootstrapEdgeScript)
 	command.Env = []string{
@@ -367,6 +408,43 @@ func (h *installHarness) run(t *testing.T, token, binary, failure string) (strin
 		"MOCK_LOG=" + h.logPath,
 		"MOCK_BINARY=" + h.binaryPath,
 		"MOCK_SERVICE=" + h.servicePath,
+		"MOCK_UPDATER_SERVICE=" + h.updaterServicePath,
+		"MOCK_READINESS_FILE=",
+		"MOCK_FAILURE=" + failure,
+	}
+	output, err := command.CombinedOutput()
+	return string(output), err
+}
+
+func (h *installHarness) runOnline(t *testing.T, binary, failure string) (string, error) {
+	t.Helper()
+	if err := os.WriteFile(h.binaryPath, []byte(binary), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(binary)))
+	serviceDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(bootstrapEdgeService)))
+	updaterServiceDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(bootstrapEdgeUpdaterService)))
+	readinessPath := filepath.Join(h.root, "opt/cdn-edge/data/upgrades/online-test/ready")
+	if err := os.MkdirAll(filepath.Dir(readinessPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	arguments := []string{
+		"-s", "--", "--control-url", "https://edge-control.example.test",
+		"--binary-file", h.binaryPath, "--binary-sha256", digest,
+		"--service-file", h.servicePath, "--service-sha256", serviceDigest,
+		"--updater-service-file", h.updaterServicePath, "--updater-service-sha256", updaterServiceDigest,
+		"--readiness-file", readinessPath,
+	}
+	command := exec.Command("bash", arguments...)
+	command.Stdin = strings.NewReader(bootstrapEdgeScript)
+	command.Env = []string{
+		"PATH=" + h.mockBin + ":/usr/bin:/bin",
+		"CDN_EDGE_INSTALL_ROOT=" + h.root,
+		"MOCK_LOG=" + h.logPath,
+		"MOCK_BINARY=" + h.binaryPath,
+		"MOCK_SERVICE=" + h.servicePath,
+		"MOCK_UPDATER_SERVICE=" + h.updaterServicePath,
+		"MOCK_READINESS_FILE=" + readinessPath,
 		"MOCK_FAILURE=" + failure,
 	}
 	output, err := command.CombinedOutput()

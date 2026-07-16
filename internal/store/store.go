@@ -19,13 +19,16 @@ import (
 )
 
 var (
-	ErrNotFound       = errors.New("not found")
-	ErrTokenInvalid   = errors.New("enrollment token is invalid or expired")
-	ErrCacheDisabled  = errors.New("site cache is disabled for passthrough or TCP-only sites")
-	ErrNodeAssigned   = errors.New("node is still assigned to a site")
-	ErrSiteDeleting   = errors.New("site deletion is in progress")
-	ErrSiteTaskActive = errors.New("site has an active publish or certificate task")
-	ErrSiteChanged    = errors.New("site changed while publication was being prepared; retry publish")
+	ErrNotFound             = errors.New("not found")
+	ErrTokenInvalid         = errors.New("enrollment token is invalid or expired")
+	ErrCacheDisabled        = errors.New("site cache is disabled for passthrough or TCP-only sites")
+	ErrNodeAssigned         = errors.New("node is still assigned to a site")
+	ErrSiteDeleting         = errors.New("site deletion is in progress")
+	ErrSiteTaskActive       = errors.New("site has an active publish or certificate task")
+	ErrSiteChanged          = errors.New("site changed while publication was being prepared; retry publish")
+	ErrNodeUpgradeActive    = errors.New("node has an active online upgrade")
+	ErrNodeOperationActive  = errors.New("node has an active publish, deletion, or uninstall operation")
+	ErrUpgradeRetryNotReady = errors.New("edge has not confirmed that the previous local upgrade stopped")
 )
 
 type Store struct {
@@ -84,9 +87,11 @@ CREATE TABLE IF NOT EXISTS nodes (
   status TEXT NOT NULL,
 	capabilities_json TEXT NOT NULL DEFAULT '[]',
   cert_fingerprint TEXT,
-  last_heartbeat_at TEXT,
-  applied_version INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT NOT NULL DEFAULT '',
+	  last_heartbeat_at TEXT,
+	  applied_version INTEGER NOT NULL DEFAULT 0,
+	  agent_sha256 TEXT NOT NULL DEFAULT '',
+	  active_upgrade_task_id TEXT NOT NULL DEFAULT '',
+	  last_error TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -254,14 +259,36 @@ CREATE TABLE IF NOT EXISTS node_uninstall_jobs (
   started_at TEXT,
   completed_at TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
+	  updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS node_upgrade_tasks (
+	  id TEXT PRIMARY KEY,
+	  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+	  status TEXT NOT NULL,
+	  source_sha256 TEXT NOT NULL DEFAULT '',
+	  target_sha256 TEXT NOT NULL,
+	  binary_url TEXT NOT NULL,
+	  installer_url TEXT NOT NULL,
+	  installer_sha256 TEXT NOT NULL,
+	  agent_service_url TEXT NOT NULL,
+	  agent_service_sha256 TEXT NOT NULL,
+	  updater_service_url TEXT NOT NULL,
+	  updater_service_sha256 TEXT NOT NULL,
+	  error_code TEXT NOT NULL DEFAULT '',
+	  detail TEXT NOT NULL DEFAULT '',
+	  deadline_at TEXT NOT NULL,
+	  started_at TEXT,
+	  completed_at TEXT,
+	  created_at TEXT NOT NULL,
+	  updated_at TEXT NOT NULL
+	);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON deployment_tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_publish_task_nodes_node ON publish_task_nodes(node_id, status);
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
-CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id);
-`)
+	CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id);
+	CREATE INDEX IF NOT EXISTS idx_node_upgrade_tasks_node ON node_upgrade_tasks(node_id, created_at DESC);
+	`)
 	if err != nil {
 		return err
 	}
@@ -280,6 +307,8 @@ CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id
 	}
 	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN applied_version INTEGER NOT NULL DEFAULT 0`)
 	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]'`)
+	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN agent_sha256 TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN active_upgrade_task_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE deployment_tasks ADD COLUMN deadline_at TEXT`)
 	// JSON null distinguishes pre-capability HTTP states from an intentional
 	// empty listener set. New publishers always persist an explicit array.
@@ -316,6 +345,11 @@ CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id
 		ON deployment_tasks(site_id)
 		WHERE kind = 'delete_site' AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
 		return fmt.Errorf("create active site deletion task index: %w", err)
+	}
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_node_upgrade_tasks_active
+		ON node_upgrade_tasks(node_id)
+		WHERE status IN ('queued', 'applying')`); err != nil {
+		return fmt.Errorf("create active node upgrade index: %w", err)
 	}
 	if err := s.backfillSitePublications(); err != nil {
 		return err
@@ -552,11 +586,11 @@ func (s *Store) CreateNode(name, publicIPv4 string) (domain.Node, error) {
 }
 
 func (s *Store) GetNode(id string) (domain.Node, error) {
-	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, capabilities_json, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
+	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, capabilities_json, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
 }
 
 func (s *Store) ListNodes() ([]domain.Node, error) {
-	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, capabilities_json, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, capabilities_json, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -579,7 +613,7 @@ func scanNode(row scanner) (domain.Node, error) {
 	var capabilities string
 	var heartbeat sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &capabilities, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
+	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &capabilities, &node.AgentSHA256, &node.ActiveUpgradeID, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Node{}, ErrNotFound
 	}
@@ -763,6 +797,10 @@ func (s *Store) NodeIDByFingerprint(fingerprint string) (string, error) {
 }
 
 func (s *Store) Heartbeat(nodeID string, appliedVersion int64, lastError string, report *domain.ApplyReport) error {
+	return s.HeartbeatWithAgent(nodeID, appliedVersion, lastError, report, "", "")
+}
+
+func (s *Store) HeartbeatWithAgent(nodeID string, appliedVersion int64, lastError string, report *domain.ApplyReport, agentSHA256, activeUpgradeID string) error {
 	// Record a structured apply result before advancing applied_version. The
 	// latter is a compatibility signal for old agents, and a concurrent health
 	// reconciliation could otherwise consume it first and replace the richer
@@ -773,7 +811,11 @@ func (s *Store) Heartbeat(nodeID string, appliedVersion int64, lastError string,
 		}
 	}
 	status := domain.NodeActive
-	result, err := s.db.Exec(`UPDATE nodes SET status = CASE WHEN status = ? THEN ? ELSE status END, last_heartbeat_at = ?, applied_version = CASE WHEN ? > applied_version THEN ? ELSE applied_version END, last_error = ?, updated_at = ? WHERE id = ?`, domain.NodePending, status, stamp(now()), appliedVersion, appliedVersion, lastError, stamp(now()), nodeID)
+	result, err := s.db.Exec(`UPDATE nodes SET status = CASE WHEN status = ? THEN ? ELSE status END,
+		last_heartbeat_at = ?, applied_version = CASE WHEN ? > applied_version THEN ? ELSE applied_version END,
+		agent_sha256 = CASE WHEN ? = '' THEN agent_sha256 ELSE ? END, active_upgrade_task_id = ?,
+		last_error = ?, updated_at = ? WHERE id = ?`, domain.NodePending, status, stamp(now()), appliedVersion, appliedVersion,
+		agentSHA256, agentSHA256, activeUpgradeID, lastError, stamp(now()), nodeID)
 	if err != nil {
 		return err
 	}
@@ -977,7 +1019,7 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 		return ErrUninstallActive
 	}
 	if status == domain.NodeRevoked {
-		result, err := tx.Exec(`UPDATE nodes SET status = ?, cert_fingerprint = NULL, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
+		result, err := tx.Exec(`UPDATE nodes SET status = ?, cert_fingerprint = NULL, active_upgrade_task_id = '', updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
 		if err != nil {
 			return err
 		}
@@ -993,6 +1035,12 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 		}
 		if _, err := tx.Exec(`UPDATE node_uninstall_jobs SET previous_status = ?, updated_at = ? WHERE node_id = ? AND status IN (?, ?, ?, ?)`,
 			status, stamp(now()), nodeID, NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE node_upgrade_tasks SET status = ?, error_code = 'authorization_revoked',
+			detail = 'node authorization was revoked during online upgrade', completed_at = ?, updated_at = ?
+			WHERE node_id = ? AND status IN (?, ?)`, domain.NodeUpgradeFailed, stamp(now()), stamp(now()), nodeID,
+			domain.NodeUpgradeQueued, domain.NodeUpgradeApplying); err != nil {
 			return err
 		}
 	} else {

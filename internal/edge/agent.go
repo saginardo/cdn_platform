@@ -38,17 +38,20 @@ type Config struct {
 	CAPath                string
 	AccessLogPath         string
 	Capabilities          []string
+	AgentSHA256           string
 	PollInterval          time.Duration
 	ListenerSettleTimeout time.Duration
 	ListenerPollInterval  time.Duration
 	HTTPClient            *http.Client
 	Runner                Runner
+	UpgradeRunner         UpgradeRunner
 }
 
 type Agent struct {
-	Config          Config
-	logs            *LogForwarder
-	lastApplyReport *domain.ApplyReport
+	Config           Config
+	logs             *LogForwarder
+	lastApplyReport  *domain.ApplyReport
+	lastUpgradeError string
 }
 
 func New(config Config) (*Agent, error) {
@@ -93,6 +96,17 @@ func New(config Config) (*Agent, error) {
 	if config.Runner == nil {
 		config.Runner = NginxRunner{}
 	}
+	if config.UpgradeRunner == nil {
+		config.UpgradeRunner = SystemdUpgradeRunner{}
+	}
+	if strings.TrimSpace(config.AgentSHA256) == "" {
+		config.AgentSHA256, err = executableSHA256()
+		if err != nil {
+			return nil, fmt.Errorf("calculate edge agent digest: %w", err)
+		}
+	}
+	config.AgentSHA256 = strings.ToLower(strings.TrimSpace(config.AgentSHA256))
+	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityOnlineUpgrade)
 	if err := os.MkdirAll(config.StateDir, 0o750); err != nil {
 		return nil, err
 	}
@@ -107,7 +121,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	for {
-		lastError := ""
+		lastError := a.lastUpgradeError
+		a.lastUpgradeError = ""
 		if err := a.renewIfNeeded(ctx); err != nil {
 			lastError = "renew edge certificate: " + err.Error()
 		}
@@ -122,6 +137,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		if err := a.Heartbeat(ctx, a.appliedVersion(), lastError, a.lastApplyReport); err == nil {
 			a.lastApplyReport = nil
+			_ = a.markUpgradeReady()
+			if err := a.ProcessUpgrade(ctx); err != nil {
+				a.lastUpgradeError = "process online upgrade: " + err.Error()
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -261,6 +280,7 @@ func (a *Agent) Heartbeat(ctx context.Context, appliedVersion int64, lastError s
 	payload, err := json.Marshal(map[string]any{
 		"last_error": lastError, "applied_version": appliedVersion, "apply_report": report,
 		"capabilities": append([]string(nil), a.Config.Capabilities...),
+		"agent_sha256": a.Config.AgentSHA256, "active_upgrade_task_id": a.activeUpgradeID(),
 	})
 	if err != nil {
 		return err

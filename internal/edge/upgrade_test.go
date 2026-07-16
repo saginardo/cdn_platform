@@ -1,0 +1,211 @@
+package edge
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"cdn-platform/internal/domain"
+	"github.com/google/uuid"
+)
+
+type fakeUpgradeRunner struct {
+	starts int
+	active bool
+	err    error
+}
+
+func (f *fakeUpgradeRunner) Start(string) error {
+	f.starts++
+	return f.err
+}
+
+func (f *fakeUpgradeRunner) Active(string) (bool, error) { return f.active, f.err }
+
+type upgradeRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f upgradeRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func TestAgentStagesOnlineUpgradeAndReportsResultAfterRestart(t *testing.T) {
+	stateDir := t.TempDir()
+	taskID := uuid.NewString()
+	sourceDigest := strings.Repeat("1", 64)
+	binary := []byte("new edge binary")
+	installer := []byte("#!/usr/bin/env bash\nexit 0\n")
+	service := []byte("agent service")
+	updaterService := []byte("updater service")
+	instruction := domain.NodeUpgradeInstruction{
+		TaskID: taskID, DeadlineAt: time.Now().Add(time.Hour),
+		Binary:         testUpgradeArtifact("https://control.example.test/binary", binary),
+		Installer:      testUpgradeArtifact("https://control.example.test/installer", installer),
+		AgentService:   testUpgradeArtifact("https://control.example.test/service", service),
+		UpdaterService: testUpgradeArtifact("https://control.example.test/updater", updaterService),
+	}
+	artifacts := map[string][]byte{"/binary": binary, "/installer": installer, "/service": service, "/updater": updaterService}
+	var reports []domain.NodeUpgradeReport
+	client := &http.Client{Transport: upgradeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/api/edge/v1/upgrade":
+			contents, _ := json.Marshal(instruction)
+			return upgradeHTTPResponse(http.StatusOK, contents), nil
+		case request.Method == http.MethodGet && artifacts[request.URL.Path] != nil:
+			return upgradeHTTPResponse(http.StatusOK, artifacts[request.URL.Path]), nil
+		case request.Method == http.MethodPost && request.URL.Path == "/api/edge/v1/upgrade-report":
+			var report domain.NodeUpgradeReport
+			if err := json.NewDecoder(request.Body).Decode(&report); err != nil {
+				return nil, err
+			}
+			reports = append(reports, report)
+			return upgradeHTTPResponse(http.StatusOK, []byte(`{"ok":true}`)), nil
+		default:
+			return upgradeHTTPResponse(http.StatusNotFound, nil), nil
+		}
+	})}
+	runner := &fakeUpgradeRunner{active: true}
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: stateDir, CertificateDir: stateDir + "/certs", AgentSHA256: sourceDigest, HTTPClient: client, UpgradeRunner: runner, Runner: &fakeRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.ProcessUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if runner.starts != 1 || agent.activeUpgradeID() != taskID || len(reports) != 1 || reports[0].Status != domain.NodeUpgradeApplying {
+		t.Fatalf("staged upgrade: starts=%d active=%q reports=%#v", runner.starts, agent.activeUpgradeID(), reports)
+	}
+	if contents, err := io.ReadAll(mustOpen(t, agent.upgradeDirectory(taskID)+"/cdn-edge-agent")); err != nil || string(contents) != string(binary) {
+		t.Fatalf("staged binary = %q, err=%v", contents, err)
+	}
+
+	upgraded, err := New(Config{ControlURL: "https://control.example.test", StateDir: stateDir, CertificateDir: stateDir + "/certs", AgentSHA256: instruction.Binary.SHA256, HTTPClient: client, UpgradeRunner: runner, Runner: &fakeRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.markUpgradeReady(); err != nil {
+		t.Fatal(err)
+	}
+	if ready, err := io.ReadAll(mustOpen(t, upgraded.upgradeDirectory(taskID)+"/ready")); err != nil || strings.TrimSpace(string(ready)) != instruction.Binary.SHA256 {
+		t.Fatalf("readiness = %q, err=%v", ready, err)
+	}
+	if err := writeLocalUpgradeReport(upgraded.upgradeDirectory(taskID), domain.NodeUpgradeReport{
+		TaskID: taskID, Status: domain.NodeUpgradeSucceeded, Detail: "complete", InstalledSHA256: instruction.Binary.SHA256,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.ProcessUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.activeUpgradeID() != "" || len(reports) != 2 || reports[1].Status != domain.NodeUpgradeSucceeded {
+		t.Fatalf("completed upgrade: active=%q reports=%#v", upgraded.activeUpgradeID(), reports)
+	}
+}
+
+func TestAgentRejectsUpgradeArtifactWithWrongDigest(t *testing.T) {
+	binary := []byte("tampered binary")
+	declaredBinary := []byte("expected binary")
+	instruction := domain.NodeUpgradeInstruction{
+		TaskID: uuid.NewString(), DeadlineAt: time.Now().Add(time.Hour),
+		Binary:         testUpgradeArtifact("https://control.example.test/binary", declaredBinary),
+		Installer:      testUpgradeArtifact("https://control.example.test/installer", []byte("installer")),
+		AgentService:   testUpgradeArtifact("https://control.example.test/service", []byte("service")),
+		UpdaterService: testUpgradeArtifact("https://control.example.test/updater", []byte("updater")),
+	}
+	var reports []domain.NodeUpgradeReport
+	client := &http.Client{Transport: upgradeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Path == "/api/edge/v1/upgrade" {
+			contents, _ := json.Marshal(instruction)
+			return upgradeHTTPResponse(http.StatusOK, contents), nil
+		}
+		if request.URL.Path == "/installer" {
+			return upgradeHTTPResponse(http.StatusOK, []byte("installer")), nil
+		}
+		if request.URL.Path == "/binary" {
+			return upgradeHTTPResponse(http.StatusOK, binary), nil
+		}
+		if request.URL.Path == "/api/edge/v1/upgrade-report" {
+			var report domain.NodeUpgradeReport
+			_ = json.NewDecoder(request.Body).Decode(&report)
+			reports = append(reports, report)
+			return upgradeHTTPResponse(http.StatusOK, []byte(`{}`)), nil
+		}
+		return upgradeHTTPResponse(http.StatusNotFound, nil), nil
+	})}
+	runner := &fakeUpgradeRunner{}
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: t.TempDir(), AgentSHA256: strings.Repeat("1", 64), HTTPClient: client, UpgradeRunner: runner, Runner: &fakeRunner{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = agent.ProcessUpgrade(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "SHA-256") || runner.starts != 0 || len(reports) != 1 || reports[0].Status != domain.NodeUpgradeFailed {
+		t.Fatalf("checksum failure: err=%v starts=%d reports=%#v", err, runner.starts, reports)
+	}
+}
+
+func TestUpgradeHelperRunsStagedInstallerAndPersistsSuccess(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CDN_EDGE_INSTALL_ROOT", root)
+	stateDir := root + "/opt/cdn-edge/data"
+	taskID := uuid.NewString()
+	directory := stateDir + "/upgrades/" + taskID
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binary := []byte("verified target binary")
+	artifact := testUpgradeArtifact("https://control.example.test/binary", binary)
+	manifest := localUpgradeManifest{ControlURL: "https://control.example.test", Instruction: domain.NodeUpgradeInstruction{TaskID: taskID, Binary: artifact}}
+	manifestContents, _ := json.Marshal(manifest)
+	if err := os.WriteFile(directory+"/manifest.json", manifestContents, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(directory+"/cdn-edge-agent", binary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	installer := `#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$CDN_EDGE_INSTALL_ROOT/opt/cdn-edge/bin"
+cp "$(dirname "$0")/cdn-edge-agent" "$CDN_EDGE_INSTALL_ROOT/opt/cdn-edge/bin/cdn-edge-agent"
+echo "staged installer completed"
+`
+	if err := os.WriteFile(directory+"/installer.sh", []byte(installer), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RunUpgradeHelper(stateDir, taskID); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(directory + "/result.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report domain.NodeUpgradeReport
+	if err := json.Unmarshal(contents, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Status != domain.NodeUpgradeSucceeded || report.InstalledSHA256 != artifact.SHA256 {
+		t.Fatalf("helper report = %#v", report)
+	}
+}
+
+func testUpgradeArtifact(rawURL string, contents []byte) domain.UpgradeArtifact {
+	return domain.UpgradeArtifact{URL: rawURL, SHA256: fmt.Sprintf("%x", sha256.Sum256(contents))}
+}
+
+func upgradeHTTPResponse(status int, contents []byte) *http.Response {
+	return &http.Response{StatusCode: status, Status: fmt.Sprintf("%d status", status), Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(contents)))}
+}
+
+func mustOpen(t *testing.T, path string) io.ReadCloser {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return file
+}

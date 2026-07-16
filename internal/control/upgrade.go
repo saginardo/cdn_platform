@@ -1,0 +1,210 @@
+package control
+
+import (
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"cdn-platform/internal/domain"
+	"cdn-platform/internal/store"
+	"github.com/google/uuid"
+)
+
+const (
+	nodeUpgradeHeartbeatFreshness = 10 * time.Minute
+	nodeUpgradeTimeout            = 30 * time.Minute
+)
+
+type nodeUpgradeStatusResponse struct {
+	domain.Node
+	TargetAgentSHA256 string                  `json:"target_agent_sha256,omitempty"`
+	UpgradeCapable    bool                    `json:"upgrade_capable"`
+	UpgradeUpToDate   bool                    `json:"upgrade_up_to_date"`
+	CanUpgrade        bool                    `json:"can_upgrade"`
+	UpgradeBlocker    string                  `json:"upgrade_blocker,omitempty"`
+	UpgradeTask       *domain.NodeUpgradeTask `json:"upgrade_task,omitempty"`
+}
+
+func (s *Server) buildNodeUpgradeStatus(node domain.Node) (nodeUpgradeStatusResponse, error) {
+	result := nodeUpgradeStatusResponse{Node: node, TargetAgentSHA256: strings.ToLower(strings.TrimSpace(s.EdgeBinarySHA256))}
+	for _, capability := range node.Capabilities {
+		if capability == domain.EdgeCapabilityOnlineUpgrade {
+			result.UpgradeCapable = true
+			break
+		}
+	}
+	if task, err := s.Store.LatestNodeUpgrade(node.ID); err == nil {
+		result.UpgradeTask = &task
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return result, err
+	}
+	result.UpgradeUpToDate = validSHA256Digest(node.AgentSHA256) && strings.EqualFold(node.AgentSHA256, result.TargetAgentSHA256)
+	if result.UpgradeTask != nil && (result.UpgradeTask.Status == domain.NodeUpgradeQueued || result.UpgradeTask.Status == domain.NodeUpgradeApplying) {
+		result.UpgradeBlocker = "节点升级正在进行"
+		return result, nil
+	}
+	if result.UpgradeUpToDate {
+		result.UpgradeBlocker = "节点已是主控当前版本"
+		return result, nil
+	}
+	if node.Status != domain.NodeActive && node.Status != domain.NodeDraining {
+		result.UpgradeBlocker = "仅运行中或已暂停的节点可以在线升级"
+		return result, nil
+	}
+	if !result.UpgradeCapable || !validSHA256Digest(node.AgentSHA256) {
+		result.UpgradeBlocker = "需要先手动执行一次部署/升级命令以启用在线升级"
+		return result, nil
+	}
+	if node.LastHeartbeatAt == nil || node.LastHeartbeatAt.Before(time.Now().UTC().Add(-nodeUpgradeHeartbeatFreshness)) {
+		result.UpgradeBlocker = "节点心跳已过期"
+		return result, nil
+	}
+	if node.ActiveUpgradeID != "" {
+		result.UpgradeBlocker = "节点仍在清理上一次本地升级任务"
+		return result, nil
+	}
+	if err := s.validateNodeUpgradeArtifacts(); err != nil {
+		result.UpgradeBlocker = err.Error()
+		return result, nil
+	}
+	if active, err := s.Store.HasActiveNodeUninstall(node.ID); err != nil {
+		return result, err
+	} else if active {
+		result.UpgradeBlocker = "节点卸载流程正在进行"
+		return result, nil
+	}
+	if active, err := s.Store.HasActiveNodePublication(node.ID); err != nil {
+		return result, err
+	} else if active {
+		result.UpgradeBlocker = "节点正在确认站点配置"
+		return result, nil
+	}
+	result.CanUpgrade = true
+	return result, nil
+}
+
+func (s *Server) validateNodeUpgradeArtifacts() error {
+	if !validHTTPSURL(s.edgeControlURL()) || !validHTTPSURL(s.EdgeBinaryURL) || !validSHA256Digest(strings.TrimSpace(s.EdgeBinarySHA256)) {
+		return errors.New("主控尚未配置有效的边缘升级制品")
+	}
+	return nil
+}
+
+func (s *Server) nodeUpgradeInstruction() domain.NodeUpgradeInstruction {
+	baseURL := strings.TrimRight(s.edgeControlURL(), "/")
+	return domain.NodeUpgradeInstruction{
+		Binary:         domain.UpgradeArtifact{URL: s.EdgeBinaryURL, SHA256: strings.ToLower(strings.TrimSpace(s.EdgeBinarySHA256))},
+		Installer:      domain.UpgradeArtifact{URL: baseURL + "/install-edge.sh", SHA256: resourceSHA256(bootstrapEdgeScript)},
+		AgentService:   domain.UpgradeArtifact{URL: baseURL + "/install-edge.service", SHA256: resourceSHA256(bootstrapEdgeService)},
+		UpdaterService: domain.UpgradeArtifact{URL: baseURL + "/install-edge-updater.service", SHA256: resourceSHA256(bootstrapEdgeUpdaterService)},
+	}
+}
+
+func resourceSHA256(value string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
+}
+
+func (s *Server) nodeUpgradeStatus(response http.ResponseWriter, request *http.Request) {
+	if err := s.Store.ReconcileNodeUpgrades(); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	node, err := s.Store.GetNode(request.PathValue("id"))
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	status, err := s.buildNodeUpgradeStatus(node)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) startNodeUpgrade(response http.ResponseWriter, request *http.Request) {
+	if err := s.Store.ReconcileNodeUpgrades(); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	node, err := s.Store.GetNode(request.PathValue("id"))
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	status, err := s.buildNodeUpgradeStatus(node)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	if status.UpgradeTask != nil && (status.UpgradeTask.Status == domain.NodeUpgradeQueued || status.UpgradeTask.Status == domain.NodeUpgradeApplying) {
+		writeJSON(response, http.StatusOK, status)
+		return
+	}
+	if !status.CanUpgrade {
+		writeJSON(response, http.StatusConflict, map[string]any{"error": status.UpgradeBlocker, "upgrade": status})
+		return
+	}
+	instruction := s.nodeUpgradeInstruction()
+	task, created, err := s.Store.CreateOrGetNodeUpgrade(node.ID, instruction, time.Now().UTC().Add(nodeUpgradeTimeout))
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	status.UpgradeTask = &task
+	status.CanUpgrade = false
+	status.UpgradeBlocker = "节点升级正在进行"
+	if created {
+		s.audit(request, adminID(request.Context()), "start_upgrade", "node", node.ID, "target sha256:"+task.TargetSHA256)
+		writeJSON(response, http.StatusCreated, status)
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) edgeUpgradeInstruction(response http.ResponseWriter, request *http.Request) {
+	instruction, err := s.Store.NodeUpgradeInstruction(edgeNodeID(request.Context()))
+	if errors.Is(err, store.ErrNotFound) {
+		response.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, instruction)
+}
+
+func (s *Server) edgeUpgradeReport(response http.ResponseWriter, request *http.Request) {
+	var report domain.NodeUpgradeReport
+	if !readJSON(response, request, &report) {
+		return
+	}
+	report.TaskID = strings.TrimSpace(report.TaskID)
+	report.ErrorCode = strings.TrimSpace(report.ErrorCode)
+	report.Detail = strings.TrimSpace(report.Detail)
+	report.InstalledSHA256 = strings.ToLower(strings.TrimSpace(report.InstalledSHA256))
+	if !validNodeUpgradeTaskID(report.TaskID) || len(report.ErrorCode) > 64 || len(report.Detail) > 4096 ||
+		(report.InstalledSHA256 != "" && !validSHA256Digest(report.InstalledSHA256)) {
+		writeError(response, http.StatusBadRequest, errors.New("invalid node upgrade report"))
+		return
+	}
+	nodeID := edgeNodeID(request.Context())
+	task, err := s.Store.RecordNodeUpgradeReport(nodeID, report)
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	if report.Status == domain.NodeUpgradeApplying || report.Status == domain.NodeUpgradeSucceeded || report.Status == domain.NodeUpgradeFailed {
+		s.audit(request, "edge:"+nodeID, "upgrade_"+string(report.Status), "node", nodeID, task.Detail)
+	}
+	writeJSON(response, http.StatusOK, task)
+}
+
+func validNodeUpgradeTaskID(value string) bool {
+	_, err := uuid.Parse(value)
+	return err == nil
+}

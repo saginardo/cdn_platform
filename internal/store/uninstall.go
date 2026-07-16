@@ -50,12 +50,22 @@ func (s *Store) PrepareNodeUninstall(nodeID string, affectedSiteIDs []string, re
 	}
 	defer tx.Rollback()
 	var nodeStatus domain.NodeStatus
-	err = tx.QueryRow(`SELECT status FROM nodes WHERE id = ?`, nodeID).Scan(&nodeStatus)
+	var activeUpgradeID string
+	var activeUpgrade int
+	err = tx.QueryRow(`SELECT status, active_upgrade_task_id, EXISTS(SELECT 1 FROM node_upgrade_tasks
+		WHERE node_id = nodes.id AND status IN (?, ?)) FROM nodes WHERE id = ?`,
+		domain.NodeUpgradeQueued, domain.NodeUpgradeApplying, nodeID).Scan(&nodeStatus, &activeUpgradeID, &activeUpgrade)
 	if errors.Is(err, sql.ErrNoRows) {
 		return NodeUninstallJob{}, ErrNotFound
 	}
 	if err != nil {
 		return NodeUninstallJob{}, err
+	}
+	if activeUpgrade != 0 {
+		return NodeUninstallJob{}, ErrNodeUpgradeActive
+	}
+	if activeUpgradeID != "" {
+		return NodeUninstallJob{}, ErrUpgradeRetryNotReady
 	}
 	if nodeStatus != domain.NodeDraining && nodeStatus != domain.NodeRevoked {
 		return NodeUninstallJob{}, errors.New("node must be paused or revoked before uninstall")

@@ -31,6 +31,8 @@ type Node struct {
 	PublicIPv4      string     `json:"public_ipv4"`
 	Status          NodeStatus `json:"status"`
 	Capabilities    []string   `json:"capabilities"`
+	AgentSHA256     string     `json:"agent_sha256,omitempty"`
+	ActiveUpgradeID string     `json:"active_upgrade_task_id,omitempty"`
 	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
 	AppliedVersion  int64      `json:"applied_version"`
 	LastError       string     `json:"last_error,omitempty"`
@@ -57,7 +59,10 @@ const (
 	MaxDNSTTLSeconds                = 300
 )
 
-const EdgeCapabilityTCPStream = "tcp_stream_v1"
+const (
+	EdgeCapabilityTCPStream     = "tcp_stream_v1"
+	EdgeCapabilityOnlineUpgrade = "online_upgrade_v1"
+)
 
 type TCPForward struct {
 	Name                  string `json:"name"`
@@ -170,6 +175,52 @@ type DesiredState struct {
 	NginxStreamConfig string               `json:"nginx_stream_config,omitempty"`
 	PublicPorts       []int                `json:"public_ports"`
 	Certificates      map[string]TLSBundle `json:"certificates,omitempty"`
+}
+
+type NodeUpgradeStatus string
+
+const (
+	NodeUpgradeQueued    NodeUpgradeStatus = "queued"
+	NodeUpgradeApplying  NodeUpgradeStatus = "applying"
+	NodeUpgradeSucceeded NodeUpgradeStatus = "succeeded"
+	NodeUpgradeFailed    NodeUpgradeStatus = "failed"
+)
+
+type NodeUpgradeTask struct {
+	ID           string            `json:"id"`
+	NodeID       string            `json:"node_id"`
+	Status       NodeUpgradeStatus `json:"status"`
+	SourceSHA256 string            `json:"source_sha256,omitempty"`
+	TargetSHA256 string            `json:"target_sha256"`
+	ErrorCode    string            `json:"error_code,omitempty"`
+	Detail       string            `json:"detail,omitempty"`
+	DeadlineAt   time.Time         `json:"deadline_at"`
+	StartedAt    *time.Time        `json:"started_at,omitempty"`
+	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+}
+
+type UpgradeArtifact struct {
+	URL    string `json:"url"`
+	SHA256 string `json:"sha256"`
+}
+
+type NodeUpgradeInstruction struct {
+	TaskID         string          `json:"task_id"`
+	DeadlineAt     time.Time       `json:"deadline_at"`
+	Binary         UpgradeArtifact `json:"binary"`
+	Installer      UpgradeArtifact `json:"installer"`
+	AgentService   UpgradeArtifact `json:"agent_service"`
+	UpdaterService UpgradeArtifact `json:"updater_service"`
+}
+
+type NodeUpgradeReport struct {
+	TaskID          string            `json:"task_id"`
+	Status          NodeUpgradeStatus `json:"status"`
+	ErrorCode       string            `json:"error_code,omitempty"`
+	Detail          string            `json:"detail,omitempty"`
+	InstalledSHA256 string            `json:"installed_sha256,omitempty"`
 }
 
 type TLSBundle struct {

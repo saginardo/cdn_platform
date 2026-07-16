@@ -95,6 +95,7 @@ if systemctl is-active --quiet cdn-edge-agent.service 2>/dev/null; then
 fi
 
 service_unit=$(root_path /etc/systemd/system/cdn-edge-agent.service)
+updater_unit=$(root_path /etc/systemd/system/cdn-edge-updater@.service)
 if [[ -e "$service_unit" ]]; then
   systemctl disable cdn-edge-agent.service >/dev/null
   systemctl stop cdn-edge-agent.service >/dev/null
@@ -155,13 +156,14 @@ fi
 # From this point the operation is intentionally idempotent. A later failure
 # leaves the job running so rerunning the command can finish the callback.
 cleanup_committed=1
-rm -f "$service_unit"
+rm -f "$service_unit" "$updater_unit"
 rm -f "$(root_path /usr/local/bin/cdn-edge-agent)"
 rm -rf "$(root_path /opt/cdn-edge)" \
   "$(root_path /etc/cdn-platform)" "$(root_path /var/lib/cdn-platform)" \
   "$(root_path /var/log/cdn-platform)" "$(root_path /var/cache/cdn-platform)"
 systemctl daemon-reload
 systemctl reset-failed cdn-edge-agent.service >/dev/null 2>&1 || true
+systemctl reset-failed 'cdn-edge-updater@*.service' >/dev/null 2>&1 || true
 
 if ! callback complete >/dev/null; then
   echo "local cleanup completed, but the control-plane callback failed; rerun this command" >&2

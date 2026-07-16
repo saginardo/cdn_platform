@@ -170,6 +170,9 @@ func (s *Store) StageSiteDeletion(taskID string, updates []NodeStateUpdate, targ
 		return err
 	}
 	defer tx.Rollback()
+	if err := ensureNodesNotUpgradingTx(tx, upgradedNodeIDs(updates, targets)); err != nil {
+		return err
+	}
 	for _, target := range targets {
 		if target.NodeID == "" || target.TargetVersion < 1 {
 			return errors.New("invalid site deletion node target")

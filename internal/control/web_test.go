@@ -30,6 +30,8 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		`<option value="3600">60 分钟</option>`,
 		`透传模式（仅 HTTP(S)，禁用 Nginx 缓存）`,
 		`id="node-uninstall-dialog"`,
+		`id="node-upgrade-dialog"`,
+		`id="start-node-upgrade"`,
 		`>开始卸载准备</button>`,
 		`>生成卸载命令</button>`,
 		`强制完成（不清理远端）`,
@@ -43,6 +45,42 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		if strings.Contains(page, unexpected) {
 			t.Fatalf("index.html still contains %q", unexpected)
 		}
+	}
+}
+
+func TestEmbeddedConsoleSupportsSingleNodeOnlineUpgrade(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{`<th>代理版本</th>`, `id="node-upgrade-current"`, `id="node-upgrade-target"`, `id="node-upgrade-state"`} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"function renderAgentVersion(node)",
+		"function renderNodeUpgrade(status)",
+		"request(`/api/nodes/${nodeID}/upgrade`)",
+		"request(`/api/nodes/${nodeID}/upgrade`, { method: 'POST' })",
+		"classList.contains('node-upgrade')",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+	stylesContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if styles := string(stylesContents); !strings.Contains(styles, ".agent-version") || !strings.Contains(styles, ".upgrade-facts") {
+		t.Fatal("online upgrade styles are missing")
 	}
 }
 

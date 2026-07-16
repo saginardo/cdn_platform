@@ -138,6 +138,9 @@ func (s *Store) CommitSitePublication(siteID string, expectedConfigVersion int64
 	if expectedConfigVersion != 0 && site.ConfigVersion != expectedConfigVersion {
 		return domain.Site{}, ErrSiteChanged
 	}
+	if err := ensureNodesNotUpgradingTx(tx, upgradedNodeIDs(updates, targets)); err != nil {
+		return domain.Site{}, err
+	}
 	publishedAt := now()
 	site.Published = true
 	site.UpdatedAt = publishedAt

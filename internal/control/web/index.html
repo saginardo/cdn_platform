@@ -280,7 +280,23 @@
             <div><button type="submit">创建节点</button><button type="button" class="secondary cancel">取消</button></div>
           </form>
           <div id="node-command" class="secret hidden"></div>
-          <div class="table-wrap"><table><thead><tr><th>名称</th><th>节点 ID</th><th>IPv4</th><th>状态</th><th>心跳</th><th>操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>名称</th><th>节点 ID</th><th>IPv4</th><th>状态</th><th>代理版本</th><th>心跳</th><th>操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
+
+          <dialog id="node-upgrade-dialog" aria-labelledby="node-upgrade-title">
+            <div class="dialog-header">
+              <div><h2 id="node-upgrade-title">在线升级</h2><p id="node-upgrade-meta" class="section-meta"></p></div>
+              <button id="close-node-upgrade" type="button" class="secondary" aria-label="关闭">关闭</button>
+            </div>
+            <dl class="upgrade-facts">
+              <div><dt>当前制品</dt><dd><code id="node-upgrade-current">--</code></dd></div>
+              <div><dt>主控制品</dt><dd><code id="node-upgrade-target">--</code></dd></div>
+            </dl>
+            <div id="node-upgrade-state" class="uninstall-state" role="status" aria-live="polite"></div>
+            <p id="node-upgrade-error" class="dialog-error hidden" role="alert"></p>
+            <div class="dialog-actions">
+              <button id="start-node-upgrade" type="button" class="hidden">开始升级</button>
+            </div>
+          </dialog>
 
           <dialog id="node-uninstall-dialog" aria-labelledby="node-uninstall-title">
             <div class="dialog-header">

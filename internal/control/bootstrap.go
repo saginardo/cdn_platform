@@ -9,3 +9,6 @@ var bootstrapEdgeScript string
 
 //go:embed install-edge.service
 var bootstrapEdgeService string
+
+//go:embed install-edge-updater.service
+var bootstrapEdgeUpdaterService string

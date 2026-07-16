@@ -15,6 +15,9 @@ let uninstallNodeID = '';
 let uninstallNodeName = '';
 let uninstallCommand = '';
 let uninstallActionPending = false;
+let upgradePollTimer = null;
+let upgradeNodeID = '';
+let upgradeActionPending = false;
 let overviewLoading = false;
 let overviewLoaded = false;
 let overviewData = null;
@@ -242,13 +245,40 @@ async function refresh() {
 }
 
 function renderNodeRow(node) {
-  return `<tr><td>${escapeHTML(node.name)}</td><td><code>${escapeHTML(node.id)}</code></td><td><code>${escapeHTML(node.public_ipv4)}</code></td><td><span class="status ${escapeHTML(node.status)}">${escapeHTML(nodeStatusLabel(node.status))}</span></td><td>${node.last_heartbeat_at ? formatDateTime(node.last_heartbeat_at) : '从未上报'}</td><td class="actions">${renderNodeActions(node)}</td></tr>`;
+  return `<tr><td>${escapeHTML(node.name)}</td><td><code>${escapeHTML(node.id)}</code></td><td><code>${escapeHTML(node.public_ipv4)}</code></td><td><span class="status ${escapeHTML(node.status)}">${escapeHTML(nodeStatusLabel(node.status))}</span></td><td>${renderAgentVersion(node)}</td><td>${node.last_heartbeat_at ? formatDateTime(node.last_heartbeat_at) : '从未上报'}</td><td class="actions">${renderNodeActions(node)}</td></tr>`;
+}
+
+function shortDigest(value) {
+  return value ? String(value).slice(0, 12) : '--';
+}
+
+function nodeUpgradeLabel(node) {
+  const task = node.upgrade_task;
+  if (task && ['queued', 'applying'].includes(task.status)) return task.status === 'queued' ? '等待升级' : '升级中';
+  if (node.upgrade_up_to_date) return '主控当前版本';
+  if (task?.status === 'failed') return '升级失败';
+  if (!node.upgrade_capable) return '需手动启用';
+  if (node.can_upgrade) return '可升级';
+  return '暂不可升级';
+}
+
+function renderAgentVersion(node) {
+  const label = nodeUpgradeLabel(node);
+  const state = node.upgrade_up_to_date ? 'succeeded' : (node.upgrade_task?.status || 'pending');
+  const digest = node.agent_sha256 || '';
+  return `<div class="agent-version"><code title="${escapeHTML(digest)}">${escapeHTML(shortDigest(digest))}</code><span class="status ${escapeHTML(state)}">${escapeHTML(label)}</span></div>`;
 }
 
 function renderNodeActions(node) {
   const actions = [];
   if (['pending', 'active', 'draining'].includes(node.status)) {
     actions.push(`<button class="small enroll" data-id="${node.id}">获取部署/升级命令</button>`);
+  }
+  const upgradeActive = node.upgrade_task && ['queued', 'applying'].includes(node.upgrade_task.status);
+  const upgradeFailed = node.upgrade_task?.status === 'failed' && !node.upgrade_up_to_date;
+  const upgradeVisible = node.upgrade_capable && !node.upgrade_up_to_date;
+  if (['active', 'draining'].includes(node.status) && (upgradeVisible || upgradeActive || upgradeFailed)) {
+    actions.push(`<button class="small ${upgradeActive ? '' : 'secondary'} node-upgrade" data-id="${node.id}">${node.can_upgrade && !upgradeFailed ? '升级' : '查看升级'}</button>`);
   }
   if (node.status === 'active') {
     actions.push(`<button class="small secondary node-status" data-id="${node.id}" data-status="draining">暂停调度</button>`);
@@ -708,6 +738,81 @@ function closeSiteDelete() {
   deletingSiteID = '';
   deletingSiteName = '';
   const dialog = byId('site-delete-dialog');
+  if (dialog.open) dialog.close();
+}
+
+function nodeUpgradeStateText(status) {
+  const task = status.upgrade_task;
+  if (task?.status === 'queued') return '等待边缘代理领取升级任务。';
+  if (task?.status === 'applying') return task.detail || '边缘节点正在校验制品并执行升级。';
+  if (task?.status === 'succeeded') return task.detail || '边缘节点已升级并完成心跳确认。';
+  if (task?.status === 'failed') return '在线升级未完成，节点已保留或恢复升级前状态。';
+  if (status.upgrade_up_to_date) return '节点已运行主控当前边缘制品。';
+  if (status.can_upgrade) return '节点可同步到主控当前边缘制品。';
+  return status.upgrade_blocker || '当前无法执行在线升级。';
+}
+
+function setUpgradeError(message = '') {
+  byId('node-upgrade-error').textContent = message;
+  if (message) show('node-upgrade-error'); else hide('node-upgrade-error');
+}
+
+function setUpgradeBusy(busy) {
+  upgradeActionPending = busy;
+  byId('start-node-upgrade').disabled = busy;
+}
+
+function renderNodeUpgrade(status) {
+  byId('node-upgrade-meta').textContent = `${status.name} · ${status.public_ipv4} · ${nodeStatusLabel(status.status)}`;
+  byId('node-upgrade-current').textContent = status.agent_sha256 || '尚未上报';
+  byId('node-upgrade-target').textContent = status.target_agent_sha256 || '主控未配置';
+  byId('node-upgrade-state').textContent = nodeUpgradeStateText(status);
+  setUpgradeError(status.upgrade_task?.status === 'failed' ? (status.upgrade_task.detail || status.upgrade_blocker || '升级失败') : '');
+  if (status.can_upgrade) {
+    byId('start-node-upgrade').textContent = status.upgrade_task?.status === 'failed' ? '重试升级' : '开始升级';
+    show('start-node-upgrade');
+  } else {
+    hide('start-node-upgrade');
+  }
+
+  nodes = nodes.map((node) => node.id === status.id ? status : node);
+  byId('node-table').innerHTML = nodes.map(renderNodeRow).join('');
+  window.clearTimeout(upgradePollTimer);
+  upgradePollTimer = null;
+  if (status.upgrade_task && ['queued', 'applying'].includes(status.upgrade_task.status)) {
+    upgradePollTimer = window.setTimeout(() => loadNodeUpgradeStatus().catch((error) => setUpgradeError(error.message)), 2000);
+  }
+}
+
+async function loadNodeUpgradeStatus() {
+  if (!upgradeNodeID) return;
+  const nodeID = upgradeNodeID;
+  const status = await request(`/api/nodes/${nodeID}/upgrade`);
+  if (nodeID !== upgradeNodeID) return;
+  renderNodeUpgrade(status);
+}
+
+async function openNodeUpgrade(nodeID) {
+  upgradeNodeID = nodeID;
+  byId('node-upgrade-state').textContent = '正在读取升级状态…';
+  byId('node-upgrade-current').textContent = '--';
+  byId('node-upgrade-target').textContent = '--';
+  hide('start-node-upgrade');
+  setUpgradeError();
+  const dialog = byId('node-upgrade-dialog');
+  if (!dialog.open) dialog.showModal();
+  try {
+    await loadNodeUpgradeStatus();
+  } catch (error) {
+    setUpgradeError(error.message);
+  }
+}
+
+function closeNodeUpgrade() {
+  window.clearTimeout(upgradePollTimer);
+  upgradePollTimer = null;
+  upgradeNodeID = '';
+  const dialog = byId('node-upgrade-dialog');
   if (dialog.open) dialog.close();
 }
 
@@ -1840,6 +1945,33 @@ byId('site-missing-back').addEventListener('click', () => navigateTo('#/sites'))
 byId('site-cancel').addEventListener('click', () => navigateTo('#/sites'));
 document.querySelectorAll('.cancel').forEach((button) => button.addEventListener('click', () => button.closest('form').classList.add('hidden')));
 
+byId('close-node-upgrade').addEventListener('click', closeNodeUpgrade);
+byId('node-upgrade-dialog').addEventListener('close', () => {
+  window.clearTimeout(upgradePollTimer);
+  upgradePollTimer = null;
+  upgradeNodeID = '';
+});
+byId('start-node-upgrade').addEventListener('click', async () => {
+  if (upgradeActionPending || !upgradeNodeID) return;
+  const nodeID = upgradeNodeID;
+  setUpgradeBusy(true);
+  setUpgradeError();
+  try {
+    const status = await request(`/api/nodes/${nodeID}/upgrade`, { method: 'POST' });
+    if (nodeID === upgradeNodeID) {
+      renderNodeUpgrade(status);
+      notice('节点在线升级已开始', true);
+    }
+  } catch (error) {
+    if (nodeID === upgradeNodeID) {
+      if (error.data?.upgrade) renderNodeUpgrade(error.data.upgrade);
+      setUpgradeError(error.message);
+    }
+  } finally {
+    setUpgradeBusy(false);
+  }
+});
+
 byId('close-node-uninstall').addEventListener('click', closeNodeUninstall);
 byId('node-uninstall-dialog').addEventListener('close', () => {
   window.clearTimeout(uninstallPollTimer);
@@ -2072,6 +2204,7 @@ document.addEventListener('click', async (event) => {
   const button = event.target.closest('button'); if (!button || !button.dataset.id) return;
   try {
     if (button.classList.contains('enroll')) { const result = await request(`/api/nodes/${button.dataset.id}/enrollment-token`, { method: 'POST' }); byId('node-command').textContent = result.install_command; show('node-command'); }
+    if (button.classList.contains('node-upgrade')) await openNodeUpgrade(button.dataset.id);
     if (button.classList.contains('node-status')) { await request(`/api/nodes/${button.dataset.id}/status`, { method: 'POST', body: JSON.stringify({ status: button.dataset.status }) }); await refresh(); }
     if (button.classList.contains('node-uninstall') || button.classList.contains('node-delete')) await openNodeUninstall(button.dataset.id);
     if (button.classList.contains('publish')) { const task = await request(`/api/sites/${button.dataset.id}/publish`, { method: 'POST' }); await refresh(); notice(`发布任务 ${task.id}：${taskStatusLabel(task.status)}`, true); }

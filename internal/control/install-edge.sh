@@ -5,7 +5,13 @@ umask 077
 CONTROL_URL=""
 ENROLLMENT_TOKEN=""
 BINARY_URL=""
+BINARY_FILE=""
 BINARY_SHA256=""
+SERVICE_FILE=""
+SERVICE_SHA256=""
+UPDATER_SERVICE_FILE=""
+UPDATER_SERVICE_SHA256=""
+READINESS_FILE=""
 ROOT_PREFIX="${CDN_EDGE_INSTALL_ROOT:-}"
 LAYOUT_VERSION=1
 
@@ -14,7 +20,13 @@ while [[ $# -gt 0 ]]; do
     --control-url) CONTROL_URL="$2"; shift 2 ;;
     --enrollment-token) ENROLLMENT_TOKEN="$2"; shift 2 ;;
     --binary-url) BINARY_URL="$2"; shift 2 ;;
+    --binary-file) BINARY_FILE="$2"; shift 2 ;;
     --binary-sha256) BINARY_SHA256="$2"; shift 2 ;;
+    --service-file) SERVICE_FILE="$2"; shift 2 ;;
+    --service-sha256) SERVICE_SHA256="$2"; shift 2 ;;
+    --updater-service-file) UPDATER_SERVICE_FILE="$2"; shift 2 ;;
+    --updater-service-sha256) UPDATER_SERVICE_SHA256="$2"; shift 2 ;;
+    --readiness-file) READINESS_FILE="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -31,11 +43,25 @@ elif [[ $EUID -ne 0 ]]; then
 fi
 if [[ "$CONTROL_URL" != https://* || "$CONTROL_URL" == *[[:space:]]* ||
       ( -n "$ENROLLMENT_TOKEN" && "$ENROLLMENT_TOKEN" == *[[:space:]]* ) ||
-      "$BINARY_URL" != https://* || "$BINARY_URL" == *[[:space:]]* ||
-      ! "$BINARY_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
-  echo "usage: install-edge.sh --control-url HTTPS_URL [--enrollment-token TOKEN] --binary-url HTTPS_URL --binary-sha256 SHA256" >&2
+      ( -n "$BINARY_URL" && ( "$BINARY_URL" != https://* || "$BINARY_URL" == *[[:space:]]* ) ) ||
+      ( -n "$BINARY_FILE" && "$BINARY_FILE" != /* ) ||
+      ( -n "$SERVICE_FILE" && "$SERVICE_FILE" != /* ) ||
+      ( -n "$UPDATER_SERVICE_FILE" && "$UPDATER_SERVICE_FILE" != /* ) ||
+      ( -n "$READINESS_FILE" && "$READINESS_FILE" != /* ) ||
+      ! "$BINARY_SHA256" =~ ^[0-9a-fA-F]{64}$ ||
+      ! "$SERVICE_SHA256" =~ ^[0-9a-fA-F]{64}$ ||
+      ! "$UPDATER_SERVICE_SHA256" =~ ^[0-9a-fA-F]{64}$ ||
+      ( -z "$BINARY_URL" && -z "$BINARY_FILE" ) ||
+      ( -n "$BINARY_URL" && -n "$BINARY_FILE" ) ]]; then
+  echo "usage: install-edge.sh --control-url HTTPS_URL [--enrollment-token TOKEN] (--binary-url HTTPS_URL | --binary-file PATH) --binary-sha256 SHA256 --service-sha256 SHA256 --updater-service-sha256 SHA256" >&2
   exit 2
 fi
+for file in "$BINARY_FILE" "$SERVICE_FILE" "$UPDATER_SERVICE_FILE"; do
+  if [[ -n "$file" && ! -f "$file" ]]; then
+    echo "staged upgrade artifact is missing: $file" >&2
+    exit 2
+  fi
+done
 CONTROL_URL="${CONTROL_URL%/}"
 
 root_path() {
@@ -68,10 +94,12 @@ read_environment_value() {
 edge_root=$(root_path /opt/cdn-edge)
 marker="$edge_root/.layout-version"
 agent_unit=$(root_path /etc/systemd/system/cdn-edge-agent.service)
+updater_unit=$(root_path /etc/systemd/system/cdn-edge-updater@.service)
 nginx_entry=$(root_path /etc/nginx/conf.d/cdn-platform.conf)
 nginx_stream_entry=$(root_path /etc/nginx/modules-enabled/99-cdn-platform-stream.conf)
 nginx_default=$(root_path /etc/nginx/sites-enabled/default)
 new_unit="$edge_root/systemd/cdn-edge-agent.service"
+new_updater_unit="$edge_root/systemd/cdn-edge-updater@.service"
 new_nginx_config="$edge_root/config/nginx/cdn-platform.conf"
 new_nginx_stream_config="$edge_root/config/nginx/cdn-platform-stream.conf"
 old_binary=$(root_path /usr/local/bin/cdn-edge-agent)
@@ -80,6 +108,7 @@ old_state_dir=$(root_path /var/lib/cdn-platform)
 old_log_dir=$(root_path /var/log/cdn-platform)
 old_cache_dir=$(root_path /var/cache/cdn-platform)
 expected_unit_target="$new_unit"
+expected_updater_unit_target="$new_updater_unit"
 expected_nginx_target="$new_nginx_config"
 
 new_layout=0
@@ -133,12 +162,33 @@ transaction_dir=$(mktemp -d "$(root_path /tmp/cdn-edge-install.XXXXXX)")
 trap 'rm -rf "$transaction_dir"' EXIT
 temporary_binary="$transaction_dir/cdn-edge-agent"
 temporary_unit="$transaction_dir/cdn-edge-agent.service"
-curl --fail --location --silent --show-error "$BINARY_URL" --output "$temporary_binary"
+temporary_updater_unit="$transaction_dir/cdn-edge-updater@.service"
+if [[ -n "$BINARY_FILE" ]]; then
+  cp "$BINARY_FILE" "$temporary_binary"
+else
+  curl --fail --location --silent --show-error "$BINARY_URL" --output "$temporary_binary"
+fi
 echo "$BINARY_SHA256  $temporary_binary" | sha256sum --check --status
-curl --fail --location --silent --show-error "${CONTROL_URL}/install-edge.service" --output "$temporary_unit"
+if [[ -n "$SERVICE_FILE" ]]; then
+  cp "$SERVICE_FILE" "$temporary_unit"
+else
+  curl --fail --location --silent --show-error "${CONTROL_URL}/install-edge.service" --output "$temporary_unit"
+fi
+echo "$SERVICE_SHA256  $temporary_unit" | sha256sum --check --status
+if [[ -n "$UPDATER_SERVICE_FILE" ]]; then
+  cp "$UPDATER_SERVICE_FILE" "$temporary_updater_unit"
+else
+  curl --fail --location --silent --show-error "${CONTROL_URL}/install-edge-updater.service" --output "$temporary_updater_unit"
+fi
+echo "$UPDATER_SERVICE_SHA256  $temporary_updater_unit" | sha256sum --check --status
 if ! grep -Fqx 'ExecStart=/opt/cdn-edge/bin/cdn-edge-agent' "$temporary_unit" ||
    ! grep -Fqx 'EnvironmentFile=/opt/cdn-edge/config/edge.env' "$temporary_unit"; then
   echo "downloaded edge service does not match the /opt/cdn-edge layout" >&2
+  exit 1
+fi
+if ! grep -Fqx 'ExecStart=/opt/cdn-edge/bin/cdn-edge-agent upgrade-helper %i' "$temporary_updater_unit" ||
+   ! grep -Fqx 'EnvironmentFile=/opt/cdn-edge/config/edge.env' "$temporary_updater_unit"; then
+  echo "downloaded edge updater service does not match the /opt/cdn-edge layout" >&2
   exit 1
 fi
 
@@ -146,9 +196,10 @@ old_agent_active=0
 old_agent_enabled=0
 if systemctl is-active --quiet cdn-edge-agent.service 2>/dev/null; then old_agent_active=1; fi
 if systemctl is-enabled --quiet cdn-edge-agent.service 2>/dev/null; then old_agent_enabled=1; fi
-for item in unit nginx stream-entry stream-config default-site; do
+for item in unit updater-unit nginx stream-entry stream-config default-site; do
   case "$item" in
     unit) source="$agent_unit" ;;
+    updater-unit) source="$updater_unit" ;;
     nginx) source="$nginx_entry" ;;
     stream-entry) source="$nginx_stream_entry" ;;
     stream-config) source="$new_nginx_stream_config" ;;
@@ -157,7 +208,7 @@ for item in unit nginx stream-entry stream-config default-site; do
   if path_exists "$source"; then cp -a "$source" "$transaction_dir/$item.backup"; fi
 done
 if ((new_layout == 1)); then
-  for item in bin/cdn-edge-agent config/edge.env systemd/cdn-edge-agent.service; do
+  for item in bin/cdn-edge-agent config/edge.env systemd/cdn-edge-agent.service systemd/cdn-edge-updater@.service; do
     if path_exists "$edge_root/$item"; then
       mkdir -p "$transaction_dir/new-layout/$(dirname "$item")"
       cp -a "$edge_root/$item" "$transaction_dir/new-layout/$item"
@@ -173,8 +224,9 @@ rollback() {
   if ((committed == 0)); then
     systemctl stop cdn-edge-agent.service >/dev/null 2>&1 || true
     systemctl disable cdn-edge-agent.service >/dev/null 2>&1 || true
-    rm -f "$agent_unit" "$nginx_entry" "$nginx_stream_entry" "$nginx_default"
+    rm -f "$agent_unit" "$updater_unit" "$nginx_entry" "$nginx_stream_entry" "$nginx_default"
     if path_exists "$transaction_dir/unit.backup"; then cp -a "$transaction_dir/unit.backup" "$agent_unit"; fi
+    if path_exists "$transaction_dir/updater-unit.backup"; then cp -a "$transaction_dir/updater-unit.backup" "$updater_unit"; fi
     if path_exists "$transaction_dir/nginx.backup"; then cp -a "$transaction_dir/nginx.backup" "$nginx_entry"; fi
     if path_exists "$transaction_dir/stream-entry.backup"; then cp -a "$transaction_dir/stream-entry.backup" "$nginx_stream_entry"; fi
     if path_exists "$transaction_dir/stream-config.backup"; then
@@ -190,7 +242,8 @@ rollback() {
     if ((new_layout == 0)); then
       rm -rf "$edge_root"
     else
-      for item in bin/cdn-edge-agent config/edge.env systemd/cdn-edge-agent.service; do
+      for item in bin/cdn-edge-agent config/edge.env systemd/cdn-edge-agent.service systemd/cdn-edge-updater@.service; do
+        rm -f "$edge_root/$item"
         if path_exists "$transaction_dir/new-layout/$item"; then
           mkdir -p "$edge_root/$(dirname "$item")"
           cp -a "$transaction_dir/new-layout/$item" "$edge_root/$item"
@@ -242,6 +295,7 @@ fi
 
 install -m 0755 "$temporary_binary" "$edge_root/bin/cdn-edge-agent"
 install -m 0644 "$temporary_unit" "$new_unit"
+install -m 0644 "$temporary_updater_unit" "$new_updater_unit"
 cat >"$edge_root/config/edge.env" <<EOF
 CONTROL_URL=${CONTROL_URL}
 ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
@@ -321,6 +375,8 @@ systemctl is-active --quiet nginx.service
 
 rm -f "$agent_unit"
 ln -s "$expected_unit_target" "$agent_unit"
+rm -f "$updater_unit"
+ln -s "$expected_updater_unit_target" "$updater_unit"
 systemctl daemon-reload
 systemctl enable cdn-edge-agent.service
 systemctl restart cdn-edge-agent.service
@@ -347,6 +403,20 @@ done
 if ((identity_ready == 0)); then
   echo "cdn-edge-agent did not establish its mTLS identity after installation" >&2
   false
+fi
+if [[ -n "$READINESS_FILE" ]]; then
+  upgrade_ready=0
+  for _ in $(seq 1 120); do
+    if [[ -f "$READINESS_FILE" && "$(tr -d '[:space:]' <"$READINESS_FILE")" == "${BINARY_SHA256,,}" ]]; then
+      upgrade_ready=1
+      break
+    fi
+    sleep 1
+  done
+  if ((upgrade_ready == 0)); then
+    echo "upgraded edge agent did not confirm a control-plane heartbeat" >&2
+    false
+  fi
 fi
 if grep -Fq 'location = /__cdn_health' "$new_nginx_config"; then
   curl --fail --silent --show-error --max-time 5 http://127.0.0.1/__cdn_health >/dev/null

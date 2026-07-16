@@ -15,6 +15,12 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "upgrade-helper" {
+		if err := edge.RunUpgradeHelper(env("EDGE_STATE_DIR", "/opt/cdn-edge/data"), os.Args[2]); err != nil {
+			fatal("online upgrade helper: " + err.Error())
+		}
+		return
+	}
 	pollSeconds := 30
 	if value := os.Getenv("EDGE_POLL_SECONDS"); value != "" {
 		parsed, err := strconv.Atoi(value)

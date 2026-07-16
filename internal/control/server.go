@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /install-edge.sh", s.bootstrapEdgeScript)
 	mux.HandleFunc("GET /install-edge.service", s.bootstrapEdgeService)
+	mux.HandleFunc("GET /install-edge-updater.service", s.bootstrapEdgeUpdaterService)
 	mux.HandleFunc("GET /uninstall-edge.sh", s.uninstallEdgeScript)
 	mux.HandleFunc("GET /downloads/cdn-edge-agent-linux-amd64", s.edgeBinary)
 	mux.HandleFunc("GET /api/setup/status", s.setupStatus)
@@ -87,6 +88,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/nodes", s.requireAdmin(s.createNode))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/nodes/{id}/status", s.requireAdmin(s.setNodeStatus))
+	mux.HandleFunc("GET /api/nodes/{id}/upgrade", s.requireAdmin(s.nodeUpgradeStatus))
+	mux.HandleFunc("POST /api/nodes/{id}/upgrade", s.requireAdmin(s.startNodeUpgrade))
 	mux.HandleFunc("POST /api/nodes/{id}/uninstall", s.requireAdmin(s.prepareNodeUninstall))
 	mux.HandleFunc("GET /api/nodes/{id}/uninstall", s.requireAdmin(s.nodeUninstallStatus))
 	mux.HandleFunc("POST /api/nodes/{id}/uninstall/command", s.requireAdmin(s.createNodeUninstallCommand))
@@ -112,6 +115,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/edge/v1/renew", s.requireEdge(s.renew))
 	mux.HandleFunc("GET /api/edge/v1/desired-state", s.requireEdge(s.desiredState))
 	mux.HandleFunc("POST /api/edge/v1/heartbeat", s.requireEdge(s.heartbeat))
+	mux.HandleFunc("GET /api/edge/v1/upgrade", s.requireEdge(s.edgeUpgradeInstruction))
+	mux.HandleFunc("POST /api/edge/v1/upgrade-report", s.requireEdge(s.edgeUpgradeReport))
 	mux.HandleFunc("POST /api/edge/v1/logs", s.requireEdge(s.writeLogs))
 	mux.HandleFunc("POST /api/edge/v1/uninstall/start", s.startNodeUninstall)
 	mux.HandleFunc("POST /api/edge/v1/uninstall/fail", s.failNodeUninstall)
@@ -317,12 +322,25 @@ func (s *Server) session(response http.ResponseWriter, request *http.Request) {
 }
 
 func (s *Server) listNodes(response http.ResponseWriter, request *http.Request) {
+	if err := s.Store.ReconcileNodeUpgrades(); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	nodes, err := s.Store.ListNodes()
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
-	writeJSON(response, http.StatusOK, nodes)
+	result := make([]nodeUpgradeStatusResponse, 0, len(nodes))
+	for _, node := range nodes {
+		status, err := s.buildNodeUpgradeStatus(node)
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		result = append(result, status)
+	}
+	writeJSON(response, http.StatusOK, result)
 }
 
 type nodeRequest struct {
@@ -358,6 +376,8 @@ func (s *Server) createEnrollmentToken(response http.ResponseWriter, request *ht
 		return
 	}
 	bootstrapURL := strings.TrimRight(s.ControlURL, "/") + "/install-edge.sh"
+	serviceDigest := resourceSHA256(bootstrapEdgeService)
+	updaterServiceDigest := resourceSHA256(bootstrapEdgeUpdaterService)
 	result := map[string]any{"enrollment_required": enrollmentRequired}
 	if enrollmentRequired {
 		token, err := auth.NewOpaqueToken(32)
@@ -373,10 +393,10 @@ func (s *Server) createEnrollmentToken(response http.ResponseWriter, request *ht
 		s.audit(request, adminID(request.Context()), "create_enrollment_token", "node", nodeID, "expires "+expiresAt.Format(time.RFC3339))
 		result["token"] = token
 		result["expires_at"] = expiresAt
-		result["install_command"] = fmt.Sprintf("curl -fsSL %q | sudo bash -s -- --control-url %q --enrollment-token %q --binary-url %q --binary-sha256 %q", bootstrapURL, edgeControlURL, token, s.EdgeBinaryURL, digest)
+		result["install_command"] = fmt.Sprintf("curl -fsSL %q | sudo bash -s -- --control-url %q --enrollment-token %q --binary-url %q --binary-sha256 %q --service-sha256 %q --updater-service-sha256 %q", bootstrapURL, edgeControlURL, token, s.EdgeBinaryURL, digest, serviceDigest, updaterServiceDigest)
 	} else {
 		s.audit(request, adminID(request.Context()), "create_upgrade_command", "node", nodeID, "preserve existing mTLS identity")
-		result["install_command"] = fmt.Sprintf("curl -fsSL %q | sudo bash -s -- --control-url %q --binary-url %q --binary-sha256 %q", bootstrapURL, edgeControlURL, s.EdgeBinaryURL, digest)
+		result["install_command"] = fmt.Sprintf("curl -fsSL %q | sudo bash -s -- --control-url %q --binary-url %q --binary-sha256 %q --service-sha256 %q --updater-service-sha256 %q", bootstrapURL, edgeControlURL, s.EdgeBinaryURL, digest, serviceDigest, updaterServiceDigest)
 	}
 	writeJSON(response, http.StatusCreated, result)
 }
@@ -404,6 +424,12 @@ func (s *Server) bootstrapEdgeService(response http.ResponseWriter, request *htt
 	response.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	response.Header().Set("Cache-Control", "no-store")
 	_, _ = response.Write([]byte(bootstrapEdgeService))
+}
+
+func (s *Server) bootstrapEdgeUpdaterService(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	response.Header().Set("Cache-Control", "no-store")
+	_, _ = response.Write([]byte(bootstrapEdgeUpdaterService))
 }
 
 func (s *Server) edgeBinary(response http.ResponseWriter, request *http.Request) {
@@ -1101,10 +1127,12 @@ func (s *Server) desiredState(response http.ResponseWriter, request *http.Reques
 }
 
 type heartbeatRequest struct {
-	LastError      string              `json:"last_error"`
-	AppliedVersion int64               `json:"applied_version"`
-	ApplyReport    *domain.ApplyReport `json:"apply_report,omitempty"`
-	Capabilities   []string            `json:"capabilities,omitempty"`
+	LastError       string              `json:"last_error"`
+	AppliedVersion  int64               `json:"applied_version"`
+	ApplyReport     *domain.ApplyReport `json:"apply_report,omitempty"`
+	Capabilities    []string            `json:"capabilities,omitempty"`
+	AgentSHA256     string              `json:"agent_sha256,omitempty"`
+	ActiveUpgradeID string              `json:"active_upgrade_task_id,omitempty"`
 }
 
 func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) {
@@ -1113,11 +1141,21 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	nodeID := edgeNodeID(request.Context())
+	input.AgentSHA256 = strings.ToLower(strings.TrimSpace(input.AgentSHA256))
+	input.ActiveUpgradeID = strings.TrimSpace(input.ActiveUpgradeID)
+	if input.AgentSHA256 != "" && !validSHA256Digest(input.AgentSHA256) {
+		writeError(response, http.StatusBadRequest, errors.New("agent_sha256 must be a 64-character hexadecimal digest"))
+		return
+	}
+	if input.ActiveUpgradeID != "" && !validNodeUpgradeTaskID(input.ActiveUpgradeID) {
+		writeError(response, http.StatusBadRequest, errors.New("active_upgrade_task_id is invalid"))
+		return
+	}
 	if err := s.Store.SetNodeCapabilities(nodeID, input.Capabilities); err != nil {
 		writeStoreError(response, err)
 		return
 	}
-	if err := s.Store.Heartbeat(nodeID, input.AppliedVersion, input.LastError, input.ApplyReport); err != nil {
+	if err := s.Store.HeartbeatWithAgent(nodeID, input.AppliedVersion, input.LastError, input.ApplyReport, input.AgentSHA256, input.ActiveUpgradeID); err != nil {
 		writeStoreError(response, err)
 		return
 	}
@@ -1350,7 +1388,7 @@ func writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteChanged) {
+	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteChanged) || errors.Is(err, store.ErrNodeUpgradeActive) || errors.Is(err, store.ErrNodeOperationActive) || errors.Is(err, store.ErrUpgradeRetryNotReady) {
 		writeError(response, http.StatusConflict, err)
 		return
 	}

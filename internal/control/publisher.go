@@ -211,6 +211,13 @@ func (p Publisher) prepareNodeStates(siteID string, removing bool) ([]store.Node
 }
 
 func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affected map[string]struct{}) ([]store.NodeStateUpdate, []store.PublishTaskNode, error) {
+	affectedNodeIDs := make([]string, 0, len(affected))
+	for nodeID := range affected {
+		affectedNodeIDs = append(affectedNodeIDs, nodeID)
+	}
+	if err := p.Store.EnsureNodesNotUpgrading(affectedNodeIDs); err != nil {
+		return nil, nil, err
+	}
 	rendered, err := p.decryptPublicationMaterials(materials, affected)
 	if err != nil {
 		return nil, nil, err

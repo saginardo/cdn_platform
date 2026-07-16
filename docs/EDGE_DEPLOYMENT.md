@@ -18,15 +18,19 @@ Edge nodes use the Debian Nginx package and a host systemd service. Docker is no
     applied-version
     access-log-queue.ndjson
     access-log-offset
+    active-upgrade-task
+    upgrades/                    # transient online-upgrade state
   logs/access.json
   cache/
   systemd/cdn-edge-agent.service
+  systemd/cdn-edge-updater@.service
 ```
 
 Two system integration links remain outside this root because systemd and the Debian Nginx package discover configuration there:
 
 ```text
 /etc/systemd/system/cdn-edge-agent.service -> /opt/cdn-edge/systemd/cdn-edge-agent.service
+/etc/systemd/system/cdn-edge-updater@.service -> /opt/cdn-edge/systemd/cdn-edge-updater@.service
 /etc/nginx/conf.d/cdn-platform.conf -> /opt/cdn-edge/config/nginx/cdn-platform.conf
 /etc/nginx/modules-enabled/99-cdn-platform-stream.conf
 ```
@@ -35,7 +39,7 @@ The second Nginx integration file owns a top-level `stream { include ...; }` blo
 
 ## Fresh installation and upgrades
 
-Use **获取部署/升级命令** on the node page and run the generated command as root on the target Debian 12 node. The command is bound to the configured HTTPS control and binary URLs and verifies the edge binary SHA-256 before installing it.
+Use **获取部署/升级命令** on the node page and run the generated command as root on the target Debian 12 node. The command is bound to the configured HTTPS control and binary URLs and verifies the edge binary and both systemd units by SHA-256 before installing them.
 
 The installer is idempotent and recognizes these states:
 
@@ -43,11 +47,25 @@ The installer is idempotent and recognizes these states:
 - Legacy deployment: migrates `/usr/local/bin/cdn-edge-agent`, `/etc/cdn-platform`, `/var/lib/cdn-platform`, `/var/log/cdn-platform`, `/var/cache/cdn-platform`, the Nginx include, and the systemd unit.
 - Existing `/opt/cdn-edge`: replaces the checksum-verified binary and service definition, adds the stream integration when missing, and preserves configuration data, identity, logs, and cache.
 
-The installed environment advertises `tcp_stream_v1` in every authenticated heartbeat. The controller refuses to publish a TCP rule to a node until this capability is present, so deploying a newer controller does not send stream state to an older Agent. Rerun the node's generated deployment/upgrade command before its first TCP publication.
+The installed environment advertises `tcp_stream_v1` and `online_upgrade_v1` in every authenticated heartbeat. The controller refuses to publish a TCP rule to a node until the stream capability is present, so deploying a newer controller does not send stream state to an older Agent. Rerun the node's generated deployment/upgrade command before its first TCP publication.
 
 For a node that already has a control-plane certificate fingerprint, the generated upgrade command contains no new enrollment token. The installer requires the complete local mTLS key/certificate/CA set instead. This preserves the node identity and avoids leaving an unused valid enrollment token after an upgrade.
 
-A valid layout marker and the two integration links determine ownership. If unrelated or ambiguous files exist in both the old and new layouts, the installer stops instead of merging them.
+A valid layout marker and the platform integration links determine ownership. If unrelated or ambiguous files exist in both the old and new layouts, the installer stops instead of merging them.
+
+## Online upgrades
+
+The node page enables **升级** when an active or paused node has reported `online_upgrade_v1` within ten minutes and its running binary SHA-256 differs from `EDGE_BINARY_SHA256`. Releases installed before this capability require one final manual deployment/upgrade command to install the updater unit. The generated command remains available for new-node enrollment and recovery.
+
+An online upgrade performs these steps:
+
+1. The controller snapshots the current binary, installer, agent-unit, and updater-unit URLs and digests into a 30-minute node task delivered over mTLS.
+2. The running agent downloads every artifact below `/opt/cdn-edge/data/upgrades/<task-id>`, enforces size limits, and verifies SHA-256 before starting `cdn-edge-updater@<task-id>.service`.
+3. The detached updater runs the same transactional installer used by the manual command. Package downloads and artifact checks occur before the main agent is stopped; Nginx remains in the node's current scheduling and DNS state.
+4. After installing and starting the new agent, the installer waits for that exact binary to complete an authenticated heartbeat. Only then does it commit and report success. A failed checksum, package operation, Nginx validation/reload, service start, or readiness check restores the previous binary, units, Nginx integration, and service state.
+5. The restarted agent reports the durable local result. A repeated instruction is not executed twice; interrupted updater state is reported as a failure and can be retried after a fresh heartbeat clears it.
+
+Only one online upgrade may be active per node. Site publish/delete confirmation and node uninstall cannot start against that node until it completes. Revoking node authorization remains available as an emergency action and terminates the controller task. Online upgrade does not provide historical version selection or an operator-triggered downgrade; the controller's configured artifact is authoritative.
 
 ## Legacy node migration
 
@@ -80,7 +98,7 @@ The restart requirement, asynchronous reload failure mode, worker-generation che
 
 ## Failure and rollback
 
-Before switching paths, the installer saves the current Nginx entry, systemd unit, default Nginx site, and service state. A failed Nginx validation/restart, agent start, enrollment, or health check restores those entries and the previous edge-agent state. Legacy rollback cold-restarts Nginx with the restored cache path so the running master cannot retain the failed migration state. Temporary transaction directories are removed on success and failure.
+Before switching paths, the installer saves the current Nginx entry, both systemd units, default Nginx site, and service state. A failed Nginx validation/restart, agent start, enrollment, health check, or online-upgrade heartbeat readiness check restores those entries and the previous edge-agent state. Legacy rollback cold-restarts Nginx with the restored cache path so the running master cannot retain the failed migration state. Temporary transaction directories are removed on success and failure.
 
 For a fresh node, a failure after successful enrollment may consume the one-time token. Generate a new deployment command before retrying. Do not manually combine a partial legacy layout with a marked `/opt/cdn-edge` layout.
 

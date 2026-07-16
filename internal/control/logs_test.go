@@ -1,18 +1,21 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"cdn-platform/internal/domain"
 	"cdn-platform/internal/logstore"
+	"cdn-platform/internal/store"
 )
 
 type searchLogStore struct {
@@ -20,6 +23,16 @@ type searchLogStore struct {
 	query logstore.LogQuery
 	page  logstore.LogPage
 	err   error
+}
+
+type appendLogStore struct {
+	logstore.Noop
+	events []domain.AccessLogEvent
+}
+
+func (s *appendLogStore) Append(_ context.Context, events []domain.AccessLogEvent) error {
+	s.events = append(s.events, events...)
+	return nil
 }
 
 func (s *searchLogStore) Search(_ context.Context, query logstore.LogQuery) (logstore.LogPage, error) {
@@ -115,5 +128,53 @@ func TestLogSearchMapsStoreFailureToBadGateway(t *testing.T) {
 	(&Server{Logs: &searchLogStore{err: errors.New("clickhouse unavailable")}}).searchLogs(response, request)
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("unexpected response: code=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestEdgeLogsAcceptPublishedAssignmentWhileDraftMoveIsPending(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	oldNode, err := database.CreateNode("edge-old", "203.0.113.70")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNode, err := database.CreateNode("edge-new", "203.0.113.71")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "logs", Domains: []string{"logs.example.test"}, Nodes: []string{oldNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Nodes = []string{newNode.ID}
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+
+	logs := &appendLogStore{}
+	server := &Server{Store: database, Logs: logs}
+	body, err := json.Marshal([]domain.AccessLogEvent{{SiteID: site.ID, Method: http.MethodGet, Path: "/"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/edge/v1/logs", bytes.NewReader(body))
+	request = request.WithContext(context.WithValue(request.Context(), edgeContextKey{}, oldNode.ID))
+	response := httptest.NewRecorder()
+	server.writeLogs(response, request)
+	if response.Code != http.StatusAccepted || len(logs.events) != 1 || logs.events[0].NodeID != oldNode.ID || logs.events[0].SiteID != site.ID {
+		t.Fatalf("published-assignment logs were rejected: status=%d events=%#v body=%s", response.Code, logs.events, response.Body.String())
 	}
 }

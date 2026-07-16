@@ -68,13 +68,26 @@ func (s *Server) prepareNodeUninstall(response http.ResponseWriter, request *htt
 		writeStoreError(response, err)
 		return
 	}
+	publications, err := s.Store.ListSitePublications()
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
 	affected := make([]string, 0)
+	affectedByID := make(map[string]bool)
 	zones := make(map[string]bool)
-	for _, site := range sites {
+	addAffected := func(site domain.Site) {
 		zones[site.ZoneID] = true
-		if siteHasNode(site, nodeID) {
+		if siteHasNode(site, nodeID) && !affectedByID[site.ID] {
+			affectedByID[site.ID] = true
 			affected = append(affected, site.ID)
 		}
+	}
+	for _, site := range sites {
+		addAffected(site)
+	}
+	for _, publication := range publications {
+		addAffected(publication.Site)
 	}
 	for zoneID := range zones {
 		if err := s.DNS.RemoveNode(request.Context(), zoneID, nodeID); err != nil {
@@ -314,17 +327,37 @@ func (s *Server) buildNodeUninstallStatus(nodeID string) (nodeUninstallStatusRes
 			result.Blockers = append(result.Blockers, nodeUninstallBlocker{Code: "still_assigned", SiteID: site.ID, SiteName: site.Name, Detail: "remove this node from the site"})
 		}
 	}
+	publications, err := s.Store.ListSitePublications()
+	if err != nil {
+		return nodeUninstallStatusResponse{}, err
+	}
+	publicationsByID := make(map[string]domain.Site, len(publications))
+	for _, publication := range publications {
+		publicationsByID[publication.Site.ID] = publication.Site
+	}
 	for _, siteID := range job.AffectedSiteIDs {
 		site, found := sitesByID[siteID]
-		if !found || !site.Enabled || siteHasNode(site, nodeID) {
+		if !found || siteHasNode(site, nodeID) {
 			continue
 		}
-		if !site.Published {
+		published, hasPublication := publicationsByID[siteID]
+		if hasPublication && siteHasNode(published, nodeID) {
 			result.Blockers = append(result.Blockers, nodeUninstallBlocker{Code: "site_not_published", SiteID: site.ID, SiteName: site.Name, Detail: "publish the site after removing this node"})
 			continue
 		}
+		if !hasPublication && !site.Published {
+			result.Blockers = append(result.Blockers, nodeUninstallBlocker{Code: "site_not_published", SiteID: site.ID, SiteName: site.Name, Detail: "publish the site after removing this node"})
+			continue
+		}
+		liveSite := site
+		if hasPublication {
+			liveSite = published
+		}
+		if !liveSite.Enabled {
+			continue
+		}
 		active := 0
-		for _, assignedNodeID := range site.Nodes {
+		for _, assignedNodeID := range liveSite.Nodes {
 			assignedNode, nodeErr := s.Store.GetNode(assignedNodeID)
 			if nodeErr == nil && assignedNode.Status == domain.NodeActive {
 				active++
@@ -347,11 +380,30 @@ func (s *Server) assignedSites(nodeID string) ([]domain.Site, error) {
 	if err != nil {
 		return nil, err
 	}
+	publications, err := s.Store.ListSitePublications()
+	if err != nil {
+		return nil, err
+	}
 	assigned := make([]domain.Site, 0)
+	assignedByID := make(map[string]bool)
+	sitesByID := make(map[string]domain.Site, len(sites))
 	for _, site := range sites {
+		sitesByID[site.ID] = site
 		if siteHasNode(site, nodeID) {
 			assigned = append(assigned, site)
+			assignedByID[site.ID] = true
 		}
+	}
+	for _, publication := range publications {
+		if !siteHasNode(publication.Site, nodeID) || assignedByID[publication.Site.ID] {
+			continue
+		}
+		if draft, found := sitesByID[publication.Site.ID]; found {
+			assigned = append(assigned, draft)
+		} else {
+			assigned = append(assigned, publication.Site)
+		}
+		assignedByID[publication.Site.ID] = true
 	}
 	return assigned, nil
 }

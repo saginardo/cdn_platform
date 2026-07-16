@@ -25,6 +25,7 @@ var (
 	ErrNodeAssigned   = errors.New("node is still assigned to a site")
 	ErrSiteDeleting   = errors.New("site deletion is in progress")
 	ErrSiteTaskActive = errors.New("site has an active publish or certificate task")
+	ErrSiteChanged    = errors.New("site changed while publication was being prepared; retry publish")
 )
 
 type Store struct {
@@ -125,6 +126,14 @@ CREATE TABLE IF NOT EXISTS certificates (
   private_key_ciphertext BLOB NOT NULL,
   not_after TEXT,
   updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS site_publications (
+  site_id TEXT PRIMARY KEY REFERENCES sites(id) ON DELETE CASCADE,
+  site_json TEXT NOT NULL,
+  certificate_ciphertext BLOB,
+  private_key_ciphertext BLOB,
+  certificate_not_after TEXT,
+  published_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS node_states (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
@@ -283,6 +292,9 @@ CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id
 		WHERE kind = 'delete_site' AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
 		return fmt.Errorf("create active site deletion task index: %w", err)
 	}
+	if err := s.backfillSitePublications(); err != nil {
+		return err
+	}
 	return s.backfillSiteDomains()
 }
 
@@ -315,6 +327,13 @@ func (s *Store) backfillSiteDomains() error {
 	}
 	if err := rows.Close(); err != nil {
 		return err
+	}
+	publications, err := s.ListSitePublications()
+	if err != nil {
+		return err
+	}
+	for _, publication := range publications {
+		sites = append(sites, existingSite{id: publication.Site.ID, domains: publication.Site.Domains})
 	}
 	for _, site := range sites {
 		for _, domainName := range site.domains {
@@ -1098,10 +1117,13 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	if err := validateSiteNodes(tx, site.Nodes); err != nil {
 		return domain.Site{}, err
 	}
-	if _, err := tx.Exec(`DELETE FROM site_domains WHERE site_id = ?`, site.ID); err != nil {
+	reservedDomains := append([]string(nil), site.Domains...)
+	publishedDomains, err := publishedSiteDomains(tx, site.ID)
+	if err != nil {
 		return domain.Site{}, err
 	}
-	if err := claimDomains(tx, site.ID, site.Domains); err != nil {
+	reservedDomains = append(reservedDomains, publishedDomains...)
+	if err := replaceSiteDomainClaims(tx, site.ID, reservedDomains); err != nil {
 		return domain.Site{}, err
 	}
 	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, cache_generation=?, config_version=?, published=?, enabled=?, deleting=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.UpdatedAt), site.ID)
@@ -1143,7 +1165,12 @@ func validateSiteNodes(queryer rowQueryer, nodeIDs []string) error {
 }
 
 func claimDomains(tx *sql.Tx, siteID string, domains []string) error {
+	claimed := make(map[string]struct{}, len(domains))
 	for _, domainName := range domains {
+		if _, exists := claimed[domainName]; exists {
+			continue
+		}
+		claimed[domainName] = struct{}{}
 		if _, err := tx.Exec(`INSERT INTO site_domains(domain_name, site_id) VALUES (?, ?)`, domainName, siteID); err != nil {
 			return fmt.Errorf("domain %s is already assigned to another site: %w", domainName, err)
 		}
@@ -1152,22 +1179,7 @@ func claimDomains(tx *sql.Tx, siteID string, domains []string) error {
 }
 
 func (s *Store) MarkSitePublished(siteID string) (domain.Site, error) {
-	result, err := s.db.Exec(`UPDATE sites SET published = 1, updated_at = ? WHERE id = ? AND deleting = 0`, stamp(now()), siteID)
-	if err != nil {
-		return domain.Site{}, err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil {
-		return domain.Site{}, err
-	}
-	if changed != 1 {
-		if site, _, lookupErr := s.GetSite(siteID); lookupErr == nil && site.Deleting {
-			return domain.Site{}, ErrSiteDeleting
-		}
-		return domain.Site{}, ErrNotFound
-	}
-	site, _, err := s.GetSite(siteID)
-	return site, err
+	return s.CommitSitePublication(siteID, 0, "", nil, nil)
 }
 
 func (s *Store) InvalidateSiteCache(siteID string) (domain.Site, error) {
@@ -1181,7 +1193,7 @@ func (s *Store) InvalidateSiteCache(siteID string) (domain.Site, error) {
 	if site.Passthrough {
 		return domain.Site{}, ErrCacheDisabled
 	}
-	result, err := s.db.Exec(`UPDATE sites SET cache_generation = cache_generation + 1, config_version = config_version + 1, updated_at = ? WHERE id = ?`, stamp(now()), siteID)
+	result, err := s.db.Exec(`UPDATE sites SET cache_generation = cache_generation + 1, config_version = config_version + 1, published = 0, updated_at = ? WHERE id = ?`, stamp(now()), siteID)
 	if err != nil {
 		return domain.Site{}, err
 	}
@@ -1361,6 +1373,16 @@ func (s *Store) CreatePublishTaskNodes(taskID string, targets []PublishTaskNode)
 		return err
 	}
 	defer tx.Rollback()
+	if err := createPublishTaskNodesTx(tx, taskID, targets); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func createPublishTaskNodesTx(tx *sql.Tx, taskID string, targets []PublishTaskNode) error {
+	if len(targets) != 0 && strings.TrimSpace(taskID) == "" {
+		return errors.New("publish task node targets are missing a task ID")
+	}
 	for _, target := range targets {
 		if target.NodeID == "" || target.TargetVersion < 1 {
 			return errors.New("invalid publish task node target")
@@ -1369,7 +1391,7 @@ func (s *Store) CreatePublishTaskNodes(taskID string, targets []PublishTaskNode)
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) RecordPublishApply(nodeID string, report domain.ApplyReport) error {
@@ -1633,8 +1655,39 @@ func (s *Store) SaveCertificate(siteID string, certificateCiphertext, keyCiphert
 	if notAfter != nil {
 		expires = stamp(*notAfter)
 	}
-	_, err := s.db.Exec(`INSERT INTO certificates(site_id, certificate_ciphertext, private_key_ciphertext, not_after, updated_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(site_id) DO UPDATE SET certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=excluded.private_key_ciphertext, not_after=excluded.not_after, updated_at=excluded.updated_at`, siteID, certificateCiphertext, keyCiphertext, expires, stamp(now()))
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	updatedAt := stamp(now())
+	result, err := tx.Exec(`UPDATE sites SET config_version = config_version + 1, published = 0, updated_at = ?
+		WHERE id = ? AND deleting = 0`, updatedAt, siteID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		var deleting int
+		lookupErr := tx.QueryRow(`SELECT deleting FROM sites WHERE id = ?`, siteID).Scan(&deleting)
+		if lookupErr == nil && deleting != 0 {
+			return ErrSiteDeleting
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+			return lookupErr
+		}
+		return ErrNotFound
+	}
+	if _, err := tx.Exec(`INSERT INTO certificates(site_id, certificate_ciphertext, private_key_ciphertext, not_after, updated_at)
+		VALUES (?, ?, ?, ?, ?) ON CONFLICT(site_id) DO UPDATE SET
+		certificate_ciphertext=excluded.certificate_ciphertext,
+		private_key_ciphertext=excluded.private_key_ciphertext,
+		not_after=excluded.not_after, updated_at=excluded.updated_at`,
+		siteID, certificateCiphertext, keyCiphertext, expires, updatedAt); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Certificate(siteID string) ([]byte, []byte, *time.Time, error) {

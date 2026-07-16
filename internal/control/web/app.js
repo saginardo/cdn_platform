@@ -190,8 +190,8 @@ function publishDetailMarkup(publishStatus) {
 
 function siteStateMarkup(site) {
   if (site.deleting) return '<span class="status applying">删除中</span>';
-  if (!site.enabled) return '<span class="status disabled">已停用</span>';
   if (!site.published) return '<span class="status pending">待发布</span>';
+  if (!site.enabled) return '<span class="status disabled">已停用</span>';
   return '<span class="status active">已发布</span>';
 }
 

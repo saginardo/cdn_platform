@@ -94,12 +94,8 @@ func (m *SiteDeletionManager) advance(ctx context.Context, taskID string) error 
 			if err := m.DNS.Reconcile(ctx, zoneID, "site="+site.ID, nil); err != nil {
 				return fmt.Errorf("withdraw managed DNS for %s: %w", site.Name, err)
 			}
-			updates, targets, err := m.Publisher.PrepareSiteRemoval(site.ID)
-			if err != nil {
+			if err := m.Publisher.StageSiteRemoval(taskID, site.ID); err != nil {
 				return fmt.Errorf("prepare edge removal for %s: %w", site.Name, err)
-			}
-			if err := m.Store.StageSiteDeletion(taskID, updates, targets); err != nil {
-				return err
 			}
 		case store.SiteDeletionWaitingForEdges:
 			ready, err := m.Store.SiteDeletionReady(taskID)

@@ -78,19 +78,38 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 			_ = m.Server.Notifier.Notify(ctx, "CDN alert: edge node removed from DNS pool", "Node "+node.Name+" ("+node.PublicIPv4+") failed three consecutive health checks: "+detail)
 		}
 	}
-	sites, err := m.Server.Store.ListSites()
+	drafts, err := m.Server.Store.ListSites()
 	if err != nil {
 		return err
 	}
-	for _, site := range sites {
+	publications, err := m.Server.Store.ListSitePublications()
+	if err != nil {
+		return err
+	}
+	draftsByID := make(map[string]domain.Site, len(drafts))
+	publishedByID := make(map[string]bool, len(publications))
+	for _, publication := range publications {
+		publishedByID[publication.Site.ID] = true
+	}
+	for _, draft := range drafts {
+		draftsByID[draft.ID] = draft
+		if draft.Deleting || (!draft.Enabled && !publishedByID[draft.ID]) {
+			if err := m.clearSiteDNS(ctx, draft); err != nil {
+				return err
+			}
+			m.clearNoHealthyAlert(draft.ID)
+		}
+	}
+	for _, publication := range publications {
+		site := publication.Site
+		if draft, found := draftsByID[site.ID]; !found || draft.Deleting {
+			continue
+		}
 		if !site.Enabled {
 			if err := m.clearSiteDNS(ctx, site); err != nil {
 				return err
 			}
 			m.clearNoHealthyAlert(site.ID)
-			continue
-		}
-		if !site.Published {
 			continue
 		}
 		if err := m.reconcileSite(ctx, site, nodes); err != nil {

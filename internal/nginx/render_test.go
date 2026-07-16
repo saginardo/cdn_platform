@@ -13,7 +13,7 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "client_max_body_size 128m;", "keepalive_timeout 300s;", "keepalive_requests 1000;", "keepalive 30;", "proxy_connect_timeout 10s;", "recursive_error_pages on;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Upgrade \"\";", "proxy_set_header Connection \"\";", "location @cdn_http_site-1", "location @cdn_stream_site-1", "location @cdn_backup_site-1", "location @cdn_stream_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health", `return 200 "site=site-1\n";`} {
+	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "listen 443 ssl default_server;", "ssl_reject_handshake on;", "client_max_body_size 128m;", "keepalive_timeout 300s;", "keepalive_requests 1000;", "keepalive 30;", "proxy_connect_timeout 10s;", "recursive_error_pages on;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Upgrade \"\";", "proxy_set_header Connection \"\";", "location @cdn_http_site-1", "location @cdn_stream_site-1", "location @cdn_backup_site-1", "location @cdn_stream_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health", `return 200 "site=site-1\n";`} {
 		if !strings.Contains(configuration, expected) {
 			t.Fatalf("missing %q from config:\n%s", expected, configuration)
 		}
@@ -117,6 +117,9 @@ func TestRenderEmptyNodeConfigurationDoesNotReferenceSiteVariables(t *testing.T)
 		if strings.Contains(configuration, unexpected) {
 			t.Fatalf("empty node configuration contains %q:\n%s", unexpected, configuration)
 		}
+	}
+	if strings.Contains(configuration, "listen 443") || strings.Contains(configuration, "ssl_reject_handshake") {
+		t.Fatalf("empty node configuration unexpectedly listens on HTTPS:\n%s", configuration)
 	}
 }
 

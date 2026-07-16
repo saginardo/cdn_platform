@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"cdn-platform/internal/domain"
+	"cdn-platform/internal/nginx"
 	"cdn-platform/internal/store"
 )
 
@@ -74,6 +75,393 @@ func TestPublishRequiresCertificateAndThenMarksPublished(t *testing.T) {
 	}
 	if _, _, _, err := database.Certificate("missing"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected missing certificate: %v", err)
+	}
+}
+
+func TestPublishingOneSitePreservesAnotherSitesPublishedSnapshot(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := Publisher{Store: database, Cipher: cipher}
+	sharedNode, err := database.CreateNode("edge-shared", "203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiOnlyNode, err := database.CreateNode("edge-api", "203.0.113.11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiSite, err := database.CreateSite(domain.Site{
+		Name: "api", Domains: []string{"api.example.test"}, Nodes: []string{sharedNode.ID, apiOnlyNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://api-old-origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone-api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiOldCertificate, apiOldKey, apiOldNotAfter := testCertificate(t, apiSite.Domains...)
+	if err := publisher.StoreCertificate(apiSite.ID, apiOldCertificate, apiOldKey, apiOldNotAfter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(apiSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	nodeSite, err := database.CreateSite(domain.Site{
+		Name: "node", Domains: []string{"node.example.test"}, Nodes: []string{sharedNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://node-old-origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeCertificate, nodeKey, nodeNotAfter := testCertificate(t, nodeSite.Domains...)
+	if err := publisher.StoreCertificate(nodeSite.ID, nodeCertificate, nodeKey, nodeNotAfter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(nodeSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	sharedBefore, _, err := database.NodeState(sharedNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiOnlyBefore, apiOnlyCertificatesBefore, err := database.NodeState(apiOnlyNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apiDraft, zoneID, err := database.GetSite(apiSite.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiDraft.PrimaryOrigin.URL = "https://api-draft-origin.example.test"
+	if _, err := database.UpdateSite(apiDraft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	apiDraftCertificate, apiDraftKey, apiDraftNotAfter := testCertificate(t, apiSite.Domains...)
+	if err := publisher.StoreCertificate(apiSite.ID, apiDraftCertificate, apiDraftKey, apiDraftNotAfter); err != nil {
+		t.Fatal(err)
+	}
+	nodeDraft, nodeZoneID, err := database.GetSite(nodeSite.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeDraft.PrimaryOrigin.URL = "https://node-new-origin.example.test"
+	if _, err := database.UpdateSite(nodeDraft, nodeZoneID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(nodeSite.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	apiAfter, _, err := database.GetSite(apiSite.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiAfter.Published {
+		t.Fatal("publishing node unexpectedly promoted the API draft")
+	}
+	sharedAfter, sharedCertificatesCiphertext, err := database.NodeState(sharedNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sharedAfter.Version != sharedBefore.Version+1 {
+		t.Fatalf("shared node version = %d, want %d", sharedAfter.Version, sharedBefore.Version+1)
+	}
+	if !strings.Contains(sharedAfter.NginxConfig, "api-old-origin.example.test:443") || strings.Contains(sharedAfter.NginxConfig, "api-draft-origin.example.test:443") {
+		t.Fatalf("shared node did not retain the published API origin:\n%s", sharedAfter.NginxConfig)
+	}
+	if !strings.Contains(sharedAfter.NginxConfig, "node-new-origin.example.test:443") {
+		t.Fatalf("shared node did not receive the node draft:\n%s", sharedAfter.NginxConfig)
+	}
+	encodedCertificates, err := cipher.Decrypt(sharedCertificatesCiphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sharedCertificates map[string]domain.TLSBundle
+	if err := json.Unmarshal(encodedCertificates, &sharedCertificates); err != nil {
+		t.Fatal(err)
+	}
+	if got := sharedCertificates[apiSite.ID].CertificatePEM; got != string(apiOldCertificate) || got == string(apiDraftCertificate) {
+		t.Fatal("shared node did not retain the published API certificate")
+	}
+	apiOnlyAfter, apiOnlyCertificatesAfter, err := database.NodeState(apiOnlyNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiOnlyAfter.Version != apiOnlyBefore.Version || apiOnlyAfter.NginxConfig != apiOnlyBefore.NginxConfig || !bytes.Equal(apiOnlyCertificatesAfter, apiOnlyCertificatesBefore) {
+		t.Fatalf("unaffected API-only node was rewritten: before=%#v after=%#v", apiOnlyBefore, apiOnlyAfter)
+	}
+}
+
+func TestPublishUpdatesOldAndNewNodesButNotUnrelatedNodes(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := Publisher{Store: database, Cipher: cipher}
+	oldNode, err := database.CreateNode("edge-old", "203.0.113.20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNode, err := database.CreateNode("edge-new", "203.0.113.21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedNode, err := database.CreateNode("edge-unrelated", "203.0.113.22")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedSite, err := database.CreateSite(domain.Site{
+		Name: "unrelated", Domains: []string{"unrelated.example.test"}, Nodes: []string{unrelatedNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://unrelated-origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone-unrelated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedCertificate, unrelatedKey, unrelatedNotAfter := testCertificate(t, unrelatedSite.Domains...)
+	if err := publisher.StoreCertificate(unrelatedSite.ID, unrelatedCertificate, unrelatedKey, unrelatedNotAfter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(unrelatedSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedBefore, unrelatedCertificatesBefore, err := database.NodeState(unrelatedNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	movingSite, err := database.CreateSite(domain.Site{
+		Name: "moving", Domains: []string{"moving.example.test"}, Nodes: []string{oldNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://moving-origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone-moving")
+	if err != nil {
+		t.Fatal(err)
+	}
+	movingCertificate, movingKey, movingNotAfter := testCertificate(t, movingSite.Domains...)
+	if err := publisher.StoreCertificate(movingSite.ID, movingCertificate, movingKey, movingNotAfter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(movingSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(movingSite.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Nodes = []string{newNode.ID}
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(oldNode.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(newNode.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(movingSite.ID); err != nil {
+		t.Fatal(err)
+	}
+	status, err := database.PublishStatus(movingSite.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Task == nil || status.Task.Status != domain.TaskApplying || len(status.Nodes) != 2 {
+		t.Fatalf("publish did not wait for both old and new active nodes: %#v", status)
+	}
+	oldState, _, err := database.NodeState(oldNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nginx.HasSiteHealth(oldState.NginxConfig, movingSite.ID) {
+		t.Fatalf("old node retained moving site:\n%s", oldState.NginxConfig)
+	}
+	newState, _, err := database.NodeState(newNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nginx.HasSiteHealth(newState.NginxConfig, movingSite.ID) {
+		t.Fatalf("new node did not receive moving site:\n%s", newState.NginxConfig)
+	}
+	unrelatedAfter, unrelatedCertificatesAfter, err := database.NodeState(unrelatedNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unrelatedAfter.Version != unrelatedBefore.Version || unrelatedAfter.NginxConfig != unrelatedBefore.NginxConfig || !bytes.Equal(unrelatedCertificatesAfter, unrelatedCertificatesBefore) {
+		t.Fatalf("unrelated node was rewritten: before=%#v after=%#v", unrelatedBefore, unrelatedAfter)
+	}
+}
+
+func TestRepublishSkipsUnchangedNodeState(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-1", "203.0.113.30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "unchanged", Domains: []string{"unchanged.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := Publisher{Store: database, Cipher: cipher}
+	certificate, privateKey, notAfter := testCertificate(t, site.Domains...)
+	if err := publisher.StoreCertificate(site.ID, certificate, privateKey, notAfter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	before, beforeCertificates, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := publisher.PublishSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Status != domain.TaskSucceeded {
+		t.Fatalf("unchanged republish task = %#v", task)
+	}
+	after, afterCertificates, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Version != before.Version || after.NginxConfig != before.NginxConfig || !bytes.Equal(afterCertificates, beforeCertificates) {
+		t.Fatalf("unchanged node state was rewritten: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestLegacyPendingSiteMustBeRepublishedBeforeRemoval(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-legacy", "203.0.113.31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "legacy-pending", Domains: []string{"legacy-pending.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := database.CreateTask("publish_site", site.ID, "legacy publication")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateTask(task.ID, domain.TaskSucceeded, task.Detail); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := (Publisher{Store: database}).prepareNodeStates(site.ID, true); err == nil || !strings.Contains(err.Error(), "without a published snapshot") {
+		t.Fatalf("legacy pending removal was not blocked: %v", err)
+	}
+}
+
+func TestLegacyPendingSitePublicationSweepsUnknownOldNodes(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := Publisher{Store: database, Cipher: cipher}
+	oldNode, err := database.CreateNode("edge-legacy-old", "203.0.113.32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNode, err := database.CreateNode("edge-legacy-new", "203.0.113.33")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "legacy-move", Domains: []string{"legacy-move.example.test"}, Nodes: []string{oldNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificate, privateKey, notAfter := testCertificate(t, site.Domains...)
+	if err := publisher.StoreCertificate(site.ID, certificate, privateKey, notAfter); err != nil {
+		t.Fatal(err)
+	}
+	oldConfiguration, err := nginx.Render([]domain.Site{site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveNodeState(oldNode.ID, domain.DesiredState{Version: 7, NginxConfig: oldConfiguration, PublicPorts: []int{80, 443}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	legacyTask, err := database.CreateTask("publish_site", site.ID, "legacy publication")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateTask(legacyTask.ID, domain.TaskSucceeded, legacyTask.Detail); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Nodes = []string{newNode.ID}
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	oldState, _, err := database.NodeState(oldNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nginx.HasSiteHealth(oldState.NginxConfig, site.ID) {
+		t.Fatalf("legacy old node retained the site:\n%s", oldState.NginxConfig)
+	}
+	newState, _, err := database.NodeState(newNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !nginx.HasSiteHealth(newState.NginxConfig, site.ID) {
+		t.Fatalf("legacy new node did not receive the site:\n%s", newState.NginxConfig)
 	}
 }
 

@@ -92,6 +92,57 @@ func TestSiteClientMaxBodySizeAPI(t *testing.T) {
 	}
 }
 
+func TestOriginAllowlistIncludesPublishedAndDraftAssignments(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	oldNode, err := database.CreateNode("edge-old", "203.0.113.72")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newNode, err := database.CreateNode("edge-new", "203.0.113.73")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "allowlist", Domains: []string{"allowlist.example.test"}, Nodes: []string{oldNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Nodes = []string{newNode.ID}
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/sites/"+site.ID+"/origin-allowlist", nil)
+	request.SetPathValue("id", site.ID)
+	response := httptest.NewRecorder()
+	(&Server{Store: database}).originAllowlist(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("allowlist response = %d %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		CIDRs []string `json:"ipv4_cidrs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.CIDRs) != 2 || payload.CIDRs[0] != newNode.PublicIPv4+"/32" || payload.CIDRs[1] != oldNode.PublicIPv4+"/32" {
+		t.Fatalf("allowlist omitted a published or draft node: %#v", payload.CIDRs)
+	}
+}
+
 func TestSiteReadWriteTimeoutAPI(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

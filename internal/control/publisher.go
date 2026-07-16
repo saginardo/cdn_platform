@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"maps"
+	"slices"
+	"sort"
+	"sync"
 	"time"
 
 	"cdn-platform/internal/domain"
@@ -18,7 +22,11 @@ type Publisher struct {
 	Cipher *Cipher
 }
 
+var desiredStateMu sync.Mutex
+
 func (p Publisher) PublishSite(siteID string) (domain.DeploymentTask, error) {
+	desiredStateMu.Lock()
+	defer desiredStateMu.Unlock()
 	site, _, err := p.Store.GetSite(siteID)
 	if err != nil {
 		return domain.DeploymentTask{}, err
@@ -40,12 +48,8 @@ func (p Publisher) PublishSite(siteID string) (domain.DeploymentTask, error) {
 	if err := p.Store.UpdateTask(task.ID, domain.TaskApplying, "preparing edge configuration confirmation"); err != nil {
 		return task, err
 	}
-	targets, err := p.publishSite(siteID, task.ID)
+	targets, err := p.publishSite(siteID, task.ID, site.ConfigVersion)
 	if err != nil {
-		_ = p.Store.UpdateTask(task.ID, domain.TaskFailed, err.Error())
-		return task, err
-	}
-	if _, err := p.Store.MarkSitePublished(siteID); err != nil {
 		_ = p.Store.UpdateTask(task.ID, domain.TaskFailed, err.Error())
 		return task, err
 	}
@@ -56,46 +60,85 @@ func (p Publisher) PublishSite(siteID string) (domain.DeploymentTask, error) {
 }
 
 func (p Publisher) PublishAll() error {
-	sites, err := p.Store.ListSites()
+	desiredStateMu.Lock()
+	defer desiredStateMu.Unlock()
+	if err := p.Store.CheckPublicationMigrationSafety(""); err != nil {
+		return err
+	}
+	publications, err := p.Store.ListSitePublications()
 	if err != nil {
 		return err
 	}
-	for _, site := range sites {
-		if !site.Published || site.Deleting {
-			continue
-		}
-		if _, err := p.PublishSite(site.ID); err != nil {
-			return err
-		}
+	nodes, err := p.Store.ListNodes()
+	if err != nil {
+		return err
 	}
-	return nil
+	affected := make(map[string]struct{}, len(nodes))
+	for _, node := range nodes {
+		affected[node.ID] = struct{}{}
+	}
+	updates, _, err := p.renderNodeStateUpdates(publicationMaterials(publications), affected)
+	if err != nil {
+		return err
+	}
+	return p.Store.SaveNodeStates(updates)
 }
 
-func (p Publisher) publishSite(siteID, publishTaskID string) ([]store.PublishTaskNode, error) {
+type publicationMaterial struct {
+	Site                  domain.Site
+	CertificateCiphertext []byte
+	KeyCiphertext         []byte
+}
+
+type renderedPublication struct {
+	Site   domain.Site
+	Bundle domain.TLSBundle
+}
+
+func publicationMaterials(publications []store.SitePublication) []publicationMaterial {
+	materials := make([]publicationMaterial, 0, len(publications))
+	for _, publication := range publications {
+		if publication.Site.Deleting {
+			continue
+		}
+		materials = append(materials, publicationMaterial{
+			Site:                  publication.Site,
+			CertificateCiphertext: publication.CertificateCiphertext,
+			KeyCiphertext:         publication.KeyCiphertext,
+		})
+	}
+	return materials
+}
+
+func (p Publisher) publishSite(siteID, publishTaskID string, expectedConfigVersion int64) ([]store.PublishTaskNode, error) {
 	updates, targets, err := p.prepareNodeStates(siteID, false)
 	if err != nil {
 		return nil, err
 	}
-	if len(updates) == 0 {
-		return nil, fmt.Errorf("no eligible edge nodes are available for publication")
-	}
-	// Persist targets before exposing the desired state. An agent can poll and
-	// fail quickly (for example due to a port conflict), so a later target
-	// insert would lose its first structured report.
-	if err := p.Store.CreatePublishTaskNodes(publishTaskID, targets); err != nil {
-		return nil, err
-	}
-	if err := p.Store.SaveNodeStates(updates); err != nil {
+	if _, err := p.Store.CommitSitePublication(siteID, expectedConfigVersion, publishTaskID, updates, targets); err != nil {
 		return nil, err
 	}
 	return targets, nil
 }
 
-func (p Publisher) PrepareSiteRemoval(siteID string) ([]store.NodeStateUpdate, []store.PublishTaskNode, error) {
-	return p.prepareNodeStates(siteID, true)
+func (p Publisher) StageSiteRemoval(taskID, siteID string) error {
+	desiredStateMu.Lock()
+	defer desiredStateMu.Unlock()
+	updates, targets, err := p.prepareNodeStates(siteID, true)
+	if err != nil {
+		return err
+	}
+	return p.Store.StageSiteDeletion(taskID, updates, targets)
 }
 
 func (p Publisher) prepareNodeStates(siteID string, removing bool) ([]store.NodeStateUpdate, []store.PublishTaskNode, error) {
+	migrationExclusion := siteID
+	if removing {
+		migrationExclusion = ""
+	}
+	if err := p.Store.CheckPublicationMigrationSafety(migrationExclusion); err != nil {
+		return nil, nil, err
+	}
 	targetSite, _, err := p.Store.GetSite(siteID)
 	if err != nil {
 		return nil, nil, err
@@ -103,7 +146,70 @@ func (p Publisher) prepareNodeStates(siteID string, removing bool) ([]store.Node
 	if !removing && targetSite.Deleting {
 		return nil, nil, store.ErrSiteDeleting
 	}
-	allSites, err := p.Store.ListSites()
+	migrationRequired, err := p.Store.PublicationMigrationRequired(siteID)
+	if err != nil {
+		return nil, nil, err
+	}
+	publications, err := p.Store.ListSitePublications()
+	if err != nil {
+		return nil, nil, err
+	}
+	materialsByID := make(map[string]publicationMaterial, len(publications)+1)
+	affected := make(map[string]struct{})
+	for _, publication := range publications {
+		materialsByID[publication.Site.ID] = publicationMaterial{
+			Site:                  publication.Site,
+			CertificateCiphertext: publication.CertificateCiphertext,
+			KeyCiphertext:         publication.KeyCiphertext,
+		}
+		if publication.Site.ID == siteID {
+			for _, nodeID := range publication.Site.Nodes {
+				affected[nodeID] = struct{}{}
+			}
+		}
+	}
+	if removing {
+		delete(materialsByID, siteID)
+		for _, nodeID := range targetSite.Nodes {
+			affected[nodeID] = struct{}{}
+		}
+	} else {
+		certificate, key, _, certificateErr := p.Store.Certificate(siteID)
+		if certificateErr != nil {
+			if certificateErr != store.ErrNotFound {
+				return nil, nil, certificateErr
+			}
+			if targetSite.Enabled {
+				return nil, nil, fmt.Errorf("site %s needs a certificate before it can be published", targetSite.Name)
+			}
+		}
+		materialsByID[siteID] = publicationMaterial{Site: targetSite, CertificateCiphertext: certificate, KeyCiphertext: key}
+		for _, nodeID := range targetSite.Nodes {
+			affected[nodeID] = struct{}{}
+		}
+	}
+	materials := make([]publicationMaterial, 0, len(materialsByID))
+	for _, material := range materialsByID {
+		if material.Site.Deleting {
+			continue
+		}
+		materials = append(materials, material)
+	}
+	sort.Slice(materials, func(i, j int) bool { return materials[i].Site.ID < materials[j].Site.ID })
+	if migrationRequired {
+		nodes, err := p.Store.ListNodes()
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, node := range nodes {
+			affected[node.ID] = struct{}{}
+		}
+	}
+	return p.renderNodeStateUpdates(materials, affected)
+}
+
+func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affected map[string]struct{}) ([]store.NodeStateUpdate, []store.PublishTaskNode, error) {
+	rendered, err := p.decryptPublicationMaterials(materials, affected)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -111,62 +217,39 @@ func (p Publisher) prepareNodeStates(siteID string, removing bool) ([]store.Node
 	if err != nil {
 		return nil, nil, err
 	}
-	updates := make([]store.NodeStateUpdate, 0, len(nodes))
-	targets := make([]store.PublishTaskNode, 0)
+	updates := make([]store.NodeStateUpdate, 0, len(affected))
+	targets := make([]store.PublishTaskNode, 0, len(affected))
 	for _, node := range nodes {
+		if _, found := affected[node.ID]; !found {
+			continue
+		}
 		if node.Status == domain.NodeRevoked || node.Status == domain.NodeUninstalling || node.Status == domain.NodeUninstalled {
 			continue
 		}
-		nodeSites := assignedPublishedSites(allSites, node.ID, siteID)
-		if removing {
-			nodeSites = assignedPublishedSitesExcluding(allSites, node.ID, siteID)
-		}
-		for _, assignedSite := range nodeSites {
-			certificateCiphertext, keyCiphertext, _, certificateErr := p.Store.Certificate(assignedSite.ID)
-			if certificateErr != nil {
-				return nil, nil, fmt.Errorf("site %s needs a certificate before it can be published to node %s", assignedSite.Name, node.Name)
+		nodeSites := make([]domain.Site, 0)
+		certificates := make(map[string]domain.TLSBundle)
+		for _, publication := range rendered {
+			if !siteHasNode(publication.Site, node.ID) {
+				continue
 			}
-			certificatePEM, err := p.Cipher.Decrypt(certificateCiphertext)
-			if err != nil {
-				return nil, nil, fmt.Errorf("decrypt certificate for %s: %w", assignedSite.Name, err)
-			}
-			if err := validateCertificateDomains(certificatePEM, assignedSite.Domains, time.Now().UTC()); err != nil {
-				return nil, nil, fmt.Errorf("site %s certificate: %w", assignedSite.Name, err)
-			}
-			privateKeyPEM, err := p.Cipher.Decrypt(keyCiphertext)
-			if err != nil {
-				return nil, nil, fmt.Errorf("decrypt private key for %s: %w", assignedSite.Name, err)
-			}
-			if err := validateCertificatePrivateKey(certificatePEM, privateKeyPEM); err != nil {
-				return nil, nil, fmt.Errorf("site %s certificate private key: %w", assignedSite.Name, err)
-			}
+			nodeSites = append(nodeSites, publication.Site)
+			certificates[publication.Site.ID] = publication.Bundle
 		}
 		config, err := nginx.Render(nodeSites)
 		if err != nil {
 			return nil, nil, err
 		}
 		version := int64(1)
-		if previous, _, stateErr := p.Store.NodeState(node.ID); stateErr == nil {
+		previous, previousCertificates, stateErr := p.Store.NodeState(node.ID)
+		if stateErr == nil {
+			if p.nodeStateMatches(previous, previousCertificates, config, requiredPublicPorts(nodeSites), certificates) {
+				continue
+			}
 			version = previous.Version + 1
 		} else if stateErr != nil && stateErr != store.ErrNotFound {
 			return nil, nil, stateErr
 		}
-		state := domain.DesiredState{Version: version, NginxConfig: config, PublicPorts: requiredPublicPorts(nodeSites), Certificates: make(map[string]domain.TLSBundle)}
-		for _, assignedSite := range nodeSites {
-			cert, key, _, certificateErr := p.Store.Certificate(assignedSite.ID)
-			if certificateErr != nil {
-				continue
-			}
-			certificatePEM, err := p.Cipher.Decrypt(cert)
-			if err != nil {
-				return nil, nil, fmt.Errorf("decrypt certificate for %s: %w", assignedSite.Name, err)
-			}
-			privateKeyPEM, err := p.Cipher.Decrypt(key)
-			if err != nil {
-				return nil, nil, fmt.Errorf("decrypt private key for %s: %w", assignedSite.Name, err)
-			}
-			state.Certificates[assignedSite.ID] = domain.TLSBundle{CertificatePEM: string(certificatePEM), PrivateKeyPEM: string(privateKeyPEM)}
-		}
+		state := domain.DesiredState{Version: version, NginxConfig: config, PublicPorts: requiredPublicPorts(nodeSites), Certificates: certificates}
 		serialized, err := json.Marshal(state.Certificates)
 		if err != nil {
 			return nil, nil, err
@@ -176,20 +259,64 @@ func (p Publisher) prepareNodeStates(siteID string, removing bool) ([]store.Node
 			return nil, nil, err
 		}
 		updates = append(updates, store.NodeStateUpdate{NodeID: node.ID, State: state, CertificatesCiphertext: encryptedCertificates})
-		isTarget := isAssignedToSite(siteID, nodeSites)
-		if removing {
-			isTarget = siteHasNode(targetSite, node.ID)
-		}
-		if node.Status == domain.NodeActive && isTarget {
+		if node.Status == domain.NodeActive {
 			targets = append(targets, store.PublishTaskNode{NodeID: node.ID, TargetVersion: version})
 		}
 	}
 	return updates, targets, nil
 }
 
-func isAssignedToSite(siteID string, sites []domain.Site) bool {
-	for _, site := range sites {
-		if site.ID == siteID {
+func (p Publisher) decryptPublicationMaterials(materials []publicationMaterial, affected map[string]struct{}) ([]renderedPublication, error) {
+	rendered := make([]renderedPublication, 0, len(materials))
+	for _, material := range materials {
+		if !material.Site.Enabled || !siteTouchesNodes(material.Site, affected) {
+			continue
+		}
+		if len(material.CertificateCiphertext) == 0 || len(material.KeyCiphertext) == 0 {
+			return nil, fmt.Errorf("site %s needs a certificate before its node configuration can be rebuilt", material.Site.Name)
+		}
+		certificatePEM, err := p.Cipher.Decrypt(material.CertificateCiphertext)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt certificate for %s: %w", material.Site.Name, err)
+		}
+		if err := validateCertificateDomains(certificatePEM, material.Site.Domains, time.Now().UTC()); err != nil {
+			return nil, fmt.Errorf("site %s certificate: %w", material.Site.Name, err)
+		}
+		privateKeyPEM, err := p.Cipher.Decrypt(material.KeyCiphertext)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt private key for %s: %w", material.Site.Name, err)
+		}
+		if err := validateCertificatePrivateKey(certificatePEM, privateKeyPEM); err != nil {
+			return nil, fmt.Errorf("site %s certificate private key: %w", material.Site.Name, err)
+		}
+		rendered = append(rendered, renderedPublication{
+			Site: material.Site,
+			Bundle: domain.TLSBundle{
+				CertificatePEM: string(certificatePEM),
+				PrivateKeyPEM:  string(privateKeyPEM),
+			},
+		})
+	}
+	return rendered, nil
+}
+
+func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCertificates []byte, config string, ports []int, certificates map[string]domain.TLSBundle) bool {
+	if previous.NginxConfig != config || !slices.Equal(previous.PublicPorts, ports) {
+		return false
+	}
+	previousBundles := make(map[string]domain.TLSBundle)
+	if len(encryptedCertificates) != 0 {
+		encoded, err := p.Cipher.Decrypt(encryptedCertificates)
+		if err != nil || json.Unmarshal(encoded, &previousBundles) != nil {
+			return false
+		}
+	}
+	return maps.Equal(previousBundles, certificates)
+}
+
+func siteTouchesNodes(site domain.Site, nodeIDs map[string]struct{}) bool {
+	for _, nodeID := range site.Nodes {
+		if _, found := nodeIDs[nodeID]; found {
 			return true
 		}
 	}
@@ -226,51 +353,6 @@ func validateCertificateDomains(certificatePEM []byte, domains []string, now tim
 func validateCertificatePrivateKey(certificatePEM, privateKeyPEM []byte) error {
 	_, err := tls.X509KeyPair(certificatePEM, privateKeyPEM)
 	return err
-}
-
-func assignedSites(sites []domain.Site, nodeID string) []domain.Site {
-	var result []domain.Site
-	for _, site := range sites {
-		for _, assigned := range site.Nodes {
-			if assigned == nodeID {
-				result = append(result, site)
-				break
-			}
-		}
-	}
-	return result
-}
-
-func assignedPublishedSites(sites []domain.Site, nodeID, publishingSiteID string) []domain.Site {
-	var result []domain.Site
-	for _, site := range sites {
-		if !site.Enabled || site.Deleting {
-			continue
-		}
-		if !site.Published && site.ID != publishingSiteID {
-			continue
-		}
-		for _, assigned := range site.Nodes {
-			if assigned == nodeID {
-				result = append(result, site)
-				break
-			}
-		}
-	}
-	return result
-}
-
-func assignedPublishedSitesExcluding(sites []domain.Site, nodeID, excludedSiteID string) []domain.Site {
-	var result []domain.Site
-	for _, site := range sites {
-		if site.ID == excludedSiteID || site.Deleting || !site.Enabled || !site.Published {
-			continue
-		}
-		if siteHasNode(site, nodeID) {
-			result = append(result, site)
-		}
-	}
-	return result
 }
 
 func (p Publisher) StoreCertificate(siteID string, certificatePEM, privateKeyPEM []byte, notAfter time.Time) error {

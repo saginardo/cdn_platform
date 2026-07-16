@@ -68,6 +68,79 @@ func TestDisabledSiteWithdrawsManagedDNSBeforeRepublish(t *testing.T) {
 	}
 }
 
+func TestPendingSiteDraftDoesNotChangePublishedHealthOrDNS(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-1", "203.0.113.12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "published-site", Domains: []string{"old.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err = database.MarkSitePublished(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := nginx.Render([]domain.Site{site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveNodeState(node.ID, domain.DesiredState{Version: 1, NginxConfig: configuration}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Heartbeat(node.ID, 1, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if _, err := database.RecordNodeHealth(node.ID, true, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.RecordSiteNodeHealth(site.ID, node.ID, true, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Domains = []string{"draft.example.test"}
+	draft.Enabled = false
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	probedDomain := ""
+	dns := &MemoryDNS{}
+	manager := HealthManager{
+		Server: &Server{Store: database, DNS: dns},
+		Client: healthyNodeClient(),
+		SiteProbe: func(_ context.Context, published domain.Site, _ domain.Node) (bool, string) {
+			probedDomain = published.Domains[0]
+			return true, ""
+		},
+	}
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if probedDomain != "old.example.test" {
+		t.Fatalf("health probe used draft domain %q", probedDomain)
+	}
+	records := dns.Zones["zone-1"]
+	if len(records) != 1 || records[0].Name != "old.example.test" || records[0].Content != node.PublicIPv4 {
+		t.Fatalf("DNS did not retain the published snapshot: %#v", records)
+	}
+}
+
 func TestDrainedSitePoolWithdrawsManagedDNS(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

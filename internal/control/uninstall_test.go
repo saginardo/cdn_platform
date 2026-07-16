@@ -65,6 +65,58 @@ func TestPrepareNodeUninstallWithdrawsDNSAndReportsSiteBlockers(t *testing.T) {
 	}
 }
 
+func TestNodeUninstallTreatsPublishedAssignmentAsActiveWhileDraftIsPending(t *testing.T) {
+	server, database, cookie := newNodeUninstallTestServer(t)
+	oldNode, err := database.CreateNode("edge-old", "203.0.113.43")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := database.CreateNode("edge-replacement", "203.0.113.44")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "pending-move", Domains: []string{"pending-move.example.test"}, Nodes: []string{oldNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Nodes = []string{replacement.ID}
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(oldNode.ID, domain.NodeDraining); err != nil {
+		t.Fatal(err)
+	}
+
+	response := serveNodeUninstallAdmin(t, server, cookie, http.MethodPost, "/api/nodes/"+oldNode.ID+"/uninstall", nil)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("prepare response = %d %s", response.Code, response.Body.String())
+	}
+	var status nodeUninstallStatusResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Job == nil || len(status.Blockers) != 1 || status.Blockers[0].Code != "site_not_published" || status.Blockers[0].SiteID != site.ID {
+		t.Fatalf("published assignment was not retained as a blocker: %#v", status)
+	}
+	assigned, err := server.assignedSites(oldNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assigned) != 1 || assigned[0].ID != site.ID {
+		t.Fatalf("published assignment missing from node record guard: %#v", assigned)
+	}
+}
+
 func TestNodeUninstallCommandCallbacksAndRecordDeletion(t *testing.T) {
 	server, database, cookie := newNodeUninstallTestServer(t)
 	node, err := database.CreateNode("edge-remove", "203.0.113.50")

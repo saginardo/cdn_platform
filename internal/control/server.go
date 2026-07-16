@@ -746,15 +746,28 @@ func (s *Server) originAllowlist(response http.ResponseWriter, request *http.Req
 		writeStoreError(response, err)
 		return
 	}
-	addresses := make([]string, 0, len(site.Nodes))
-	for _, nodeID := range site.Nodes {
+	nodeIDs := append([]string(nil), site.Nodes...)
+	publication, publicationErr := s.Store.SitePublication(site.ID)
+	if publicationErr == nil {
+		nodeIDs = append(nodeIDs, publication.Site.Nodes...)
+	} else if !errors.Is(publicationErr, store.ErrNotFound) {
+		writeStoreError(response, publicationErr)
+		return
+	}
+	addresses := make([]string, 0, len(nodeIDs))
+	seenNodes := make(map[string]bool, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		if seenNodes[nodeID] {
+			continue
+		}
+		seenNodes[nodeID] = true
 		node, err := s.Store.GetNode(nodeID)
 		if err != nil || node.Status == domain.NodeRevoked || node.Status == domain.NodeUninstalling || node.Status == domain.NodeUninstalled {
 			continue
 		}
 		addresses = append(addresses, node.PublicIPv4+"/32")
 	}
-	writeJSON(response, http.StatusOK, map[string]any{"site_id": site.ID, "ipv4_cidrs": addresses, "note": "Allow only these edge IPv4 CIDRs at the origin firewall or security group. Update after adding, removing, or revoking a node."})
+	writeJSON(response, http.StatusOK, map[string]any{"site_id": site.ID, "ipv4_cidrs": addresses, "note": "Allow these edge IPv4 CIDRs at the origin firewall or security group. While node changes are pending, the list includes both published and draft assignments."})
 }
 
 func (s *Server) getTask(response http.ResponseWriter, request *http.Request) {
@@ -1073,13 +1086,24 @@ func (s *Server) writeLogs(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	allowedSites := make(map[string]struct{})
-	for _, site := range sites {
+	allowAssigned := func(site domain.Site) {
 		for _, assignedNodeID := range site.Nodes {
 			if assignedNodeID == nodeID {
 				allowedSites[site.ID] = struct{}{}
 				break
 			}
 		}
+	}
+	for _, site := range sites {
+		allowAssigned(site)
+	}
+	publications, err := s.Store.ListSitePublications()
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	for _, publication := range publications {
+		allowAssigned(publication.Site)
 	}
 	accepted := events[:0]
 	for index := range events {
@@ -1266,7 +1290,7 @@ func writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) {
+	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteChanged) {
 		writeError(response, http.StatusConflict, err)
 		return
 	}

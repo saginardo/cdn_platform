@@ -51,6 +51,13 @@ server {
     location / { return 404; }
 }
 
+{{if .Sites}}
+server {
+    listen 443 ssl default_server;
+    ssl_reject_handshake on;
+}
+{{end}}
+
 {{range .Sites}}
 {{if .BackupHostPort}}
 upstream origin_{{.ID}}_primary {

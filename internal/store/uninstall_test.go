@@ -182,6 +182,53 @@ func TestNodeUninstallLifecycleCleansPlatformState(t *testing.T) {
 	}
 }
 
+func TestDeleteNodeRejectsPublishedAssignmentMissingFromDraft(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	oldNode, err := database.CreateNode("edge-old", "203.0.113.82")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := database.CreateNode("edge-replacement", "203.0.113.83")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "pending-move", Domains: []string{"pending-move.example.test"}, Nodes: []string{oldNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Nodes = []string{replacement.ID}
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(oldNode.ID, domain.NodeDraining); err != nil {
+		t.Fatal(err)
+	}
+	job, err := database.PrepareNodeUninstall(oldNode.ID, nil, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(job.AffectedSiteIDs) != 1 || job.AffectedSiteIDs[0] != site.ID {
+		t.Fatalf("published assignment missing from persisted uninstall job: %#v", job.AffectedSiteIDs)
+	}
+	if err := database.DeleteNode(oldNode.ID); !errors.Is(err, ErrNodeAssigned) {
+		t.Fatalf("published node assignment did not block deletion: %v", err)
+	}
+}
+
 func TestNodeUninstallTokenExpiryAndCancellation(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

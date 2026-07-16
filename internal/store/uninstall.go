@@ -98,6 +98,34 @@ func (s *Store) PrepareNodeUninstall(nodeID string, affectedSiteIDs []string, re
 	if err := rows.Err(); err != nil {
 		return NodeUninstallJob{}, err
 	}
+	rows, err = tx.Query(`SELECT site_json FROM site_publications`)
+	if err != nil {
+		return NodeUninstallJob{}, err
+	}
+	for rows.Next() {
+		var siteJSON string
+		if err := rows.Scan(&siteJSON); err != nil {
+			rows.Close()
+			return NodeUninstallJob{}, err
+		}
+		var site domain.Site
+		if err := json.Unmarshal([]byte(siteJSON), &site); err != nil {
+			rows.Close()
+			return NodeUninstallJob{}, fmt.Errorf("decode published site nodes for uninstall: %w", err)
+		}
+		for _, assignedNodeID := range site.Nodes {
+			if assignedNodeID == nodeID {
+				affectedSiteIDs = append(affectedSiteIDs, site.ID)
+				break
+			}
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return NodeUninstallJob{}, err
+	}
+	if err := rows.Err(); err != nil {
+		return NodeUninstallJob{}, err
+	}
 
 	affectedSiteIDs = uniqueStrings(affectedSiteIDs)
 	affectedJSON, err := json.Marshal(affectedSiteIDs)
@@ -344,6 +372,34 @@ func (s *Store) DeleteNode(nodeID string) error {
 			return fmt.Errorf("decode site nodes before deleting node: %w", err)
 		}
 		for _, assignedNodeID := range nodeIDs {
+			if assignedNodeID == nodeID {
+				rows.Close()
+				return ErrNodeAssigned
+			}
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows, err = tx.Query(`SELECT site_json FROM site_publications`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var siteJSON string
+		if err := rows.Scan(&siteJSON); err != nil {
+			rows.Close()
+			return err
+		}
+		var site domain.Site
+		if err := json.Unmarshal([]byte(siteJSON), &site); err != nil {
+			rows.Close()
+			return fmt.Errorf("decode published site nodes before deleting node: %w", err)
+		}
+		for _, assignedNodeID := range site.Nodes {
 			if assignedNodeID == nodeID {
 				rows.Close()
 				return ErrNodeAssigned

@@ -17,8 +17,12 @@ A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-
 
 - Single administrator, IPv4 only, Cloudflare DNS-only, a single Cloudflare account, no tenant/RBAC model, no GeoDNS, no URL-level purge, no WAF/DDoS service, and no control-plane high availability.
 - A control-plane outage does not interrupt already deployed edge traffic. It prevents new deployment, DNS changes, and certificate renewal until restored.
-- `Publish` is intentionally separate from `Create site`. A site is staged until it has a valid certificate; a publish task succeeds only after every assigned active edge reports that it loaded the target configuration.
+- `Publish` is intentionally separate from `Create site`. A site is staged until it has a valid certificate; a publish task succeeds only after every affected active edge reports that it loaded the target configuration.
+- Site edits and replacement certificates update a draft without changing the published site snapshot. Publishing atomically promotes that site's draft and certificate, rebuilds only its old/new assigned nodes, and renders every other site from its published snapshot.
+- Nodes with HTTPS sites reject an unknown TLS SNI in a dedicated default server instead of presenting another site's certificate.
 - Site-level cache invalidation increments the cache generation in the key. Existing objects are reclaimed by Nginx `inactive` and `max_size`; no unsupported OSS purge module is required.
+
+Before upgrading an existing database to a release with published snapshots, publish or revert every pending site. Legacy rows do not contain the previous live inputs needed to reconstruct a snapshot. The controller detects historical publications without a snapshot and refuses to rebuild another site around that ambiguous state.
 
 ## Repository layout
 

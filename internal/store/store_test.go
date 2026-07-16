@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -465,6 +466,9 @@ func TestSitePassthroughRoundTripAndCacheGeneration(t *testing.T) {
 	if invalidated.CacheGeneration != updated.CacheGeneration+1 {
 		t.Fatalf("cache invalidation did not advance generation: %#v", invalidated)
 	}
+	if invalidated.Published {
+		t.Fatalf("cache invalidation was not marked pending publication: %#v", invalidated)
+	}
 }
 
 func TestSiteClientMaxBodySizeRoundTrip(t *testing.T) {
@@ -499,6 +503,213 @@ func TestSiteClientMaxBodySizeRoundTrip(t *testing.T) {
 	}
 	if updated.ClientMaxBodySizeMB != 256 || updated.CacheGeneration != created.CacheGeneration || updated.ConfigVersion != created.ConfigVersion+1 {
 		t.Fatalf("unexpected updated site: %#v", updated)
+	}
+}
+
+func TestPublishedSnapshotAndDomainClaimsSurviveDraftChanges(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-1", "203.0.113.40")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "snapshot", Domains: []string{"old.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://old-origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCertificate := []byte("encrypted-old-certificate")
+	oldKey := []byte("encrypted-old-key")
+	if err := database.SaveCertificate(site.ID, oldCertificate, oldKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Domains = []string{"draft.example.test"}
+	draft.PrimaryOrigin.URL = "https://draft-origin.example.test"
+	draft, err = database.UpdateSite(draft, zoneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCertificate := []byte("encrypted-new-certificate")
+	newKey := []byte("encrypted-new-key")
+	if err := database.SaveCertificate(site.ID, newCertificate, newKey, nil); err != nil {
+		t.Fatal(err)
+	}
+	publication, err := database.SitePublication(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(publication.Site.Domains) != 1 || publication.Site.Domains[0] != "old.example.test" || publication.Site.PrimaryOrigin.URL != "https://old-origin.example.test" {
+		t.Fatalf("published site changed with its draft: %#v", publication.Site)
+	}
+	if string(publication.CertificateCiphertext) != string(oldCertificate) || string(publication.KeyCiphertext) != string(oldKey) {
+		t.Fatal("published certificate changed with the draft certificate")
+	}
+	for index, domainName := range []string{"old.example.test", "draft.example.test"} {
+		_, err := database.CreateSite(domain.Site{
+			Name: fmt.Sprintf("conflict-%d", index), Domains: []string{domainName}, Nodes: []string{node.ID},
+			PrimaryOrigin: domain.Origin{URL: "https://other-origin.example.test", Enabled: true}, Enabled: true,
+		}, "other-zone")
+		if err == nil {
+			t.Fatalf("domain %s was not reserved", domainName)
+		}
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	publication, err = database.SitePublication(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publication.Site.Domains[0] != "draft.example.test" || string(publication.CertificateCiphertext) != string(newCertificate) {
+		t.Fatalf("draft was not promoted: %#v", publication)
+	}
+	if _, err := database.CreateSite(domain.Site{
+		Name: "released", Domains: []string{"old.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://released-origin.example.test", Enabled: true}, Enabled: true,
+	}, "released-zone"); err != nil {
+		t.Fatalf("old published domain was not released after promotion: %v", err)
+	}
+}
+
+func TestCommitSitePublicationRejectsAChangedDraftAtomically(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-1", "203.0.113.41")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "changing", Domains: []string{"changing.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedVersion := site.ConfigVersion
+	site.Name = "changed"
+	if _, err := database.UpdateSite(site, "zone"); err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{Version: 1, NginxConfig: "must-not-commit"}
+	_, err = database.CommitSitePublication(site.ID, expectedVersion, "", []NodeStateUpdate{{NodeID: node.ID, State: state}}, nil)
+	if !errors.Is(err, ErrSiteChanged) {
+		t.Fatalf("stale publication error = %v", err)
+	}
+	if _, _, err := database.NodeState(node.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale node state was committed: %v", err)
+	}
+	if _, err := database.SitePublication(site.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale site snapshot was committed: %v", err)
+	}
+}
+
+func TestOpenBackfillsPublishedSiteSnapshots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-1", "203.0.113.42")
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "legacy-published", Domains: []string{"legacy-published.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	certificate := []byte("legacy-encrypted-certificate")
+	key := []byte("legacy-encrypted-key")
+	if err := database.SaveCertificate(site.ID, certificate, key, nil); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		_ = database.Close()
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`DROP TABLE site_publications`); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	publication, err := migrated.SitePublication(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if publication.Site.ID != site.ID || publication.Site.Domains[0] != site.Domains[0] || string(publication.CertificateCiphertext) != string(certificate) || string(publication.KeyCiphertext) != string(key) {
+		t.Fatalf("backfilled publication = %#v", publication)
+	}
+}
+
+func TestLegacyPendingPublicationBlocksOtherSitesUntilRepublished(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-1", "203.0.113.45")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "legacy-pending", Domains: []string{"legacy-pending.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := database.CreateTask("publish_site", site.ID, "legacy publication")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateTask(task.ID, domain.TaskSucceeded, task.Detail); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CheckPublicationMigrationSafety("another-site"); err == nil || !strings.Contains(err.Error(), site.Name) {
+		t.Fatalf("legacy pending publication was not blocked: %v", err)
+	}
+	if err := database.CheckPublicationMigrationSafety(site.ID); err != nil {
+		t.Fatalf("site must be allowed to create its own snapshot: %v", err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CheckPublicationMigrationSafety("another-site"); err != nil {
+		t.Fatalf("snapshot did not clear migration block: %v", err)
 	}
 }
 

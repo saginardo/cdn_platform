@@ -92,6 +92,67 @@ func TestSiteDNSTTLValidation(t *testing.T) {
 	}
 }
 
+func TestTCPOnlySiteValidationAndDefaults(t *testing.T) {
+	site := Site{
+		Name: "mail", Domains: []string{"mail.example.test"}, Nodes: []string{"node-1"}, TCPOnly: true, Enabled: true,
+		TCPForwards: []TCPForward{{
+			Name: "IMAPS", ListenPort: 9993, ListenTLS: true,
+			UpstreamHost: "US1.Workspace.org.", UpstreamPort: 993, UpstreamTLS: true,
+		}},
+	}
+	if err := NormalizeAndValidateSite(&site); err != nil {
+		t.Fatal(err)
+	}
+	forward := site.TCPForwards[0]
+	if forward.UpstreamHost != "us1.workspace.org" || forward.UpstreamTLSServerName != "us1.workspace.org" {
+		t.Fatalf("upstream normalization = %#v", forward)
+	}
+	if forward.ConnectTimeoutSeconds != DefaultTCPConnectTimeoutSeconds || forward.IdleTimeoutSeconds != DefaultTCPIdleTimeoutSeconds {
+		t.Fatalf("timeout defaults = %#v", forward)
+	}
+	if !SiteNeedsCertificate(site) {
+		t.Fatal("TLS listener did not require a certificate")
+	}
+}
+
+func TestTCPForwardValidationRejectsUnsafeInputs(t *testing.T) {
+	base := func() Site {
+		return Site{Name: "mail", Domains: []string{"mail.example.test"}, Nodes: []string{"node-1"}, TCPOnly: true, TCPForwards: []TCPForward{{Name: "mail", ListenPort: 9465, UpstreamHost: "mail.example.test", UpstreamPort: 465}}}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Site)
+	}{
+		{"reserved HTTP port", func(site *Site) { site.TCPForwards[0].ListenPort = 443 }},
+		{"duplicate port", func(site *Site) { site.TCPForwards = append(site.TCPForwards, site.TCPForwards[0]) }},
+		{"invalid host", func(site *Site) { site.TCPForwards[0].UpstreamHost = "mail.example.test; return 200" }},
+		{"IP TLS without SNI", func(site *Site) {
+			site.TCPForwards[0].UpstreamHost = "203.0.113.8"
+			site.TCPForwards[0].UpstreamTLS = true
+		}},
+		{"SNI without TLS", func(site *Site) { site.TCPForwards[0].UpstreamTLSServerName = "mail.example.test" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			site := base()
+			test.mutate(&site)
+			if err := NormalizeAndValidateSite(&site); err == nil {
+				t.Fatalf("expected validation failure for %#v", site.TCPForwards)
+			}
+		})
+	}
+}
+
+func TestRawTCPOnlySiteDoesNotRequireCertificate(t *testing.T) {
+	site := Site{Name: "tcp", Domains: []string{"tcp.example.test"}, Nodes: []string{"node-1"}, TCPOnly: true, TCPForwards: []TCPForward{{Name: "raw", ListenPort: 2525, UpstreamHost: "mail.example.test", UpstreamPort: 25}}}
+	if err := NormalizeAndValidateSite(&site); err != nil {
+		t.Fatal(err)
+	}
+	if SiteNeedsCertificate(site) {
+		t.Fatal("raw TCP-only site unexpectedly requires a certificate")
+	}
+}
+
 func TestSiteDomainRejectsIPAddress(t *testing.T) {
 	site := Site{
 		Name:    "example",

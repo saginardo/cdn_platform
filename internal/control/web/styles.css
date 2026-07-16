@@ -396,6 +396,12 @@ dialog::backdrop { background: rgb(23 33 43 / 38%); }
 .site-field-wide { grid-column: 1 / -1; }
 .site-form-section .node-assignment { padding: .75rem; background: var(--surface-muted); }
 .site-form-actions { display: flex; justify-content: flex-end; gap: .55rem; padding: 1.2rem 0; }
+.tcp-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.tcp-section-heading h2 { min-width: 0; }
+.tcp-forward-list { display: grid; gap: .8rem; }
+.tcp-forward-row { position: relative; padding: 1rem 3.4rem 1rem 1rem; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); }
+.tcp-forward-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem 1rem; }
+.remove-tcp-forward { position: absolute; top: .75rem; right: .75rem; display: inline-grid; place-items: center; width: 2rem; height: 2rem; min-width: 2rem; padding: 0; font-size: 1.25rem; line-height: 1; }
 .site-operation-list { border-top: 1px solid var(--line); }
 .site-operation { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 68px; padding: .75rem 0; border-bottom: 1px solid var(--line); }
 .site-operation > div { min-width: 0; }
@@ -529,6 +535,8 @@ dialog::backdrop { background: rgb(23 33 43 / 38%); }
   .site-detail-header > .publish { margin-left: 3.85rem; }
   .site-detail-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .site-form-fields { grid-template-columns: 1fr; }
+	.tcp-forward-fields { grid-template-columns: 1fr; }
+	.tcp-forward-row { padding: 1rem 3.2rem 1rem 1rem; }
   .site-field-wide { grid-column: auto; }
   .site-form-actions { justify-content: stretch; }
   .site-form-actions button { flex: 1 1 0; }

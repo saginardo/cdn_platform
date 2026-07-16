@@ -30,6 +30,7 @@ type Node struct {
 	Name            string     `json:"name"`
 	PublicIPv4      string     `json:"public_ipv4"`
 	Status          NodeStatus `json:"status"`
+	Capabilities    []string   `json:"capabilities"`
 	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
 	AppliedVersion  int64      `json:"applied_version"`
 	LastError       string     `json:"last_error,omitempty"`
@@ -45,13 +46,30 @@ type Origin struct {
 }
 
 const (
-	DefaultClientMaxBodySizeMB     = 128
-	MaxClientMaxBodySizeMB         = 1024
-	DefaultReadWriteTimeoutSeconds = 360
-	DefaultDNSTTLSeconds           = 60
-	MinDNSTTLSeconds               = 60
-	MaxDNSTTLSeconds               = 300
+	DefaultClientMaxBodySizeMB      = 128
+	MaxClientMaxBodySizeMB          = 1024
+	DefaultReadWriteTimeoutSeconds  = 360
+	DefaultTCPConnectTimeoutSeconds = 10
+	DefaultTCPIdleTimeoutSeconds    = 300
+	MaxTCPForwardsPerSite           = 32
+	DefaultDNSTTLSeconds            = 60
+	MinDNSTTLSeconds                = 60
+	MaxDNSTTLSeconds                = 300
 )
+
+const EdgeCapabilityTCPStream = "tcp_stream_v1"
+
+type TCPForward struct {
+	Name                  string `json:"name"`
+	ListenPort            int    `json:"listen_port"`
+	ListenTLS             bool   `json:"listen_tls"`
+	UpstreamHost          string `json:"upstream_host"`
+	UpstreamPort          int    `json:"upstream_port"`
+	UpstreamTLS           bool   `json:"upstream_tls"`
+	UpstreamTLSServerName string `json:"upstream_tls_server_name,omitempty"`
+	ConnectTimeoutSeconds int    `json:"connect_timeout_seconds"`
+	IdleTimeoutSeconds    int    `json:"idle_timeout_seconds"`
+}
 
 type Site struct {
 	ID            string   `json:"id"`
@@ -62,18 +80,20 @@ type Site struct {
 	PrimaryOrigin Origin   `json:"primary_origin"`
 	BackupOrigin  *Origin  `json:"backup_origin,omitempty"`
 	// StreamPaths is retained as an empty compatibility field for older API clients.
-	StreamPaths             []string  `json:"stream_paths"`
-	Passthrough             bool      `json:"passthrough"`
-	ClientMaxBodySizeMB     int       `json:"client_max_body_size_mb"`
-	ReadWriteTimeoutSeconds int       `json:"read_write_timeout_seconds"`
-	DNSTTLSeconds           *int      `json:"dns_ttl_seconds"`
-	CacheGeneration         int64     `json:"cache_generation"`
-	ConfigVersion           int64     `json:"config_version"`
-	Published               bool      `json:"published"`
-	Enabled                 bool      `json:"enabled"`
-	Deleting                bool      `json:"deleting"`
-	CreatedAt               time.Time `json:"created_at"`
-	UpdatedAt               time.Time `json:"updated_at"`
+	StreamPaths             []string     `json:"stream_paths"`
+	Passthrough             bool         `json:"passthrough"`
+	ClientMaxBodySizeMB     int          `json:"client_max_body_size_mb"`
+	ReadWriteTimeoutSeconds int          `json:"read_write_timeout_seconds"`
+	DNSTTLSeconds           *int         `json:"dns_ttl_seconds"`
+	TCPOnly                 bool         `json:"tcp_only"`
+	TCPForwards             []TCPForward `json:"tcp_forwards"`
+	CacheGeneration         int64        `json:"cache_generation"`
+	ConfigVersion           int64        `json:"config_version"`
+	Published               bool         `json:"published"`
+	Enabled                 bool         `json:"enabled"`
+	Deleting                bool         `json:"deleting"`
+	CreatedAt               time.Time    `json:"created_at"`
+	UpdatedAt               time.Time    `json:"updated_at"`
 }
 
 type EnrollmentToken struct {
@@ -145,10 +165,11 @@ type PublishStatus struct {
 }
 
 type DesiredState struct {
-	Version      int64                `json:"version"`
-	NginxConfig  string               `json:"nginx_config"`
-	PublicPorts  []int                `json:"public_ports,omitempty"`
-	Certificates map[string]TLSBundle `json:"certificates,omitempty"`
+	Version           int64                `json:"version"`
+	NginxConfig       string               `json:"nginx_config"`
+	NginxStreamConfig string               `json:"nginx_stream_config,omitempty"`
+	PublicPorts       []int                `json:"public_ports"`
+	Certificates      map[string]TLSBundle `json:"certificates,omitempty"`
 }
 
 type TLSBundle struct {

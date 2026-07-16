@@ -65,17 +65,25 @@ func NormalizeAndValidateSite(site *Site) error {
 		nodes = append(nodes, nodeID)
 	}
 	site.Nodes = nodes
-	if err := ValidateOrigin(&site.PrimaryOrigin); err != nil {
-		return fmt.Errorf("primary origin: %w", err)
+	if err := normalizeTCPForwards(site); err != nil {
+		return err
 	}
-	primary, _ := url.Parse(site.PrimaryOrigin.URL)
-	if site.Passthrough && primary.Scheme != "http" && primary.Scheme != "https" {
-		return fmt.Errorf("passthrough mode is only supported for HTTP and HTTPS origins")
+	var primary *url.URL
+	if !site.TCPOnly {
+		if err := ValidateOrigin(&site.PrimaryOrigin); err != nil {
+			return fmt.Errorf("primary origin: %w", err)
+		}
+		primary, _ = url.Parse(site.PrimaryOrigin.URL)
+		if site.Passthrough && primary.Scheme != "http" && primary.Scheme != "https" {
+			return fmt.Errorf("passthrough mode is only supported for HTTP and HTTPS origins")
+		}
+	} else if len(site.TCPForwards) == 0 {
+		return fmt.Errorf("TCP-only sites require at least one TCP forward")
 	}
 	// Path-specific streaming was retired. Keep the API field stable while making
 	// old values inert and consistently returning an empty JSON array.
 	site.StreamPaths = []string{}
-	if site.BackupOrigin != nil {
+	if !site.TCPOnly && site.BackupOrigin != nil {
 		if err := ValidateOrigin(site.BackupOrigin); err != nil {
 			return fmt.Errorf("backup origin: %w", err)
 		}
@@ -85,6 +93,81 @@ func NormalizeAndValidateSite(site *Site) error {
 		}
 	}
 	return nil
+}
+
+func normalizeTCPForwards(site *Site) error {
+	if site.TCPForwards == nil {
+		site.TCPForwards = []TCPForward{}
+	}
+	if len(site.TCPForwards) > MaxTCPForwardsPerSite {
+		return fmt.Errorf("a site can define at most %d TCP forwards", MaxTCPForwardsPerSite)
+	}
+	seenPorts := make(map[int]struct{}, len(site.TCPForwards))
+	for index := range site.TCPForwards {
+		forward := &site.TCPForwards[index]
+		forward.Name = strings.TrimSpace(forward.Name)
+		if forward.Name == "" || len(forward.Name) > 100 {
+			return fmt.Errorf("TCP forward name must be between 1 and 100 characters")
+		}
+		if forward.ListenPort < 1 || forward.ListenPort > 65535 {
+			return fmt.Errorf("TCP forward %q listen port must be between 1 and 65535", forward.Name)
+		}
+		if forward.ListenPort == 80 || forward.ListenPort == 443 {
+			return fmt.Errorf("TCP forward %q cannot listen on reserved HTTP port %d", forward.Name, forward.ListenPort)
+		}
+		if _, found := seenPorts[forward.ListenPort]; found {
+			return fmt.Errorf("duplicate TCP listen port %d", forward.ListenPort)
+		}
+		seenPorts[forward.ListenPort] = struct{}{}
+		forward.UpstreamHost = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(forward.UpstreamHost), "."))
+		if !ValidHostname(forward.UpstreamHost) {
+			return fmt.Errorf("TCP forward %q has an invalid upstream hostname", forward.Name)
+		}
+		if forward.UpstreamPort < 1 || forward.UpstreamPort > 65535 {
+			return fmt.Errorf("TCP forward %q upstream port must be between 1 and 65535", forward.Name)
+		}
+		if forward.ConnectTimeoutSeconds == 0 {
+			forward.ConnectTimeoutSeconds = DefaultTCPConnectTimeoutSeconds
+		}
+		if forward.ConnectTimeoutSeconds < 1 || forward.ConnectTimeoutSeconds > 60 {
+			return fmt.Errorf("TCP forward %q connect timeout must be between 1 and 60 seconds", forward.Name)
+		}
+		if forward.IdleTimeoutSeconds == 0 {
+			forward.IdleTimeoutSeconds = DefaultTCPIdleTimeoutSeconds
+		}
+		if forward.IdleTimeoutSeconds < 30 || forward.IdleTimeoutSeconds > 3600 {
+			return fmt.Errorf("TCP forward %q idle timeout must be between 30 and 3600 seconds", forward.Name)
+		}
+		forward.UpstreamTLSServerName = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(forward.UpstreamTLSServerName), "."))
+		if !forward.UpstreamTLS {
+			if forward.UpstreamTLSServerName != "" {
+				return fmt.Errorf("TCP forward %q TLS server name requires upstream TLS", forward.Name)
+			}
+			continue
+		}
+		if forward.UpstreamTLSServerName == "" {
+			if net.ParseIP(forward.UpstreamHost) != nil {
+				return fmt.Errorf("TCP forward %q requires a TLS server name when the upstream is an IP address", forward.Name)
+			}
+			forward.UpstreamTLSServerName = forward.UpstreamHost
+		}
+		if net.ParseIP(forward.UpstreamTLSServerName) != nil || !ValidHostname(forward.UpstreamTLSServerName) {
+			return fmt.Errorf("TCP forward %q has an invalid upstream TLS server name", forward.Name)
+		}
+	}
+	return nil
+}
+
+func SiteNeedsCertificate(site Site) bool {
+	if !site.TCPOnly {
+		return true
+	}
+	for _, forward := range site.TCPForwards {
+		if forward.ListenTLS {
+			return true
+		}
+	}
+	return false
 }
 
 func NormalizeClientMaxBodySizeMB(value int) (int, error) {

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"cdn-platform/internal/control"
+	"cdn-platform/internal/domain"
 	"cdn-platform/internal/store"
 )
 
@@ -96,6 +98,57 @@ func TestSettingsFromEnvUsesTLSDefaultsAndRejectsUnsafeModes(t *testing.T) {
 	t.Setenv("SMTP_SECURITY", "none")
 	if _, err := settingsFromEnv(); err == nil {
 		t.Fatal("accepted plaintext SMTP environment")
+	}
+}
+
+func TestPublishSiteCommandPublishesOnlySelectedSite(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("CONTROL_DATA_DIR", dataDir)
+	key, err := control.NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CONTROL_ENCRYPTION_KEY", key)
+	database, err := store.Open(filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge", "203.0.113.50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := database.CreateSite(controlTestSite("target", "target.example.test", node.ID), "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := database.CreateSite(controlTestSite("other", "other.example.test", node.ID), "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	publishSite(target.ID)
+
+	database, err = store.Open(filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.SitePublication(target.ID); err != nil {
+		t.Fatalf("target site was not published: %v", err)
+	}
+	if _, err := database.SitePublication(other.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unrelated site publication = %v", err)
+	}
+}
+
+func controlTestSite(name, domainName, nodeID string) domain.Site {
+	return domain.Site{
+		Name: name, Domains: []string{domainName}, Nodes: []string{nodeID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		Enabled:       false,
 	}
 }
 

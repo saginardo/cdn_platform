@@ -30,6 +30,9 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	if got := strings.Count(configuration, "keepalive 30;"); got != 2 {
 		t.Fatalf("expected one 30-connection pool for each upstream, got %d:\n%s", got, configuration)
 	}
+	if got := strings.Count(configuration, "proxy_ssl_verify_depth 3;"); got != 4 {
+		t.Fatalf("expected TLS verification depth on normal/stream primary/backup paths, got %d:\n%s", got, configuration)
+	}
 	for _, retired := range []string{"keepalive 32;", "proxy_connect_timeout 5s;", "grpc_connect_timeout 5s;", "proxy_read_timeout 60s;"} {
 		if strings.Contains(configuration, retired) {
 			t.Fatalf("configuration still contains retired connection setting %q:\n%s", retired, configuration)
@@ -120,6 +123,47 @@ func TestRenderEmptyNodeConfigurationDoesNotReferenceSiteVariables(t *testing.T)
 	}
 	if strings.Contains(configuration, "listen 443") || strings.Contains(configuration, "ssl_reject_handshake") {
 		t.Fatalf("empty node configuration unexpectedly listens on HTTPS:\n%s", configuration)
+	}
+}
+
+func TestRenderTCPOnlySiteOmitsHTTPListeners(t *testing.T) {
+	site := domain.Site{ID: "11111111-1111-4111-8111-111111111111", Name: "mail", Domains: []string{"mail.example.test"}, TCPOnly: true, Enabled: true, TCPForwards: []domain.TCPForward{
+		{Name: "SMTPS", ListenPort: 9465, ListenTLS: true, UpstreamHost: "us1.workspace.org", UpstreamPort: 465, UpstreamTLS: true, UpstreamTLSServerName: "us1.workspace.org", ConnectTimeoutSeconds: 10, IdleTimeoutSeconds: 300},
+		{Name: "IMAPS", ListenPort: 9993, ListenTLS: true, UpstreamHost: "us1.workspace.org", UpstreamPort: 993, UpstreamTLS: true, UpstreamTLSServerName: "us1.workspace.org", ConnectTimeoutSeconds: 10, IdleTimeoutSeconds: 300},
+	}}
+	httpConfiguration, err := Render([]domain.Site{site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(httpConfiguration, "listen 80") || strings.Contains(httpConfiguration, "listen 443") {
+		t.Fatalf("TCP-only HTTP config contains public HTTP listeners:\n%s", httpConfiguration)
+	}
+	streamConfiguration, err := RenderStream([]domain.Site{site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"listen 9465 ssl;", "listen 9993 ssl;", "9465 \"us1.workspace.org:465\";", "9993 \"us1.workspace.org:993\";",
+		"proxy_pass $cdn_tcp_upstream;", "resolver 1.1.1.1 8.8.8.8 valid=1h ipv6=off;", "proxy_ssl_name $cdn_tcp_upstream_sni;",
+		"ssl_certificate /opt/cdn-edge/config/certs/11111111-1111-4111-8111-111111111111.crt;", "proxy_timeout 300s;",
+		"access_log /var/log/nginx/cdn-platform-tcp-access.log cdn_tcp_json;", "error_log /var/log/nginx/cdn-platform-tcp-error.log warn;",
+	} {
+		if !strings.Contains(streamConfiguration, expected) {
+			t.Fatalf("stream config is missing %q:\n%s", expected, streamConfiguration)
+		}
+	}
+}
+
+func TestRenderStreamRejectsPortAndNodeModeConflicts(t *testing.T) {
+	tcpSite := domain.Site{ID: "tcp", Name: "tcp", TCPOnly: true, Enabled: true, TCPForwards: []domain.TCPForward{{Name: "mail", ListenPort: 9465, UpstreamHost: "mail.example.test", UpstreamPort: 465}}}
+	httpSite := domain.Site{ID: "http", Name: "http", Enabled: true, PrimaryOrigin: domain.Origin{URL: "https://origin.example.test"}}
+	if _, err := RenderStream([]domain.Site{tcpSite, httpSite}); err == nil {
+		t.Fatal("expected TCP-only/HTTP node sharing to fail")
+	}
+	second := tcpSite
+	second.ID, second.Name = "tcp-2", "tcp-2"
+	if _, err := RenderStream([]domain.Site{tcpSite, second}); err == nil {
+		t.Fatal("expected duplicate node listen port to fail")
 	}
 }
 
@@ -343,5 +387,8 @@ func TestRenderUsesIndependentTLSServerNamesForGRPCSIPOrigins(t *testing.T) {
 	}
 	if strings.Contains(configuration, "grpc_ssl_name 203.0.113.") {
 		t.Fatalf("IP connection address leaked into gRPC TLS certificate name:\n%s", configuration)
+	}
+	if got := strings.Count(configuration, "grpc_ssl_verify_depth 3;"); got != 2 {
+		t.Fatalf("expected TLS verification depth on primary and backup gRPC paths, got %d:\n%s", got, configuration)
 	}
 }

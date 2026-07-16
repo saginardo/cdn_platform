@@ -55,16 +55,26 @@ was_enabled=0
 was_active=0
 nginx_config=""
 nginx_backup=""
+nginx_config_present=0
+nginx_stream_entry=""
+nginx_stream_backup=""
+nginx_stream_present=0
 config_removed=0
 report_failure() {
   local code=$?
   trap - ERR
   if ((started == 1 && cleanup_committed == 0)); then
-    if ((config_removed == 1)) && [[ -n "$nginx_config" && -n "$nginx_backup" && -e "$nginx_backup" ]]; then
-      cp -a "$nginx_backup" "$nginx_config" >/dev/null 2>&1 || true
+    if ((config_removed == 1)); then
+      if ((nginx_config_present == 1)) && [[ -n "$nginx_backup" && -e "$nginx_backup" ]]; then
+        cp -a "$nginx_backup" "$nginx_config" >/dev/null 2>&1 || true
+      fi
+      if ((nginx_stream_present == 1)) && [[ -n "$nginx_stream_backup" && -e "$nginx_stream_backup" ]]; then
+        cp -a "$nginx_stream_backup" "$nginx_stream_entry" >/dev/null 2>&1 || true
+      fi
       nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
     fi
     if [[ -n "$nginx_backup" ]]; then rm -f "$nginx_backup" >/dev/null 2>&1 || true; fi
+    if [[ -n "$nginx_stream_backup" ]]; then rm -f "$nginx_stream_backup" >/dev/null 2>&1 || true; fi
     if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     callback fail --header 'Content-Type: text/plain' \
@@ -94,17 +104,31 @@ else
 fi
 
 nginx_config=$(root_path /etc/nginx/conf.d/cdn-platform.conf)
+nginx_stream_entry=$(root_path /etc/nginx/modules-enabled/99-cdn-platform-stream.conf)
 if [[ -e "$nginx_config" ]]; then
   if ! nginx_backup=$(mktemp "$(root_path /tmp/cdn-platform-nginx.XXXXXX)"); then
     false
   fi
   cp -a "$nginx_config" "$nginx_backup"
+  nginx_config_present=1
+fi
+if [[ -e "$nginx_stream_entry" ]]; then
+  if ! nginx_stream_backup=$(mktemp "$(root_path /tmp/cdn-platform-nginx-stream.XXXXXX)"); then
+    false
+  fi
+  cp -a "$nginx_stream_entry" "$nginx_stream_backup"
+  nginx_stream_present=1
+fi
+if ((nginx_config_present == 1 || nginx_stream_present == 1)); then
   rm -f "$nginx_config"
+  rm -f "$nginx_stream_entry"
   config_removed=1
   if ! command -v nginx >/dev/null 2>&1 || ! nginx -t; then
-    cp -a "$nginx_backup" "$nginx_config"
+    if ((nginx_config_present == 1)); then cp -a "$nginx_backup" "$nginx_config"; fi
+    if ((nginx_stream_present == 1)); then cp -a "$nginx_stream_backup" "$nginx_stream_entry"; fi
     config_removed=0
-    rm -f "$nginx_backup"
+    if [[ -n "$nginx_backup" ]]; then rm -f "$nginx_backup"; fi
+    if [[ -n "$nginx_stream_backup" ]]; then rm -f "$nginx_stream_backup"; fi
     if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     callback fail --header 'Content-Type: text/plain' --data-binary 'Nginx validation failed after removing CDN Platform configuration' >/dev/null 2>&1 || true
@@ -112,9 +136,11 @@ if [[ -e "$nginx_config" ]]; then
     exit 1
   fi
   if ! systemctl reload nginx; then
-    cp -a "$nginx_backup" "$nginx_config"
+    if ((nginx_config_present == 1)); then cp -a "$nginx_backup" "$nginx_config"; fi
+    if ((nginx_stream_present == 1)); then cp -a "$nginx_stream_backup" "$nginx_stream_entry"; fi
     config_removed=0
-    rm -f "$nginx_backup"
+    if [[ -n "$nginx_backup" ]]; then rm -f "$nginx_backup"; fi
+    if [[ -n "$nginx_stream_backup" ]]; then rm -f "$nginx_stream_backup"; fi
     nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
     if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
@@ -122,7 +148,8 @@ if [[ -e "$nginx_config" ]]; then
     echo "Nginx reload failed; platform configuration was restored" >&2
     exit 1
   fi
-  rm -f "$nginx_backup"
+  if [[ -n "$nginx_backup" ]]; then rm -f "$nginx_backup"; fi
+  if [[ -n "$nginx_stream_backup" ]]; then rm -f "$nginx_stream_backup"; fi
 fi
 
 # From this point the operation is intentionally idempotent. A later failure

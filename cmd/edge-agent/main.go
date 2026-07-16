@@ -26,7 +26,9 @@ func main() {
 	agent, err := edge.New(edge.Config{
 		ControlURL: os.Getenv("CONTROL_URL"), EnrollmentToken: os.Getenv("ENROLLMENT_TOKEN"),
 		StateDir: env("EDGE_STATE_DIR", "/opt/cdn-edge/data"), NginxConfigPath: env("NGINX_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform.conf"),
-		CertificateDir: env("EDGE_CERT_DIR", "/opt/cdn-edge/config/certs"), AccessLogPath: env("EDGE_ACCESS_LOG", "/opt/cdn-edge/logs/access.json"), PollInterval: time.Duration(pollSeconds) * time.Second,
+		NginxStreamConfigPath: env("NGINX_STREAM_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform-stream.conf"),
+		CertificateDir:        env("EDGE_CERT_DIR", "/opt/cdn-edge/config/certs"), AccessLogPath: env("EDGE_ACCESS_LOG", "/opt/cdn-edge/logs/access.json"), PollInterval: time.Duration(pollSeconds) * time.Second,
+		Capabilities: splitValues(os.Getenv("EDGE_CAPABILITIES")),
 	})
 	if err != nil {
 		fatal(err.Error())
@@ -44,6 +46,18 @@ func env(name, fallback string) string {
 	}
 	return fallback
 }
+
+func splitValues(value string) []string {
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
 func fatal(message string) {
 	log.Print("cdn-edge-agent: " + message)
 	fmt.Fprintln(os.Stderr, message)

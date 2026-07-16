@@ -141,6 +141,49 @@ func TestSiteDNSTTLAPIHandlesOverrideInheritanceAndOmission(t *testing.T) {
 	}
 }
 
+func TestSiteTCPForwardAPIHandlesTCPOnlyDrafts(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("mail-edge", "203.0.113.82")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	base := map[string]any{
+		"name": "mail", "zone_id": "zone", "domains": []string{"mail.example.test"}, "node_ids": []string{node.ID},
+		"tcp_only": true, "enabled": true,
+		"tcp_forwards": []map[string]any{{
+			"name": "IMAPS", "listen_port": 9993, "listen_tls": true,
+			"upstream_host": "us1.workspace.org", "upstream_port": 993, "upstream_tls": true,
+		}},
+	}
+	created := requestSite(t, server, http.MethodPost, "/api/sites", base)
+	if !created.TCPOnly || len(created.TCPForwards) != 1 || created.TCPForwards[0].UpstreamTLSServerName != "us1.workspace.org" {
+		t.Fatalf("created TCP site = %#v", created)
+	}
+	delete(base, "tcp_only")
+	delete(base, "tcp_forwards")
+	preserved := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+	if !preserved.TCPOnly || len(preserved.TCPForwards) != 1 || preserved.TCPForwards[0].ListenPort != 9993 {
+		t.Fatalf("omitted TCP fields were not preserved: %#v", preserved)
+	}
+	base["tcp_only"] = true
+	base["tcp_forwards"] = []map[string]any{{"name": "invalid", "listen_port": 443, "upstream_host": "mail.example.test", "upstream_port": 443}}
+	response := requestSiteResponse(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "reserved HTTP port") {
+		t.Fatalf("reserved TCP port = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestOriginAllowlistIncludesPublishedAndDraftAssignments(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

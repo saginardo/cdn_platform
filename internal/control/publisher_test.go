@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -75,6 +76,109 @@ func TestPublishRequiresCertificateAndThenMarksPublished(t *testing.T) {
 	}
 	if _, _, _, err := database.Certificate("missing"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("expected missing certificate: %v", err)
+	}
+}
+
+func TestPublishTCPOnlySiteBuildsStreamStateWithoutHTTPPorts(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("mail-edge", "203.0.113.15")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeCapabilities(node.ID, []string{domain.EdgeCapabilityTCPStream}); err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "mail", Domains: []string{"mail.example.test"}, Nodes: []string{node.ID}, TCPOnly: true, Enabled: true,
+		TCPForwards: []domain.TCPForward{{Name: "SMTP", ListenPort: 2525, UpstreamHost: "mail.example.test", UpstreamPort: 25}},
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := Publisher{Store: database, Cipher: cipher}
+	if _, err := publisher.PublishSite(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	state, _, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(state.PublicPorts, []int{2525}) {
+		t.Fatalf("public ports = %#v", state.PublicPorts)
+	}
+	if strings.Contains(state.NginxConfig, "listen 80") || strings.Contains(state.NginxConfig, "listen 443") {
+		t.Fatalf("TCP-only state contains HTTP listeners:\n%s", state.NginxConfig)
+	}
+	if !strings.Contains(state.NginxStreamConfig, "listen 2525;") || strings.Contains(state.NginxStreamConfig, "ssl_certificate") {
+		t.Fatalf("unexpected stream state:\n%s", state.NginxStreamConfig)
+	}
+	newNode, err := database.CreateNode("mail-edge-new", "203.0.113.17")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeCapabilities(newNode.ID, []string{domain.EdgeCapabilityTCPStream}); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.Nodes = []string{newNode.ID}
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	oldState, _, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldState.PublicPorts) != 0 || strings.Contains(oldState.NginxConfig, "listen 80") || strings.Contains(oldState.NginxConfig, "listen 443") {
+		t.Fatalf("former TCP-only node reopened HTTP ports: %#v\n%s", oldState.PublicPorts, oldState.NginxConfig)
+	}
+}
+
+func TestPublishTCPForwardRequiresUpgradedAgentCapability(t *testing.T) {
+	if !siteRequiresTCPStream([]domain.Site{{TCPOnly: true}}) {
+		t.Fatal("disabled TCP-only state did not require the stream-capable agent")
+	}
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, _ := NewEncryptionKey()
+	cipher, _ := NewCipher(key)
+	node, err := database.CreateNode("old-edge", "203.0.113.16")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "mail", Domains: []string{"mail.example.test"}, Nodes: []string{node.ID}, TCPOnly: true, Enabled: true,
+		TCPForwards: []domain.TCPForward{{Name: "SMTP", ListenPort: 2525, UpstreamHost: "mail.example.test", UpstreamPort: 25}},
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (Publisher{Store: database, Cipher: cipher}).PublishSite(site.ID)
+	if err == nil || !strings.Contains(err.Error(), "must be upgraded") {
+		t.Fatalf("publish error = %v", err)
+	}
+	if _, _, err := database.NodeState(node.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unsupported node received state: %v", err)
 	}
 }
 

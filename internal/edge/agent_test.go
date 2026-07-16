@@ -37,6 +37,7 @@ func (f *fakeRunner) PortListeners(_ []int) ([]domain.PortConflict, error) {
 func TestApplyRollsBackConfigAndCertificatesOnFailedValidation(t *testing.T) {
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "nginx.conf")
+	streamConfigPath := filepath.Join(directory, "nginx-stream.conf")
 	certificateDir := filepath.Join(directory, "certs")
 	if err := os.MkdirAll(certificateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -44,25 +45,57 @@ func TestApplyRollsBackConfigAndCertificatesOnFailedValidation(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte("old-config"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(streamConfigPath, []byte("old-stream-config"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(certificateDir, "site.crt"), []byte("old-cert"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{testErr: errors.New("invalid config")}
-	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: configPath, CertificateDir: certificateDir, Runner: runner})
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: configPath, NginxStreamConfigPath: streamConfigPath, CertificateDir: certificateDir, Runner: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = agent.apply(domain.DesiredState{Version: 1, NginxConfig: "bad-config", Certificates: map[string]domain.TLSBundle{"site": {CertificatePEM: "new-cert", PrivateKeyPEM: "new-key"}}})
+	err = agent.apply(domain.DesiredState{Version: 1, NginxConfig: "bad-config", NginxStreamConfig: "bad-stream-config", Certificates: map[string]domain.TLSBundle{"site": {CertificatePEM: "new-cert", PrivateKeyPEM: "new-key"}}})
 	if err == nil {
 		t.Fatal("expected Nginx validation error")
 	}
 	config, _ := os.ReadFile(configPath)
+	streamConfig, _ := os.ReadFile(streamConfigPath)
 	certificate, _ := os.ReadFile(filepath.Join(certificateDir, "site.crt"))
-	if string(config) != "old-config" || string(certificate) != "old-cert" {
-		t.Fatalf("state was not restored: config=%q certificate=%q", config, certificate)
+	if string(config) != "old-config" || string(streamConfig) != "old-stream-config" || string(certificate) != "old-cert" {
+		t.Fatalf("state was not restored: config=%q stream=%q certificate=%q", config, streamConfig, certificate)
 	}
 	if runner.applies != 0 {
 		t.Fatalf("apply should not run after failed validation")
+	}
+}
+
+func TestApplySupportsManagedTCPListenersAndStreamConfig(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	streamConfigPath := filepath.Join(directory, "nginx-stream.conf")
+	runner := &fakeRunner{listeners: [][]domain.PortConflict{
+		nil,
+		{{Port: 9465, PID: 11, Process: "nginx"}, {Port: 9993, PID: 12, Process: "nginx"}},
+	}}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath: configPath, NginxStreamConfigPath: streamConfigPath,
+		CertificateDir: filepath.Join(directory, "certs"), Runner: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{Version: 4, NginxConfig: "# http disabled\n", NginxStreamConfig: "server { listen 9465; }\n", PublicPorts: []int{9993, 9465}}
+	if err := agent.apply(state); err != nil {
+		t.Fatal(err)
+	}
+	if contents, err := os.ReadFile(streamConfigPath); err != nil || string(contents) != state.NginxStreamConfig {
+		t.Fatalf("stream config = %q, %v", contents, err)
+	}
+	if agent.lastApplyReport == nil || agent.lastApplyReport.Status != domain.ApplySucceeded || !strings.Contains(agent.lastApplyReport.Detail, "TCP 9465 and TCP 9993") {
+		t.Fatalf("apply report = %#v", agent.lastApplyReport)
 	}
 }
 
@@ -188,6 +221,29 @@ func TestApplyReportsPortConflictWithoutChangingConfiguration(t *testing.T) {
 	config, err := os.ReadFile(configPath)
 	if err != nil || string(config) != "old-config" {
 		t.Fatalf("configuration changed after conflict: %q, %v", config, err)
+	}
+}
+
+func TestApplyRejectsNginxListenerOutsideManagedConfiguration(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	if err := os.WriteFile(configPath, []byte("# no managed TCP listener\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeRunner{listeners: [][]domain.PortConflict{{{Port: 9465, PID: 1234, Process: "nginx"}}}}
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: configPath, CertificateDir: filepath.Join(directory, "certs"), Runner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = agent.apply(domain.DesiredState{Version: 7, NginxConfig: "# http disabled\n", NginxStreamConfig: "server { listen 9465; }\n", PublicPorts: []int{9465}})
+	if err == nil || agent.lastApplyReport == nil || agent.lastApplyReport.Code != "port_conflict" || len(agent.lastApplyReport.PortConflicts) != 1 {
+		t.Fatalf("apply result = %v, report = %#v", err, agent.lastApplyReport)
+	}
+	if got := agent.lastApplyReport.PortConflicts[0].Process; got != "nginx (unmanaged configuration)" {
+		t.Fatalf("conflict process = %q", got)
+	}
+	if runner.tests != 0 || runner.applies != 0 {
+		t.Fatalf("unmanaged Nginx listener should stop before apply: tests=%d applies=%d", runner.tests, runner.applies)
 	}
 }
 

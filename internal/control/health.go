@@ -69,7 +69,7 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		healthy, detail := m.check(ctx, node.PublicIPv4)
+		healthy, detail := m.checkNode(ctx, node)
 		health, err := m.Server.Store.RecordNodeHealth(node.ID, healthy, detail)
 		if err != nil {
 			return err
@@ -228,6 +228,32 @@ func (m *HealthManager) reconcileSite(ctx context.Context, site domain.Site, nod
 	return nil
 }
 
+func (m *HealthManager) checkNode(ctx context.Context, node domain.Node) (bool, string) {
+	state, _, err := m.Server.Store.NodeState(node.ID)
+	if err != nil || state.PublicPorts == nil {
+		return m.check(ctx, node.PublicIPv4)
+	}
+	for _, port := range state.PublicPorts {
+		if port == 80 {
+			return m.check(ctx, node.PublicIPv4)
+		}
+	}
+	if len(state.PublicPorts) == 0 {
+		return true, ""
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	dialer := net.Dialer{Timeout: 3 * time.Second, KeepAlive: -1}
+	for _, port := range state.PublicPorts {
+		connection, err := dialer.DialContext(probeCtx, "tcp", net.JoinHostPort(node.PublicIPv4, fmt.Sprintf("%d", port)))
+		if err != nil {
+			return false, fmt.Sprintf("TCP %d: %v", port, err)
+		}
+		_ = connection.Close()
+	}
+	return true, ""
+}
+
 func (m *HealthManager) check(ctx context.Context, address string) (bool, string) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+"/__cdn_health", nil)
 	if err != nil {
@@ -298,6 +324,18 @@ func (m *HealthManager) checkSite(ctx context.Context, site domain.Site, node do
 		if strings.TrimSpace(string(body)) != want {
 			return false, fmt.Sprintf("%s: unexpected health response %q", domainName, strings.TrimSpace(string(body)))
 		}
+	}
+	return checkTCPForwardPorts(probeCtx, site, node)
+}
+
+func checkTCPForwardPorts(ctx context.Context, site domain.Site, node domain.Node) (bool, string) {
+	dialer := net.Dialer{Timeout: 3 * time.Second, KeepAlive: -1}
+	for _, forward := range site.TCPForwards {
+		connection, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(node.PublicIPv4, fmt.Sprintf("%d", forward.ListenPort)))
+		if err != nil {
+			return false, fmt.Sprintf("TCP %d: %v", forward.ListenPort, err)
+		}
+		_ = connection.Close()
 	}
 	return true, ""
 }

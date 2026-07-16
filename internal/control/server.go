@@ -486,18 +486,20 @@ func (input originRequest) origin(current *domain.Origin) domain.Origin {
 }
 
 type siteRequest struct {
-	Name                    string              `json:"name"`
-	ZoneID                  string              `json:"zone_id"`
-	Domains                 []string            `json:"domains"`
-	NodeIDs                 []string            `json:"node_ids"`
-	PrimaryOrigin           originRequest       `json:"primary_origin"`
-	BackupOrigin            *originRequest      `json:"backup_origin"`
-	StreamPaths             *[]string           `json:"stream_paths"`
-	Passthrough             *bool               `json:"passthrough"`
-	ClientMaxBodySizeMB     *int                `json:"client_max_body_size_mb"`
-	ReadWriteTimeoutSeconds *int                `json:"read_write_timeout_seconds"`
-	DNSTTLSeconds           optionalNullableInt `json:"dns_ttl_seconds"`
-	Enabled                 *bool               `json:"enabled"`
+	Name                    string               `json:"name"`
+	ZoneID                  string               `json:"zone_id"`
+	Domains                 []string             `json:"domains"`
+	NodeIDs                 []string             `json:"node_ids"`
+	PrimaryOrigin           originRequest        `json:"primary_origin"`
+	BackupOrigin            *originRequest       `json:"backup_origin"`
+	StreamPaths             *[]string            `json:"stream_paths"`
+	Passthrough             *bool                `json:"passthrough"`
+	ClientMaxBodySizeMB     *int                 `json:"client_max_body_size_mb"`
+	ReadWriteTimeoutSeconds *int                 `json:"read_write_timeout_seconds"`
+	DNSTTLSeconds           optionalNullableInt  `json:"dns_ttl_seconds"`
+	TCPOnly                 *bool                `json:"tcp_only"`
+	TCPForwards             *[]domain.TCPForward `json:"tcp_forwards"`
+	Enabled                 *bool                `json:"enabled"`
 }
 
 func (input siteRequest) site(id string, current *domain.Site) domain.Site {
@@ -539,7 +541,19 @@ func (input siteRequest) site(id string, current *domain.Site) domain.Site {
 		backup := input.BackupOrigin.origin(currentBackup)
 		backupOrigin = &backup
 	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, Enabled: enabled}
+	tcpOnly := false
+	var tcpForwards []domain.TCPForward
+	if current != nil {
+		tcpOnly = current.TCPOnly
+		tcpForwards = append([]domain.TCPForward(nil), current.TCPForwards...)
+	}
+	if input.TCPOnly != nil {
+		tcpOnly = *input.TCPOnly
+	}
+	if input.TCPForwards != nil {
+		tcpForwards = append([]domain.TCPForward(nil), (*input.TCPForwards)...)
+	}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, TCPOnly: tcpOnly, TCPForwards: tcpForwards, Enabled: enabled}
 }
 
 func (input siteRequest) validateClientMaxBodySize() error {
@@ -713,6 +727,10 @@ func (s *Server) issueCertificate(response http.ResponseWriter, request *http.Re
 	site, _, err := s.Store.GetSite(request.PathValue("id"))
 	if err != nil {
 		writeStoreError(response, err)
+		return
+	}
+	if !domain.SiteNeedsCertificate(site) {
+		writeError(response, http.StatusConflict, errors.New("site has no TLS listeners"))
 		return
 	}
 	task, created, err := s.CertificateManager.QueueIssue(site)
@@ -1086,6 +1104,7 @@ type heartbeatRequest struct {
 	LastError      string              `json:"last_error"`
 	AppliedVersion int64               `json:"applied_version"`
 	ApplyReport    *domain.ApplyReport `json:"apply_report,omitempty"`
+	Capabilities   []string            `json:"capabilities,omitempty"`
 }
 
 func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) {
@@ -1094,6 +1113,10 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	nodeID := edgeNodeID(request.Context())
+	if err := s.Store.SetNodeCapabilities(nodeID, input.Capabilities); err != nil {
+		writeStoreError(response, err)
+		return
+	}
 	if err := s.Store.Heartbeat(nodeID, input.AppliedVersion, input.LastError, input.ApplyReport); err != nil {
 		writeStoreError(response, err)
 		return

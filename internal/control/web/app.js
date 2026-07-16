@@ -56,6 +56,8 @@ const taskStatusLabels = {
 };
 const defaultClientMaxBodySizeMB = 128;
 const defaultReadWriteTimeoutSeconds = 360;
+const defaultTCPConnectTimeoutSeconds = 10;
+const defaultTCPIdleTimeoutSeconds = 300;
 const defaultDNSTTLSeconds = 60;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const compactNumberFormatter = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
@@ -282,7 +284,7 @@ function renderSites() {
       </div>
       <dl class="site-facts">
         <div><dt>节点</dt><dd>${numberFormatter.format(site.node_ids.length)} 个</dd></div>
-        <div><dt>TLS</dt><dd>${tlsStatusMarkup(tlsStatus)}</dd></div>
+		<div><dt>TLS</dt><dd>${siteNeedsTLS(site) ? tlsStatusMarkup(tlsStatus) : '<span class="fact-muted">无需证书</span>'}</dd></div>
 		<div><dt>发布</dt><dd>${site.deleting ? deletionStatusMarkup(deletionStatus) : publishStatusMarkup(publishStatus)}</dd></div>
       </dl>
       <div class="site-actions">
@@ -333,6 +335,7 @@ function siteStateMarkup(site) {
 }
 
 function siteCacheMarkup(site) {
+	if (site.tcp_only) return '<span class="fact-muted">不适用</span>';
   if (site.passthrough) return '<span class="fact-muted">透传</span>';
   if (!siteCacheable(site)) return '<span class="fact-muted">不缓存</span>';
   return `<span>v${numberFormatter.format(site.cache_generation)}</span>`;
@@ -355,9 +358,14 @@ function originURLScheme(value) {
 
 function originURLUsesTLS(value) { return ['https', 'wss', 'grpcs'].includes(originURLScheme(value)); }
 
-function originScheme(site) { return originURLScheme(site.primary_origin.url); }
+function originScheme(site) { return originURLScheme(site.primary_origin?.url || ''); }
+
+function siteNeedsTLS(site) {
+  return !site.tcp_only || (site.tcp_forwards || []).some((forward) => forward.listen_tls);
+}
 
 function updateOriginTLSFields() {
+	if (byId('site-tcp-only').checked) return;
   const primaryUsesTLS = originURLUsesTLS(byId('site-primary-url').value);
   const backupUsesTLS = originURLUsesTLS(byId('site-backup-url').value);
   byId('site-primary-tls-name-wrap').classList.toggle('hidden', !primaryUsesTLS);
@@ -366,7 +374,77 @@ function updateOriginTLSFields() {
   byId('site-backup-tls-name').disabled = !backupUsesTLS;
 }
 
+function tcpForwardPayload() {
+	return [...byId('site-tcp-forward-list').querySelectorAll('.tcp-forward-row')].map((row) => {
+		const upstreamTLS = row.querySelector('.tcp-forward-upstream-tls').checked;
+		return {
+			name: row.querySelector('.tcp-forward-name').value,
+			listen_port: Number(row.querySelector('.tcp-forward-listen-port').value),
+			listen_tls: row.querySelector('.tcp-forward-listen-tls').checked,
+			upstream_host: row.querySelector('.tcp-forward-upstream-host').value,
+			upstream_port: Number(row.querySelector('.tcp-forward-upstream-port').value),
+			upstream_tls: upstreamTLS,
+			upstream_tls_server_name: upstreamTLS ? row.querySelector('.tcp-forward-upstream-sni').value : '',
+			connect_timeout_seconds: Number(row.querySelector('.tcp-forward-connect-timeout').value),
+			idle_timeout_seconds: Number(row.querySelector('.tcp-forward-idle-timeout').value),
+		};
+	});
+}
+
+function syncTCPForwardRow(row) {
+	const upstreamTLS = row.querySelector('.tcp-forward-upstream-tls').checked;
+	const sniWrap = row.querySelector('.tcp-forward-upstream-sni-wrap');
+	sniWrap.classList.toggle('hidden', !upstreamTLS);
+	sniWrap.querySelector('input').disabled = !upstreamTLS || byId('site-name').disabled;
+}
+
+function addTCPForwardRow(forward = {}) {
+	const row = document.createElement('div');
+	row.className = 'tcp-forward-row';
+	row.innerHTML = `<div class="tcp-forward-fields">
+		<label>名称 <input class="tcp-forward-name" required maxlength="100" placeholder="IMAPS"></label>
+		<label>监听端口 <input class="tcp-forward-listen-port" type="number" min="1" max="65535" step="1" required inputmode="numeric" placeholder="9993"></label>
+		<label>上游主机 <input class="tcp-forward-upstream-host" required placeholder="mail.example.com" autocomplete="off"></label>
+		<label>上游端口 <input class="tcp-forward-upstream-port" type="number" min="1" max="65535" step="1" required inputmode="numeric" placeholder="993"></label>
+		<label>连接超时
+		  <select class="tcp-forward-connect-timeout"><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option><option value="60">60 秒</option></select>
+		</label>
+		<label>会话空闲超时
+		  <select class="tcp-forward-idle-timeout"><option value="300">5 分钟</option><option value="900">15 分钟</option><option value="1800">30 分钟</option><option value="3600">60 分钟</option></select>
+		</label>
+		<label class="checkbox-label"><input class="tcp-forward-listen-tls" type="checkbox"> 入口 TLS</label>
+		<label class="checkbox-label"><input class="tcp-forward-upstream-tls" type="checkbox"> 上游 TLS</label>
+		<label class="tcp-forward-upstream-sni-wrap site-field-wide">上游 TLS SNI <input class="tcp-forward-upstream-sni" placeholder="mail.example.com" autocomplete="off"></label>
+	  </div>
+	  <button class="remove-tcp-forward secondary" type="button" title="删除此端口" aria-label="删除此 TCP 转发"><span aria-hidden="true">&times;</span></button>`;
+	row.querySelector('.tcp-forward-name').value = forward.name || '';
+	row.querySelector('.tcp-forward-listen-port').value = forward.listen_port || '';
+	row.querySelector('.tcp-forward-listen-tls').checked = forward.listen_tls ?? true;
+	row.querySelector('.tcp-forward-upstream-host').value = forward.upstream_host || '';
+	row.querySelector('.tcp-forward-upstream-port').value = forward.upstream_port || '';
+	row.querySelector('.tcp-forward-upstream-tls').checked = forward.upstream_tls ?? true;
+	row.querySelector('.tcp-forward-upstream-sni').value = forward.upstream_tls_server_name || '';
+	row.querySelector('.tcp-forward-connect-timeout').value = String(forward.connect_timeout_seconds || defaultTCPConnectTimeoutSeconds);
+	row.querySelector('.tcp-forward-idle-timeout').value = String(forward.idle_timeout_seconds || defaultTCPIdleTimeoutSeconds);
+	byId('site-tcp-forward-list').append(row);
+	syncTCPForwardRow(row);
+	return row;
+}
+
+function syncSiteTrafficMode() {
+	const tcpOnly = byId('site-tcp-only').checked;
+	const locked = byId('site-name').disabled;
+	byId('site-origin-section').classList.toggle('hidden', tcpOnly);
+	for (const id of ['site-body-policy', 'site-timeout-policy', 'site-passthrough-policy']) byId(id).classList.toggle('hidden', tcpOnly);
+	byId('site-primary-url').required = !tcpOnly;
+	byId('site-origin-section').querySelectorAll('input, select').forEach((field) => { field.disabled = locked || tcpOnly; });
+	for (const id of ['site-client-max-body-size', 'site-read-write-timeout', 'site-passthrough']) byId(id).disabled = locked || tcpOnly;
+	if (!tcpOnly) updateOriginTLSFields();
+}
+
 function siteProtocol(site) {
+	if (site.tcp_only) return 'TCP / TLS';
+	if ((site.tcp_forwards || []).length) return 'HTTP + TCP';
   const scheme = originScheme(site);
   if (scheme === 'grpc' || scheme === 'grpcs') return 'gRPC';
   if (scheme === 'ws' || scheme === 'wss') return 'WebSocket';
@@ -374,6 +452,7 @@ function siteProtocol(site) {
 }
 
 function siteCacheable(site) {
+	if (site.tcp_only) return false;
   const scheme = originScheme(site);
   return !site.passthrough && (scheme === 'http' || scheme === 'https');
 }
@@ -382,7 +461,7 @@ function updateSiteFormPreview(savedSite = null) {
   if (!siteFormReady || activeRoute.view !== 'sites' || activeRoute.page === 'list') return;
   updateOriginTLSFields();
   const payload = siteFormPayload();
-  const draft = {
+	const draft = {
     ...(savedSite || {}),
     primary_origin: payload.primary_origin,
     passthrough: payload.passthrough,
@@ -390,16 +469,23 @@ function updateSiteFormPreview(savedSite = null) {
     client_max_body_size_mb: payload.client_max_body_size_mb,
     read_write_timeout_seconds: payload.read_write_timeout_seconds,
     dns_ttl_seconds: payload.dns_ttl_seconds,
-    node_ids: payload.node_ids,
+		node_ids: payload.node_ids,
+		tcp_only: payload.tcp_only,
+		tcp_forwards: payload.tcp_forwards,
   };
   const scheme = originScheme(draft);
   byId('site-summary-protocol').textContent = siteProtocol(draft);
   byId('site-summary-cache').innerHTML = siteCacheMarkup(draft);
   byId('site-summary-body').textContent = `${numberFormatter.format(payload.client_max_body_size_mb)} MiB`;
-  byId('site-summary-timeout').textContent = scheme === 'grpc' || scheme === 'grpcs' ? '不适用于 gRPC' : `${numberFormatter.format(payload.read_write_timeout_seconds / 60)} 分钟`;
+	byId('site-summary-timeout').textContent = scheme === 'grpc' || scheme === 'grpcs' ? '不适用于 gRPC' : `${numberFormatter.format(payload.read_write_timeout_seconds / 60)} 分钟`;
+	if (payload.tcp_only) {
+		byId('site-summary-body').textContent = '不适用';
+		byId('site-summary-timeout').textContent = '按 TCP 端口配置';
+	}
   const effectiveDNSTTL = payload.dns_ttl_seconds ?? settingsData?.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds;
   byId('site-summary-dns-ttl').textContent = payload.dns_ttl_seconds == null ? `${numberFormatter.format(effectiveDNSTTL)} 秒（全局）` : `${numberFormatter.format(effectiveDNSTTL)} 秒`;
-  byId('site-summary-nodes').textContent = `${numberFormatter.format(payload.node_ids.length)} 个`;
+	byId('site-summary-nodes').textContent = `${numberFormatter.format(payload.node_ids.length)} 个`;
+	byId('site-summary-tcp').textContent = payload.tcp_forwards.length ? payload.tcp_forwards.map((forward) => forward.listen_port).join(', ') : '未配置';
 }
 
 function renderSiteDetailStatus() {
@@ -416,12 +502,13 @@ function renderSiteDetailStatus() {
 
   byId('site-detail-state').innerHTML = siteStateMarkup(site);
   byId('site-detail-meta').textContent = `${site.domains.join(', ') || '未配置域名'} · ${site.id}`;
-  byId('site-summary-tls').innerHTML = tlsStatusMarkup(tlsStatus);
+	byId('site-summary-tls').innerHTML = siteNeedsTLS(site) ? tlsStatusMarkup(tlsStatus) : '<span class="fact-muted">无需证书</span>';
   byId('site-summary-publish').innerHTML = site.deleting ? deletionStatusMarkup(deletionStatus) : publishStatusMarkup(publishStatus);
-  byId('site-operation-tls').innerHTML = tlsStatusMarkup(tlsStatus);
+	byId('site-operation-tls').innerHTML = siteNeedsTLS(site) ? tlsStatusMarkup(tlsStatus) : '<span class="fact-muted">无 TLS 监听</span>';
   byId('site-operation-cache').innerHTML = siteCacheMarkup(site);
   byId('site-operation-delete').innerHTML = site.deleting ? deletionStatusMarkup(deletionStatus) : '撤销托管 DNS，并从边缘节点移除配置和证书';
-  byId('site-cache-operation').classList.toggle('hidden', !siteCacheable(site));
+	byId('site-cache-operation').classList.toggle('hidden', !siteCacheable(site));
+	byId('site-tls-operation').classList.toggle('hidden', !siteNeedsTLS(site));
   byId('site-publish-detail').innerHTML = publishDetailMarkup(publishStatus);
 
   [publishButton, certificateButton, byId('site-detail-invalidate'), byId('site-detail-allowlist'), deleteButton].forEach((button) => { button.dataset.id = site.id; });
@@ -440,7 +527,11 @@ function renderSiteDetailStatus() {
 
 function setSiteEditorLocked(locked) {
   document.querySelectorAll('#site-form input, #site-form select, #site-form textarea').forEach((field) => { field.disabled = locked; });
-  if (!locked) updateOriginTLSFields();
+	if (!locked) updateOriginTLSFields();
+	byId('add-tcp-forward').disabled = locked;
+	document.querySelectorAll('.remove-tcp-forward').forEach((button) => { button.disabled = locked; });
+	syncSiteTrafficMode();
+	document.querySelectorAll('.tcp-forward-row').forEach(syncTCPForwardRow);
   syncSiteDNSTTLControl();
   if (byId('site-id').value) byId('site-zone').disabled = true;
   byId('site-submit').disabled = locked;
@@ -1857,7 +1948,7 @@ byId('site-form').addEventListener('submit', async (event) => {
     markSiteFormClean();
     await refresh();
     if (!siteID) navigateTo(`#/sites/${encodeURIComponent(savedSite.id)}`);
-    notice(siteID ? '站点已更新，请发布以应用新配置。' : '站点已创建，请在发布前申请 TLS 证书。', true);
+		notice(siteID ? '站点已更新，请发布以应用新配置。' : (siteNeedsTLS(savedSite) ? '站点已创建，请在发布前申请 TLS 证书。' : '站点已创建，可以直接发布。'), true);
   } catch (error) {
     notice(error.message);
   } finally {
@@ -1876,8 +1967,10 @@ function siteFormPayload() {
     primary_origin: { url: primaryURL, host_header: byId('site-primary-host').value, tls_server_name: originURLUsesTLS(primaryURL) ? byId('site-primary-tls-name').value : '', enabled: true },
     passthrough: byId('site-passthrough').checked,
     client_max_body_size_mb: Number(byId('site-client-max-body-size').value),
-    read_write_timeout_seconds: Number(byId('site-read-write-timeout').value),
-    dns_ttl_seconds: byId('site-dns-ttl-inherit').checked ? null : Number(byId('site-dns-ttl').value),
+		read_write_timeout_seconds: Number(byId('site-read-write-timeout').value),
+		dns_ttl_seconds: byId('site-dns-ttl-inherit').checked ? null : Number(byId('site-dns-ttl').value),
+		tcp_only: byId('site-tcp-only').checked,
+		tcp_forwards: tcpForwardPayload(),
     enabled: byId('site-enabled').checked,
   };
   if (backup) payload.backup_origin = { url: backup, host_header: byId('site-backup-host').value, tls_server_name: originURLUsesTLS(backup) ? byId('site-backup-tls-name').value : '', enabled: true };
@@ -1902,11 +1995,14 @@ function prepareNewSiteForm() {
   byId('site-zone').disabled = false;
   byId('site-client-max-body-size').value = String(defaultClientMaxBodySizeMB);
   byId('site-read-write-timeout').value = String(defaultReadWriteTimeoutSeconds);
-  byId('site-passthrough').checked = false;
+	byId('site-passthrough').checked = false;
+	byId('site-tcp-only').checked = false;
+	byId('site-tcp-forward-list').replaceChildren();
   byId('site-dns-ttl-inherit').checked = true;
   byId('site-dns-ttl').value = String(settingsData?.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds);
   syncSiteDNSTTLControl();
-  byId('site-enabled').checked = true;
+	byId('site-enabled').checked = true;
+	syncSiteTrafficMode();
   byId('site-submit').textContent = '创建站点';
   renderNodeSelector();
   siteFormReady = true;
@@ -1928,11 +2024,15 @@ function populateSiteForm(site) {
   byId('site-backup-tls-name').value = site.backup_origin?.tls_server_name || '';
   byId('site-client-max-body-size').value = String(site.client_max_body_size_mb ?? defaultClientMaxBodySizeMB);
   byId('site-read-write-timeout').value = String(site.read_write_timeout_seconds ?? defaultReadWriteTimeoutSeconds);
-  byId('site-passthrough').checked = Boolean(site.passthrough);
+	byId('site-passthrough').checked = Boolean(site.passthrough);
+	byId('site-tcp-only').checked = Boolean(site.tcp_only);
+	byId('site-tcp-forward-list').replaceChildren();
+	(site.tcp_forwards || []).forEach((forward) => addTCPForwardRow(forward));
   byId('site-dns-ttl-inherit').checked = site.dns_ttl_seconds == null;
   byId('site-dns-ttl').value = String(site.dns_ttl_seconds ?? settingsData?.dns?.default_ttl_seconds ?? defaultDNSTTLSeconds);
   syncSiteDNSTTLControl();
-  byId('site-enabled').checked = site.enabled;
+	byId('site-enabled').checked = site.enabled;
+	syncSiteTrafficMode();
   byId('site-submit').textContent = '保存更改';
   renderNodeSelector(site.node_ids);
   siteFormReady = true;
@@ -1943,6 +2043,24 @@ function populateSiteForm(site) {
 byId('site-form').addEventListener('input', () => updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null));
 byId('site-form').addEventListener('change', () => updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null));
 byId('site-dns-ttl-inherit').addEventListener('change', syncSiteDNSTTLControl);
+byId('site-tcp-only').addEventListener('change', () => {
+	if (byId('site-tcp-only').checked && !byId('site-tcp-forward-list').children.length) addTCPForwardRow();
+	syncSiteTrafficMode();
+});
+byId('add-tcp-forward').addEventListener('click', () => {
+	addTCPForwardRow().querySelector('.tcp-forward-name').focus();
+	updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null);
+});
+byId('site-tcp-forward-list').addEventListener('click', (event) => {
+	const button = event.target.closest('.remove-tcp-forward');
+	if (!button) return;
+	button.closest('.tcp-forward-row').remove();
+	updateSiteFormPreview(sites.find((site) => site.id === byId('site-id').value) || null);
+});
+byId('site-tcp-forward-list').addEventListener('change', (event) => {
+	const row = event.target.closest('.tcp-forward-row');
+	if (row) syncTCPForwardRow(row);
+});
 
 function syncSiteDNSTTLControl() {
   const inherit = byId('site-dns-ttl-inherit').checked;

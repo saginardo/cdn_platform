@@ -100,7 +100,7 @@ func (m *CertificateManager) Reconcile(ctx context.Context) {
 		return
 	}
 	for _, site := range sites {
-		if !site.Enabled || !site.Published {
+		if !site.Enabled || !site.Published || !domain.SiteNeedsCertificate(site) {
 			continue
 		}
 		_, _, notAfter, certificateErr := m.Store.Certificate(site.ID)

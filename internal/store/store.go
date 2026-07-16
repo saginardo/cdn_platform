@@ -21,7 +21,7 @@ import (
 var (
 	ErrNotFound       = errors.New("not found")
 	ErrTokenInvalid   = errors.New("enrollment token is invalid or expired")
-	ErrCacheDisabled  = errors.New("site cache is disabled in passthrough mode")
+	ErrCacheDisabled  = errors.New("site cache is disabled for passthrough or TCP-only sites")
 	ErrNodeAssigned   = errors.New("node is still assigned to a site")
 	ErrSiteDeleting   = errors.New("site deletion is in progress")
 	ErrSiteTaskActive = errors.New("site has an active publish or certificate task")
@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   name TEXT NOT NULL UNIQUE,
   public_ipv4 TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL,
+	capabilities_json TEXT NOT NULL DEFAULT '[]',
   cert_fingerprint TEXT,
   last_heartbeat_at TEXT,
   applied_version INTEGER NOT NULL DEFAULT 0,
@@ -109,6 +110,8 @@ CREATE TABLE IF NOT EXISTS sites (
 	client_max_body_size_mb INTEGER NOT NULL DEFAULT 128,
 	read_write_timeout_seconds INTEGER NOT NULL DEFAULT 360,
 	dns_ttl_seconds INTEGER,
+	tcp_only INTEGER NOT NULL DEFAULT 0,
+	tcp_forwards_json TEXT NOT NULL DEFAULT '[]',
   cache_generation INTEGER NOT NULL DEFAULT 1,
   config_version INTEGER NOT NULL DEFAULT 1,
   published INTEGER NOT NULL DEFAULT 0,
@@ -140,6 +143,7 @@ CREATE TABLE IF NOT EXISTS node_states (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   version INTEGER NOT NULL,
   nginx_config TEXT NOT NULL,
+	nginx_stream_config TEXT NOT NULL DEFAULT '',
   public_ports_json TEXT NOT NULL DEFAULT '[]',
   certificate_ciphertext BLOB,
   private_key_ciphertext BLOB,
@@ -268,13 +272,19 @@ CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN client_max_body_size_mb INTEGER NOT NULL DEFAULT 128`)
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN read_write_timeout_seconds INTEGER NOT NULL DEFAULT 360`)
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN dns_ttl_seconds INTEGER`)
+	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN tcp_only INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN tcp_forwards_json TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0`)
 	if _, err := s.db.Exec(`UPDATE sites SET stream_paths_json = '[]' WHERE stream_paths_json <> '[]'`); err != nil {
 		return fmt.Errorf("retire legacy stream paths: %w", err)
 	}
 	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN applied_version INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]'`)
 	_, _ = s.db.Exec(`ALTER TABLE deployment_tasks ADD COLUMN deadline_at TEXT`)
-	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN public_ports_json TEXT NOT NULL DEFAULT '[]'`)
+	// JSON null distinguishes pre-capability HTTP states from an intentional
+	// empty listener set. New publishers always persist an explicit array.
+	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN public_ports_json TEXT NOT NULL DEFAULT 'null'`)
+	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN nginx_stream_config TEXT NOT NULL DEFAULT ''`)
 	// Publish tasks created before edge confirmation existed have neither a
 	// deadline nor target rows. They cannot be resumed safely after upgrade, so
 	// make the required manual retry visible before enforcing the new active
@@ -533,7 +543,7 @@ func (s *Store) CreateNode(name, publicIPv4 string) (domain.Node, error) {
 		return domain.Node{}, errors.New("a valid public IPv4 address is required")
 	}
 	created := now()
-	node := domain.Node{ID: uuid.NewString(), Name: strings.TrimSpace(name), PublicIPv4: parsed.String(), Status: domain.NodePending, CreatedAt: created, UpdatedAt: created}
+	node := domain.Node{ID: uuid.NewString(), Name: strings.TrimSpace(name), PublicIPv4: parsed.String(), Status: domain.NodePending, Capabilities: []string{}, CreatedAt: created, UpdatedAt: created}
 	_, err := s.db.Exec(`INSERT INTO nodes(id, name, public_ipv4, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`, node.ID, node.Name, node.PublicIPv4, node.Status, stamp(created), stamp(created))
 	if err != nil {
 		return domain.Node{}, fmt.Errorf("create node: %w", err)
@@ -542,11 +552,11 @@ func (s *Store) CreateNode(name, publicIPv4 string) (domain.Node, error) {
 }
 
 func (s *Store) GetNode(id string) (domain.Node, error) {
-	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
+	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, capabilities_json, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
 }
 
 func (s *Store) ListNodes() ([]domain.Node, error) {
-	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, capabilities_json, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -566,14 +576,18 @@ type scanner interface{ Scan(...any) error }
 
 func scanNode(row scanner) (domain.Node, error) {
 	var node domain.Node
+	var capabilities string
 	var heartbeat sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
+	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &capabilities, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Node{}, ErrNotFound
 	}
 	if err != nil {
 		return domain.Node{}, err
+	}
+	if err := json.Unmarshal([]byte(capabilities), &node.Capabilities); err != nil {
+		return domain.Node{}, fmt.Errorf("decode node capabilities: %w", err)
 	}
 	node.CreatedAt, err = parseTime(createdAt)
 	if err != nil {
@@ -687,6 +701,45 @@ func (s *Store) SetNodeCertificate(nodeID, fingerprint string) error {
 		AND NOT EXISTS (SELECT 1 FROM node_uninstall_jobs WHERE node_id = nodes.id AND status IN (?, ?, ?, ?))`,
 		fingerprint, stamp(now()), nodeID, domain.NodeRevoked, domain.NodeUninstalling, domain.NodeUninstalled,
 		NodeUninstallPreparing, NodeUninstallReady, NodeUninstallRunning, NodeUninstallFailed)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) SetNodeCapabilities(nodeID string, capabilities []string) error {
+	if len(capabilities) > 32 {
+		return errors.New("too many edge capabilities")
+	}
+	normalized := make([]string, 0, len(capabilities))
+	seen := make(map[string]bool, len(capabilities))
+	for _, capability := range capabilities {
+		capability = strings.TrimSpace(capability)
+		if capability == "" || len(capability) > 64 {
+			return errors.New("invalid edge capability")
+		}
+		for _, character := range capability {
+			if !(character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || character == '_' || character == '-') {
+				return errors.New("invalid edge capability")
+			}
+		}
+		if !seen[capability] {
+			seen[capability] = true
+			normalized = append(normalized, capability)
+		}
+	}
+	encoded, err := json.Marshal(normalized)
+	if err != nil {
+		return err
+	}
+	result, err := s.db.Exec(`UPDATE nodes SET capabilities_json = ?, updated_at = ? WHERE id = ?`, string(encoded), stamp(now()), nodeID)
 	if err != nil {
 		return err
 	}
@@ -1000,6 +1053,10 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 	if err != nil {
 		return err
 	}
+	tcpForwards, err := json.Marshal(site.TCPForwards)
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -1008,8 +1065,8 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 	if err := validateSiteNodes(tx, site.Nodes); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, cache_generation, config_version, published, enabled, deleting, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.CreatedAt), stamp(site.UpdatedAt))
+	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_generation, config_version, published, enabled, deleting, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, boolInt(site.TCPOnly), string(tcpForwards), site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.CreatedAt), stamp(site.UpdatedAt))
 	if err != nil {
 		return err
 	}
@@ -1020,11 +1077,11 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 }
 
 func (s *Store) GetSite(id string) (domain.Site, string, error) {
-	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites WHERE id = ?`, id))
+	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites WHERE id = ?`, id))
 }
 
 func (s *Store) ListSites() ([]domain.Site, error) {
-	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -1042,12 +1099,12 @@ func (s *Store) ListSites() ([]domain.Site, error) {
 
 func scanSite(row scanner) (domain.Site, string, error) {
 	var site domain.Site
-	var zoneID, domains, nodes, primary, streamPaths string
+	var zoneID, domains, nodes, primary, streamPaths, tcpForwards string
 	var backup sql.NullString
 	var dnsTTL sql.NullInt64
-	var passthrough, published, enabled, deleting int
+	var passthrough, tcpOnly, published, enabled, deleting int
 	var createdAt, updatedAt string
-	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.ReadWriteTimeoutSeconds, &dnsTTL, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &deleting, &createdAt, &updatedAt)
+	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.ReadWriteTimeoutSeconds, &dnsTTL, &tcpOnly, &tcpForwards, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &deleting, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Site{}, "", ErrNotFound
 	}
@@ -1074,6 +1131,9 @@ func scanSite(row scanner) (domain.Site, string, error) {
 	if err := json.Unmarshal([]byte(streamPaths), &site.StreamPaths); err != nil {
 		return domain.Site{}, "", err
 	}
+	if err := json.Unmarshal([]byte(tcpForwards), &site.TCPForwards); err != nil {
+		return domain.Site{}, "", err
+	}
 	var parseErr error
 	site.CreatedAt, parseErr = parseTime(createdAt)
 	if parseErr != nil {
@@ -1084,6 +1144,7 @@ func scanSite(row scanner) (domain.Site, string, error) {
 		return domain.Site{}, "", parseErr
 	}
 	site.Passthrough = passthrough != 0
+	site.TCPOnly = tcpOnly != 0
 	if dnsTTL.Valid {
 		value := int(dnsTTL.Int64)
 		site.DNSTTLSeconds = &value
@@ -1125,6 +1186,7 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	nodes, _ := json.Marshal(site.Nodes)
 	primary, _ := json.Marshal(site.PrimaryOrigin)
 	streamPaths, _ := json.Marshal(site.StreamPaths)
+	tcpForwards, _ := json.Marshal(site.TCPForwards)
 	var backup any
 	if site.BackupOrigin != nil {
 		backup, _ = json.Marshal(site.BackupOrigin)
@@ -1146,7 +1208,7 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	if err := replaceSiteDomainClaims(tx, site.ID, reservedDomains); err != nil {
 		return domain.Site{}, err
 	}
-	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, dns_ttl_seconds=?, cache_generation=?, config_version=?, published=?, enabled=?, deleting=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.UpdatedAt), site.ID)
+	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, dns_ttl_seconds=?, tcp_only=?, tcp_forwards_json=?, cache_generation=?, config_version=?, published=?, enabled=?, deleting=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, boolInt(site.TCPOnly), string(tcpForwards), site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.UpdatedAt), site.ID)
 	if err != nil {
 		return domain.Site{}, err
 	}
@@ -1210,7 +1272,7 @@ func (s *Store) InvalidateSiteCache(siteID string) (domain.Site, error) {
 	if site.Deleting {
 		return domain.Site{}, ErrSiteDeleting
 	}
-	if site.Passthrough {
+	if site.Passthrough || site.TCPOnly {
 		return domain.Site{}, ErrCacheDisabled
 	}
 	result, err := s.db.Exec(`UPDATE sites SET cache_generation = cache_generation + 1, config_version = config_version + 1, published = 0, updated_at = ? WHERE id = ?`, stamp(now()), siteID)
@@ -1637,7 +1699,7 @@ func saveNodeStatesTx(tx *sql.Tx, updates []NodeStateUpdate, updatedAt string) e
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO node_states(node_id, version, nginx_config, public_ports_json, certificate_ciphertext, private_key_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(node_id) DO UPDATE SET version=excluded.version, nginx_config=excluded.nginx_config, public_ports_json=excluded.public_ports_json, certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=NULL, updated_at=excluded.updated_at`, update.NodeID, update.State.Version, update.State.NginxConfig, string(ports), update.CertificatesCiphertext, updatedAt); err != nil {
+		if _, err := tx.Exec(`INSERT INTO node_states(node_id, version, nginx_config, nginx_stream_config, public_ports_json, certificate_ciphertext, private_key_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(node_id) DO UPDATE SET version=excluded.version, nginx_config=excluded.nginx_config, nginx_stream_config=excluded.nginx_stream_config, public_ports_json=excluded.public_ports_json, certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=NULL, updated_at=excluded.updated_at`, update.NodeID, update.State.Version, update.State.NginxConfig, update.State.NginxStreamConfig, string(ports), update.CertificatesCiphertext, updatedAt); err != nil {
 			return err
 		}
 	}
@@ -1648,7 +1710,7 @@ func (s *Store) NodeState(nodeID string) (domain.DesiredState, []byte, error) {
 	var state domain.DesiredState
 	var certificates []byte
 	var ports string
-	err := s.db.QueryRow(`SELECT version, nginx_config, public_ports_json, certificate_ciphertext FROM node_states WHERE node_id = ?`, nodeID).Scan(&state.Version, &state.NginxConfig, &ports, &certificates)
+	err := s.db.QueryRow(`SELECT version, nginx_config, nginx_stream_config, public_ports_json, certificate_ciphertext FROM node_states WHERE node_id = ?`, nodeID).Scan(&state.Version, &state.NginxConfig, &state.NginxStreamConfig, &ports, &certificates)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.DesiredState{}, nil, ErrNotFound
 	}

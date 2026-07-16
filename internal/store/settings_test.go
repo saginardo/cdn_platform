@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -133,5 +134,104 @@ func TestSiteDNSTTLIsolatedByPublishedSnapshot(t *testing.T) {
 	}
 	if publication.Site.DNSTTLSeconds == nil || *publication.Site.DNSTTLSeconds != 180 {
 		t.Fatalf("draft TTL leaked into publication: %#v", publication.Site.DNSTTLSeconds)
+	}
+}
+
+func TestTCPForwardsAreIsolatedByPublishedSnapshot(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("mail-edge", "203.0.113.91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "mail", Domains: []string{"mail.example.test"}, Nodes: []string{node.ID}, TCPOnly: true, Enabled: true,
+		TCPForwards: []domain.TCPForward{{Name: "SMTPS", ListenPort: 9465, ListenTLS: true, UpstreamHost: "mail.example.test", UpstreamPort: 465, UpstreamTLS: true}},
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkSitePublished(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	draft, zoneID, err := database.GetSite(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft.TCPForwards[0].ListenPort = 9993
+	if _, err := database.UpdateSite(draft, zoneID); err != nil {
+		t.Fatal(err)
+	}
+	publication, err := database.SitePublication(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !publication.Site.TCPOnly || len(publication.Site.TCPForwards) != 1 || publication.Site.TCPForwards[0].ListenPort != 9465 {
+		t.Fatalf("TCP draft leaked into publication: %#v", publication.Site)
+	}
+}
+
+func TestNodeCapabilitiesAreReplacedByEachHeartbeatAdvertisement(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge", "203.0.113.92")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeCapabilities(node.ID, []string{domain.EdgeCapabilityTCPStream, domain.EdgeCapabilityTCPStream}); err != nil {
+		t.Fatal(err)
+	}
+	node, err = database.GetNode(node.ID)
+	if err != nil || len(node.Capabilities) != 1 || node.Capabilities[0] != domain.EdgeCapabilityTCPStream {
+		t.Fatalf("stored capabilities = %#v, %v", node.Capabilities, err)
+	}
+	if err := database.SetNodeCapabilities(node.ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	node, err = database.GetNode(node.ID)
+	if err != nil || len(node.Capabilities) != 0 {
+		t.Fatalf("cleared capabilities = %#v, %v", node.Capabilities, err)
+	}
+}
+
+func TestLegacyNodeStateMigrationPreservesHTTPPortFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE node_states (
+		node_id TEXT PRIMARY KEY,
+		version INTEGER NOT NULL,
+		nginx_config TEXT NOT NULL,
+		certificate_ciphertext BLOB,
+		private_key_ciphertext BLOB,
+		updated_at TEXT NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`INSERT INTO node_states(node_id, version, nginx_config, updated_at) VALUES ('legacy-node', 7, 'legacy HTTP config', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	state, _, err := database.NodeState("legacy-node")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.PublicPorts != nil {
+		t.Fatalf("legacy public ports = %#v, want nil fallback", state.PublicPorts)
 	}
 }

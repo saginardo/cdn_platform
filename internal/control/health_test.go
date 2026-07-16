@@ -341,3 +341,66 @@ func TestSiteHTTPSHealthFallsBackDuringLegacyConfigRollout(t *testing.T) {
 		t.Fatalf("legacy config did not retain node-level DNS eligibility: %#v", records)
 	}
 }
+
+func TestTCPOnlySiteKeepsNodeUntilHealthFailureThreshold(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	badNode, err := database.CreateNode("edge-transient", "203.0.113.30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodNode, err := database.CreateNode("edge-healthy", "203.0.113.31")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "mail", Domains: []string{"mail.example.test"}, Nodes: []string{badNode.ID, goodNode.ID},
+		TCPOnly: true, TCPForwards: []domain.TCPForward{{Name: "smtps", ListenPort: 9465, UpstreamHost: "mail-origin.example.test", UpstreamPort: 465}}, Enabled: true,
+	}, "zone-mail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err = database.MarkSitePublished(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := nginx.Render([]domain.Site{site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, node := range []domain.Node{badNode, goodNode} {
+		if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.SaveNodeState(node.ID, domain.DesiredState{Version: 1, NginxConfig: configuration, NginxStreamConfig: "# stream\n", PublicPorts: []int{9465}}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := database.Heartbeat(node.ID, 1, "", nil); err != nil {
+			t.Fatal(err)
+		}
+		for range 5 {
+			if _, err := database.RecordNodeHealth(node.ID, true, ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if health, err := database.RecordNodeHealth(badNode.ID, false, "TCP 9465: timeout"); err != nil || !health.DNSEligible {
+		t.Fatalf("transiently failing node health = %#v, %v", health, err)
+	}
+	nodes, err := database.ListNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dns := &MemoryDNS{}
+	manager := HealthManager{Server: &Server{Store: database, DNS: dns}}
+	if err := manager.reconcileSite(context.Background(), site, nodes); err != nil {
+		t.Fatal(err)
+	}
+	records := dns.Zones["zone-mail"]
+	if len(records) != 2 {
+		t.Fatalf("transient failure removed TCP endpoint before threshold: %#v", records)
+	}
+}

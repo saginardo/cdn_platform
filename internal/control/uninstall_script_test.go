@@ -23,6 +23,7 @@ func TestUninstallEdgeScriptRemovesOnlyPlatformFiles(t *testing.T) {
 	}
 	for _, path := range []string{
 		"etc/nginx/conf.d/cdn-platform.conf",
+		"etc/nginx/modules-enabled/99-cdn-platform-stream.conf",
 		"etc/systemd/system/cdn-edge-agent.service",
 		"usr/local/bin/cdn-edge-agent",
 		"opt/cdn-edge",
@@ -48,6 +49,19 @@ func TestUninstallEdgeScriptRemovesOnlyPlatformFiles(t *testing.T) {
 	}
 }
 
+func TestUninstallEdgeScriptRemovesStreamEntryWhenHTTPEntryIsAlreadyMissing(t *testing.T) {
+	root, _, output, err := runUninstallEdgeScript(t, "stream-only")
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, output)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "etc/nginx/modules-enabled/99-cdn-platform-stream.conf")); !os.IsNotExist(statErr) {
+		t.Fatalf("stream entry was retained: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "etc/nginx/nginx.conf")); statErr != nil {
+		t.Fatalf("unrelated Nginx configuration was removed: %v", statErr)
+	}
+}
+
 func TestUninstallEdgeScriptRestoresConfigurationWhenNginxValidationFails(t *testing.T) {
 	root, log, output, err := runUninstallEdgeScript(t, "nginx")
 	if err == nil {
@@ -56,6 +70,10 @@ func TestUninstallEdgeScriptRestoresConfigurationWhenNginxValidationFails(t *tes
 	config, readErr := os.ReadFile(filepath.Join(root, "etc/nginx/conf.d/cdn-platform.conf"))
 	if readErr != nil || string(config) != "platform config\n" {
 		t.Fatalf("Nginx configuration was not restored: %q, %v", config, readErr)
+	}
+	streamConfig, readErr := os.ReadFile(filepath.Join(root, "etc/nginx/modules-enabled/99-cdn-platform-stream.conf"))
+	if readErr != nil || string(streamConfig) != "stream config\n" {
+		t.Fatalf("Nginx stream configuration was not restored: %q, %v", streamConfig, readErr)
 	}
 	for _, path := range []string{
 		"etc/systemd/system/cdn-edge-agent.service",
@@ -92,6 +110,10 @@ func TestUninstallEdgeScriptRestoresConfigurationWhenNginxReloadFails(t *testing
 	if readErr != nil || string(config) != "platform config\n" {
 		t.Fatalf("Nginx configuration was not restored: %q, %v", config, readErr)
 	}
+	streamConfig, readErr := os.ReadFile(filepath.Join(root, "etc/nginx/modules-enabled/99-cdn-platform-stream.conf"))
+	if readErr != nil || string(streamConfig) != "stream config\n" {
+		t.Fatalf("Nginx stream configuration was not restored: %q, %v", streamConfig, readErr)
+	}
 	for _, expected := range []string{"uninstall/start", "uninstall/fail", "systemctl reload nginx", "systemctl enable cdn-edge-agent.service", "systemctl start cdn-edge-agent.service"} {
 		if !strings.Contains(log, expected) {
 			t.Fatalf("reload rollback log does not contain %q:\n%s", expected, log)
@@ -109,6 +131,7 @@ func TestUninstallEdgeScriptRestoresServiceWhenBackupCreationFails(t *testing.T)
 	}
 	for _, path := range []string{
 		"etc/nginx/conf.d/cdn-platform.conf",
+		"etc/nginx/modules-enabled/99-cdn-platform-stream.conf",
 		"etc/systemd/system/cdn-edge-agent.service",
 		"usr/local/bin/cdn-edge-agent",
 		"var/lib/cdn-platform/state",
@@ -134,6 +157,7 @@ func TestUninstallEdgeScriptRestoresServiceWhenStopFails(t *testing.T) {
 	}
 	for _, path := range []string{
 		"etc/nginx/conf.d/cdn-platform.conf",
+		"etc/nginx/modules-enabled/99-cdn-platform-stream.conf",
 		"etc/systemd/system/cdn-edge-agent.service",
 		"usr/local/bin/cdn-edge-agent",
 		"var/lib/cdn-platform/state",
@@ -156,7 +180,7 @@ func runUninstallEdgeScript(t *testing.T, failureMode string) (string, string, s
 	t.Helper()
 	root := t.TempDir()
 	for _, directory := range []string{
-		"run", "tmp", "mock-bin", "etc/nginx/conf.d", "etc/systemd/system", "usr/local/bin",
+		"run", "tmp", "mock-bin", "etc/nginx/conf.d", "etc/nginx/modules-enabled", "etc/systemd/system", "usr/local/bin",
 		"opt/cdn-edge/bin", "opt/cdn-edge/config", "opt/cdn-edge/data", "opt/cdn-edge/logs", "opt/cdn-edge/cache",
 		"etc/cdn-platform", "var/lib/cdn-platform", "var/log/cdn-platform", "var/cache/cdn-platform",
 	} {
@@ -165,19 +189,25 @@ func runUninstallEdgeScript(t *testing.T, failureMode string) (string, string, s
 		}
 	}
 	for path, contents := range map[string]string{
-		"etc/nginx/conf.d/cdn-platform.conf":        "platform config\n",
-		"etc/nginx/nginx.conf":                      "unrelated config\n",
-		"etc/systemd/system/cdn-edge-agent.service": "service\n",
-		"usr/local/bin/cdn-edge-agent":              "binary\n",
-		"opt/cdn-edge/.layout-version":              "1\n",
-		"opt/cdn-edge/bin/cdn-edge-agent":           "new binary\n",
-		"opt/cdn-edge/data/state":                   "new state\n",
-		"etc/cdn-platform/state":                    "state\n",
-		"var/lib/cdn-platform/state":                "state\n",
-		"var/log/cdn-platform/state":                "state\n",
-		"var/cache/cdn-platform/state":              "state\n",
+		"etc/nginx/conf.d/cdn-platform.conf":                    "platform config\n",
+		"etc/nginx/modules-enabled/99-cdn-platform-stream.conf": "stream config\n",
+		"etc/nginx/nginx.conf":                                  "unrelated config\n",
+		"etc/systemd/system/cdn-edge-agent.service":             "service\n",
+		"usr/local/bin/cdn-edge-agent":                          "binary\n",
+		"opt/cdn-edge/.layout-version":                          "1\n",
+		"opt/cdn-edge/bin/cdn-edge-agent":                       "new binary\n",
+		"opt/cdn-edge/data/state":                               "new state\n",
+		"etc/cdn-platform/state":                                "state\n",
+		"var/lib/cdn-platform/state":                            "state\n",
+		"var/log/cdn-platform/state":                            "state\n",
+		"var/cache/cdn-platform/state":                          "state\n",
 	} {
 		if err := os.WriteFile(filepath.Join(root, path), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if failureMode == "stream-only" {
+		if err := os.Remove(filepath.Join(root, "etc/nginx/conf.d/cdn-platform.conf")); err != nil {
 			t.Fatal(err)
 		}
 	}

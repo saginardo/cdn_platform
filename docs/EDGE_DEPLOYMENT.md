@@ -10,6 +10,7 @@ Edge nodes use the Debian Nginx package and a host systemd service. Docker is no
     edge.env
     certs/
     nginx/cdn-platform.conf
+	nginx/cdn-platform-stream.conf
   data/
     edge-client.key
     edge-client.crt
@@ -27,9 +28,10 @@ Two system integration links remain outside this root because systemd and the De
 ```text
 /etc/systemd/system/cdn-edge-agent.service -> /opt/cdn-edge/systemd/cdn-edge-agent.service
 /etc/nginx/conf.d/cdn-platform.conf -> /opt/cdn-edge/config/nginx/cdn-platform.conf
+/etc/nginx/modules-enabled/99-cdn-platform-stream.conf
 ```
 
-Nginx itself, its global configuration, system error log, and the agent journal remain managed by Debian. The agent runs as root because it atomically writes site certificates and configuration, validates Nginx, and reloads the service. Nginx cache files are owned by `www-data`.
+The second Nginx integration file owns a top-level `stream { include ...; }` block; HTTP virtual hosts remain in `conf.d`. The installer adds Debian's `libnginx-mod-stream` package. Nginx itself, its global configuration, system error log, and the agent journal remain managed by Debian. The agent runs as root because it atomically writes site certificates and both generated configurations, validates Nginx, and reloads the service. Nginx cache files are owned by `www-data`.
 
 ## Fresh installation and upgrades
 
@@ -39,7 +41,9 @@ The installer is idempotent and recognizes these states:
 
 - No CDN deployment: installs a new `/opt/cdn-edge` layout and enrolls with the 15-minute token.
 - Legacy deployment: migrates `/usr/local/bin/cdn-edge-agent`, `/etc/cdn-platform`, `/var/lib/cdn-platform`, `/var/log/cdn-platform`, `/var/cache/cdn-platform`, the Nginx include, and the systemd unit.
-- Existing `/opt/cdn-edge`: replaces the checksum-verified binary and service definition while preserving configuration data, identity, logs, and cache.
+- Existing `/opt/cdn-edge`: replaces the checksum-verified binary and service definition, adds the stream integration when missing, and preserves configuration data, identity, logs, and cache.
+
+The installed environment advertises `tcp_stream_v1` in every authenticated heartbeat. The controller refuses to publish a TCP rule to a node until this capability is present, so deploying a newer controller does not send stream state to an older Agent. Rerun the node's generated deployment/upgrade command before its first TCP publication.
 
 For a node that already has a control-plane certificate fingerprint, the generated upgrade command contains no new enrollment token. The installer requires the complete local mTLS key/certificate/CA set instead. This preserves the node identity and avoids leaving an unused valid enrollment token after an upgrade.
 
@@ -67,6 +71,8 @@ sudo nginx -t
 curl -fsS http://127.0.0.1/__cdn_health
 sudo find /opt/cdn-edge -maxdepth 3 -type f -o -type l
 ```
+
+For a TCP-only node, replace the HTTP health request with listener checks for its published ports, for example `ss -ltnp '( sport = :9465 or sport = :9993 )'`. A TCP-only desired state intentionally has no Nginx listeners on 80/443.
 
 After every node has migrated, run `cdn-control publish-all` through the control Compose service, wait for each node's applied version to catch up, and confirm the control UI shows recent heartbeats without `last_error`.
 

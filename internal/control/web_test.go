@@ -379,6 +379,10 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		`id="site-backup-tls-name-wrap" class="hidden"`,
 		`id="site-backup-tls-name" placeholder="backup.example.com"`,
 		`id="site-policy-title">流量策略`,
+		`id="site-tcp-only" type="checkbox"`,
+		`id="site-tcp-title">TCP 转发`,
+		`id="add-tcp-forward"`,
+		`id="site-tcp-forward-list"`,
 		`id="site-nodes-title">节点分配`,
 		`id="site-detail-certificate"`,
 		`id="site-detail-invalidate"`,
@@ -427,6 +431,11 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		"/delete-status",
 		"method: 'DELETE'",
 		"site.deleting",
+		"function tcpForwardPayload()",
+		"function addTCPForwardRow(forward = {})",
+		"function syncSiteTrafficMode()",
+		"tcp_forwards: tcpForwardPayload()",
+		"tcp_only: byId('site-tcp-only').checked",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)
@@ -454,7 +463,7 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	styles := string(styleContents)
-	for _, expected := range []string{".site-detail-header", ".site-detail-summary", ".site-form-fields", ".site-operation"} {
+	for _, expected := range []string{".site-detail-header", ".site-detail-summary", ".site-form-fields", ".site-operation", ".tcp-forward-row", ".tcp-forward-fields"} {
 		if !strings.Contains(styles, expected) {
 			t.Fatalf("styles.css does not contain %q", expected)
 		}

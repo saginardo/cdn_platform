@@ -34,6 +34,10 @@ func main() {
 		publishAll()
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "publish-site" {
+		publishSite(os.Args[2])
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "cloudflare-credentials" {
 		writeCloudflareCredentials(os.Args[2])
 		return
@@ -135,6 +139,28 @@ func main() {
 
 // publishAll rebuilds edge configurations after a renderer upgrade without exposing an HTTP endpoint.
 func publishAll() {
+	database, publisher := openPublisher()
+	defer database.Close()
+	if err := publisher.PublishAll(); err != nil {
+		fatal("publish all sites: " + err.Error())
+	}
+}
+
+func publishSite(siteID string) {
+	siteID = strings.TrimSpace(siteID)
+	if siteID == "" {
+		fatal("site ID is required")
+	}
+	database, publisher := openPublisher()
+	defer database.Close()
+	task, err := publisher.PublishSite(siteID)
+	if err != nil {
+		fatal("publish site: " + err.Error())
+	}
+	fmt.Printf("publish task %s: %s\n", task.ID, task.Status)
+}
+
+func openPublisher() (*store.Store, control.Publisher) {
 	dataDir := env("CONTROL_DATA_DIR", "/var/lib/cdn-platform")
 	key := os.Getenv("CONTROL_ENCRYPTION_KEY")
 	if key == "" {
@@ -148,10 +174,7 @@ func publishAll() {
 	if err != nil {
 		fatal("open database: " + err.Error())
 	}
-	defer database.Close()
-	if err := (control.Publisher{Store: database, Cipher: cipher}).PublishAll(); err != nil {
-		fatal("publish all sites: " + err.Error())
-	}
+	return database, control.Publisher{Store: database, Cipher: cipher}
 }
 
 func writeCloudflareCredentials(path string) {

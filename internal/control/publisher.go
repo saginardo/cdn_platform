@@ -9,6 +9,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,8 +92,9 @@ type publicationMaterial struct {
 }
 
 type renderedPublication struct {
-	Site   domain.Site
-	Bundle domain.TLSBundle
+	Site           domain.Site
+	Bundle         domain.TLSBundle
+	HasCertificate bool
 }
 
 func publicationMaterials(publications []store.SitePublication) []publicationMaterial {
@@ -179,7 +181,7 @@ func (p Publisher) prepareNodeStates(siteID string, removing bool) ([]store.Node
 			if certificateErr != store.ErrNotFound {
 				return nil, nil, certificateErr
 			}
-			if targetSite.Enabled {
+			if targetSite.Enabled && domain.SiteNeedsCertificate(targetSite) {
 				return nil, nil, fmt.Errorf("site %s needs a certificate before it can be published", targetSite.Name)
 			}
 		}
@@ -233,23 +235,37 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 				continue
 			}
 			nodeSites = append(nodeSites, publication.Site)
-			certificates[publication.Site.ID] = publication.Bundle
+			if publication.HasCertificate {
+				certificates[publication.Site.ID] = publication.Bundle
+			}
+		}
+		previous, previousCertificates, stateErr := p.Store.NodeState(node.ID)
+		if stateErr != nil && stateErr != store.ErrNotFound {
+			return nil, nil, stateErr
+		}
+		if len(nodeSites) == 0 && stateErr == nil && isTCPOnlyState(previous) {
+			nodeSites = append(nodeSites, domain.Site{TCPOnly: true})
+		}
+		if siteRequiresTCPStream(nodeSites) && !slices.Contains(node.Capabilities, domain.EdgeCapabilityTCPStream) {
+			return nil, nil, fmt.Errorf("node %s must be upgraded before publishing TCP forwards", node.Name)
 		}
 		config, err := nginx.Render(nodeSites)
 		if err != nil {
 			return nil, nil, err
 		}
+		streamConfig, err := nginx.RenderStream(nodeSites)
+		if err != nil {
+			return nil, nil, err
+		}
+		ports := requiredPublicPorts(nodeSites)
 		version := int64(1)
-		previous, previousCertificates, stateErr := p.Store.NodeState(node.ID)
 		if stateErr == nil {
-			if p.nodeStateMatches(previous, previousCertificates, config, requiredPublicPorts(nodeSites), certificates) {
+			if p.nodeStateMatches(previous, previousCertificates, config, streamConfig, ports, certificates) {
 				continue
 			}
 			version = previous.Version + 1
-		} else if stateErr != nil && stateErr != store.ErrNotFound {
-			return nil, nil, stateErr
 		}
-		state := domain.DesiredState{Version: version, NginxConfig: config, PublicPorts: requiredPublicPorts(nodeSites), Certificates: certificates}
+		state := domain.DesiredState{Version: version, NginxConfig: config, NginxStreamConfig: streamConfig, PublicPorts: ports, Certificates: certificates}
 		serialized, err := json.Marshal(state.Certificates)
 		if err != nil {
 			return nil, nil, err
@@ -269,7 +285,12 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 func (p Publisher) decryptPublicationMaterials(materials []publicationMaterial, affected map[string]struct{}) ([]renderedPublication, error) {
 	rendered := make([]renderedPublication, 0, len(materials))
 	for _, material := range materials {
-		if !material.Site.Enabled || !siteTouchesNodes(material.Site, affected) {
+		if !siteTouchesNodes(material.Site, affected) {
+			continue
+		}
+		publication := renderedPublication{Site: material.Site}
+		if !material.Site.Enabled || !domain.SiteNeedsCertificate(material.Site) {
+			rendered = append(rendered, publication)
 			continue
 		}
 		if len(material.CertificateCiphertext) == 0 || len(material.KeyCiphertext) == 0 {
@@ -289,19 +310,18 @@ func (p Publisher) decryptPublicationMaterials(materials []publicationMaterial, 
 		if err := validateCertificatePrivateKey(certificatePEM, privateKeyPEM); err != nil {
 			return nil, fmt.Errorf("site %s certificate private key: %w", material.Site.Name, err)
 		}
-		rendered = append(rendered, renderedPublication{
-			Site: material.Site,
-			Bundle: domain.TLSBundle{
-				CertificatePEM: string(certificatePEM),
-				PrivateKeyPEM:  string(privateKeyPEM),
-			},
-		})
+		publication.Bundle = domain.TLSBundle{
+			CertificatePEM: string(certificatePEM),
+			PrivateKeyPEM:  string(privateKeyPEM),
+		}
+		publication.HasCertificate = true
+		rendered = append(rendered, publication)
 	}
 	return rendered, nil
 }
 
-func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCertificates []byte, config string, ports []int, certificates map[string]domain.TLSBundle) bool {
-	if previous.NginxConfig != config || !slices.Equal(previous.PublicPorts, ports) {
+func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCertificates []byte, config, streamConfig string, ports []int, certificates map[string]domain.TLSBundle) bool {
+	if previous.NginxConfig != config || previous.NginxStreamConfig != streamConfig || !slices.Equal(previous.PublicPorts, ports) {
 		return false
 	}
 	previousBundles := make(map[string]domain.TLSBundle)
@@ -324,10 +344,53 @@ func siteTouchesNodes(site domain.Site, nodeIDs map[string]struct{}) bool {
 }
 
 func requiredPublicPorts(sites []domain.Site) []int {
-	if len(sites) == 0 {
-		return []int{80}
+	ports := make(map[int]struct{})
+	dedicatedTCP := false
+	for _, site := range sites {
+		if site.TCPOnly {
+			dedicatedTCP = true
+		}
+		if !site.Enabled {
+			continue
+		}
+		if !site.TCPOnly {
+			ports[80] = struct{}{}
+			ports[443] = struct{}{}
+		}
+		for _, forward := range site.TCPForwards {
+			ports[forward.ListenPort] = struct{}{}
+		}
 	}
-	return []int{80, 443}
+	if len(ports) == 0 && !dedicatedTCP {
+		ports[80] = struct{}{}
+	}
+	result := make([]int, 0, len(ports))
+	for port := range ports {
+		result = append(result, port)
+	}
+	sort.Ints(result)
+	return result
+}
+
+func siteRequiresTCPStream(sites []domain.Site) bool {
+	for _, site := range sites {
+		if site.TCPOnly || (site.Enabled && len(site.TCPForwards) > 0) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTCPOnlyState(state domain.DesiredState) bool {
+	if state.PublicPorts == nil || state.NginxStreamConfig == "" || strings.Contains(state.NginxConfig, "listen 80") || strings.Contains(state.NginxConfig, "listen 443") {
+		return false
+	}
+	for _, port := range state.PublicPorts {
+		if port == 80 || port == 443 {
+			return false
+		}
+	}
+	return true
 }
 
 func validateCertificateDomains(certificatePEM []byte, domains []string, now time.Time) error {

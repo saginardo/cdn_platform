@@ -44,12 +44,13 @@ proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactiv
 log_format cdn_json escape=json '{"timestamp":"$time_iso8601","site_id":"$cdn_site_id","client_ip":"$remote_addr","method":"$request_method","path":"$uri","status":$status,"bytes":$body_bytes_sent,"duration_seconds":$request_time,"upstream":"$upstream_addr","cache_status":"$upstream_cache_status"}';
 {{end}}
 
-server {
+{{if .DefaultHTTP}}server {
     listen 80 default_server;
     server_name _;
     location = /__cdn_health { access_log off; add_header Content-Type text/plain; return 200 "ok\n"; }
     location / { return 404; }
 }
+{{end}}
 
 {{if .Sites}}
 server {
@@ -121,6 +122,7 @@ server {
         grpc_ssl_server_name on;
         grpc_ssl_name {{.PrimaryTLSName}};
         grpc_ssl_verify on;
+        grpc_ssl_verify_depth 3;
         grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         {{end}}
         {{if .BackupHostPort}}
@@ -145,6 +147,7 @@ server {
         grpc_ssl_server_name on;
         grpc_ssl_name {{.BackupTLSName}};
         grpc_ssl_verify on;
+        grpc_ssl_verify_depth 3;
         grpc_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         {{end}}
     }
@@ -204,6 +207,7 @@ server {
         proxy_ssl_server_name on;
         proxy_ssl_name {{.PrimaryTLSName}};
         proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
         {{end}}
         {{if .BackupHostPort}}
@@ -237,6 +241,7 @@ server {
 		proxy_ssl_server_name on;
 		proxy_ssl_name {{.PrimaryTLSName}};
 		proxy_ssl_verify on;
+		proxy_ssl_verify_depth 3;
 		proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
 		{{end}}
 		{{if .BackupHostPort}}
@@ -271,6 +276,7 @@ server {
         proxy_ssl_server_name on;
         proxy_ssl_name {{.BackupTLSName}};
         proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
 		{{end}}
 	}
@@ -300,6 +306,7 @@ server {
         proxy_ssl_server_name on;
         proxy_ssl_name {{.BackupTLSName}};
         proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
 		{{end}}
 	}
@@ -332,6 +339,7 @@ type renderedSite struct {
 
 type renderInput struct {
 	Sites                        []renderedSite
+	DefaultHTTP                  bool
 	CacheMaxSize                 string
 	ClientKeepaliveTimeout       string
 	ClientKeepaliveRequests      int
@@ -341,8 +349,12 @@ type renderInput struct {
 
 func Render(sites []domain.Site) (string, error) {
 	items := make([]renderedSite, 0, len(sites))
+	dedicatedTCP := false
 	for _, site := range sites {
-		if !site.Enabled {
+		if site.TCPOnly {
+			dedicatedTCP = true
+		}
+		if !site.Enabled || site.TCPOnly {
 			continue
 		}
 		clientMaxBodySizeMB, err := domain.NormalizeClientMaxBodySizeMB(site.ClientMaxBodySizeMB)
@@ -403,6 +415,7 @@ func Render(sites []domain.Site) (string, error) {
 	var out bytes.Buffer
 	if err := template.Execute(&out, renderInput{
 		Sites:                        items,
+		DefaultHTTP:                  !dedicatedTCP,
 		CacheMaxSize:                 defaultCacheMaxSize,
 		ClientKeepaliveTimeout:       defaultClientKeepaliveTimeout,
 		ClientKeepaliveRequests:      defaultClientKeepaliveRequests,

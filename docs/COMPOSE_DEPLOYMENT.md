@@ -55,6 +55,8 @@ The authenticated **Settings** view stores runtime overrides in SQLite. Cloudfla
 
 When a release changes generated Nginx paths, deploy the new controller without publishing site changes, migrate every legacy edge using its generated deployment/upgrade command, and only then run `docker compose run --rm --no-deps control publish-all`. Existing desired state is retained across the controller restart, so this order keeps legacy nodes on their last working configuration during migration.
 
+To rebuild only one site's affected nodes after a renderer fix, use `docker compose run --rm --no-deps control publish-site <site-id>`. This preserves unrelated node versions and avoids a fleet-wide Nginx reload.
+
 ## Backup
 
 The backup container uses SQLite's online backup API and a native ClickHouse `BACKUP DATABASE` operation. It does not copy either live database directory. Configure `config/backup.env`, write a non-empty `config/restic-password`, and store the Restic repository coordinates, password, and S3 credentials in a separate offline recovery record.

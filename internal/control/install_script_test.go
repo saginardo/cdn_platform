@@ -30,6 +30,7 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 		"opt/cdn-edge/.layout-version",
 		"opt/cdn-edge/bin/cdn-edge-agent",
 		"opt/cdn-edge/config/edge.env",
+		"opt/cdn-edge/config/nginx/cdn-platform-stream.conf",
 		"opt/cdn-edge/data/edge-client.key",
 		"opt/cdn-edge/data/edge-client.crt",
 		"opt/cdn-edge/data/edge-ca.crt",
@@ -39,6 +40,7 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 	}
 	harness.requireAbsent(t, "etc/nginx/sites-enabled/default")
 	harness.requireLink(t, "etc/nginx/conf.d/cdn-platform.conf", "opt/cdn-edge/config/nginx/cdn-platform.conf")
+	harness.requirePath(t, "etc/nginx/modules-enabled/99-cdn-platform-stream.conf")
 	harness.requireLink(t, "etc/systemd/system/cdn-edge-agent.service", "opt/cdn-edge/systemd/cdn-edge-agent.service")
 	harness.requireContents(t, "opt/cdn-edge/bin/cdn-edge-agent", "edge-binary-v1")
 	if configuration := harness.read(t, "opt/cdn-edge/config/nginx/cdn-platform.conf"); !strings.Contains(configuration, "location = /__cdn_health") {
@@ -50,8 +52,10 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 		"ENROLLMENT_TOKEN=first-token",
 		"EDGE_STATE_DIR=/opt/cdn-edge/data",
 		"NGINX_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform.conf",
+		"NGINX_STREAM_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-stream.conf",
 		"EDGE_CERT_DIR=/opt/cdn-edge/config/certs",
 		"EDGE_ACCESS_LOG=/opt/cdn-edge/logs/access.json",
+		"EDGE_CAPABILITIES=tcp_stream_v1",
 	} {
 		if !strings.Contains(environment, expected) {
 			t.Fatalf("edge.env does not contain %q:\n%s", expected, environment)
@@ -118,6 +122,7 @@ func TestInstallEdgeScriptUpgradesNewLayoutIdempotently(t *testing.T) {
 	}
 	harness.write("opt/cdn-edge/data/pending-state", "keep data\n")
 	harness.write("opt/cdn-edge/cache/cache-object", "keep new cache\n")
+	harness.write("opt/cdn-edge/config/nginx/cdn-platform-stream.conf", "# existing stream config\n")
 	environmentPath := filepath.Join(harness.root, "opt/cdn-edge/config/edge.env")
 	environment := strings.ReplaceAll(harness.read(t, "opt/cdn-edge/config/edge.env"), "EDGE_POLL_SECONDS=30", "EDGE_POLL_SECONDS=75")
 	if err := os.WriteFile(environmentPath, []byte(environment), 0o600); err != nil {
@@ -131,6 +136,7 @@ func TestInstallEdgeScriptUpgradesNewLayoutIdempotently(t *testing.T) {
 	harness.requireContents(t, "opt/cdn-edge/bin/cdn-edge-agent", "edge-binary-v2")
 	harness.requireContents(t, "opt/cdn-edge/data/pending-state", "keep data\n")
 	harness.requireContents(t, "opt/cdn-edge/cache/cache-object", "keep new cache\n")
+	harness.requireContents(t, "opt/cdn-edge/config/nginx/cdn-platform-stream.conf", "# existing stream config\n")
 	environment = harness.read(t, "opt/cdn-edge/config/edge.env")
 	if !strings.Contains(environment, "EDGE_POLL_SECONDS=75") || !strings.Contains(environment, "ENROLLMENT_TOKEN=\n") {
 		t.Fatalf("upgrade did not update environment safely:\n%s", environment)

@@ -112,6 +112,67 @@ func TestNodeUpgradeRejectsCrossNodeReportAndReconcilesTimeout(t *testing.T) {
 	}
 }
 
+func TestInterruptedUpgradeIsRecoveredFromInstalledAgentDigest(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sourceDigest := strings.Repeat("5", 64)
+	targetDigest := strings.Repeat("6", 64)
+
+	immediate, err := database.CreateNode("edge-immediate-recovery", "203.0.113.95")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.HeartbeatWithAgent(immediate.ID, 0, "", nil, sourceDigest, ""); err != nil {
+		t.Fatal(err)
+	}
+	immediateTask, _, err := database.CreateOrGetNodeUpgrade(immediate.ID, testUpgradeInstruction(targetDigest), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.RecordNodeUpgradeReport(immediate.ID, domain.NodeUpgradeReport{TaskID: immediateTask.ID, Status: domain.NodeUpgradeApplying}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.HeartbeatWithAgent(immediate.ID, 0, "", nil, targetDigest, immediateTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := database.RecordNodeUpgradeReport(immediate.ID, domain.NodeUpgradeReport{
+		TaskID: immediateTask.ID, Status: domain.NodeUpgradeFailed, ErrorCode: "updater_interrupted",
+		Detail: "edge updater stopped without recording a result",
+	})
+	if err != nil || recovered.Status != domain.NodeUpgradeSucceeded || recovered.ErrorCode != "" || recovered.Detail != recoveredUpgradeDetail {
+		t.Fatalf("immediate recovery = %#v, err=%v", recovered, err)
+	}
+
+	historical, err := database.CreateNode("edge-historical-recovery", "203.0.113.96")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.HeartbeatWithAgent(historical.ID, 0, "", nil, sourceDigest, ""); err != nil {
+		t.Fatal(err)
+	}
+	historicalTask, _, err := database.CreateOrGetNodeUpgrade(historical.ID, testUpgradeInstruction(targetDigest), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := database.RecordNodeUpgradeReport(historical.ID, domain.NodeUpgradeReport{
+		TaskID: historicalTask.ID, Status: domain.NodeUpgradeFailed, ErrorCode: "updater_interrupted",
+		Detail: "edge updater stopped without recording a result",
+	})
+	if err != nil || failed.Status != domain.NodeUpgradeFailed {
+		t.Fatalf("historical failure = %#v, err=%v", failed, err)
+	}
+	if err := database.HeartbeatWithAgent(historical.ID, 0, "", nil, targetDigest, ""); err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := database.NodeUpgradeTask(historicalTask.ID)
+	if err != nil || reconciled.Status != domain.NodeUpgradeSucceeded || reconciled.ErrorCode != "" || reconciled.Detail != recoveredUpgradeDetail {
+		t.Fatalf("historical reconciliation = %#v, err=%v", reconciled, err)
+	}
+}
+
 func testUpgradeInstruction(targetDigest string) domain.NodeUpgradeInstruction {
 	return domain.NodeUpgradeInstruction{
 		Binary:         domain.UpgradeArtifact{URL: "https://control.example.test/edge", SHA256: targetDigest},

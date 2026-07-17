@@ -14,6 +14,8 @@ import (
 const nodeUpgradeTaskColumns = `id, node_id, status, source_sha256, target_sha256, error_code, detail,
 	deadline_at, started_at, completed_at, created_at, updated_at`
 
+const recoveredUpgradeDetail = "edge heartbeat confirmed the target artifact after the updater result was missed"
+
 func (s *Store) CreateOrGetNodeUpgrade(nodeID string, instruction domain.NodeUpgradeInstruction, deadline time.Time) (domain.NodeUpgradeTask, bool, error) {
 	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(instruction.Binary.SHA256) == "" || !deadline.After(now()) {
 		return domain.NodeUpgradeTask{}, false, errors.New("invalid node upgrade request")
@@ -181,9 +183,21 @@ func (s *Store) RecordNodeUpgradeReport(nodeID string, report domain.NodeUpgrade
 		if task.Status == domain.NodeUpgradeSucceeded {
 			return task, tx.Commit()
 		}
-		_, err = tx.Exec(`UPDATE node_upgrade_tasks SET status = ?, error_code = ?, detail = ?,
-			started_at = COALESCE(started_at, ?), completed_at = ?, updated_at = ? WHERE id = ?`,
-			domain.NodeUpgradeFailed, report.ErrorCode, report.Detail, stamp(updated), stamp(updated), stamp(updated), task.ID)
+		var installedSHA256 string
+		if report.ErrorCode == "updater_interrupted" {
+			if err := tx.QueryRow(`SELECT agent_sha256 FROM nodes WHERE id = ?`, nodeID).Scan(&installedSHA256); err != nil {
+				return domain.NodeUpgradeTask{}, err
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(installedSHA256), task.TargetSHA256) {
+			_, err = tx.Exec(`UPDATE node_upgrade_tasks SET status = ?, error_code = '', detail = ?,
+				started_at = COALESCE(started_at, ?), completed_at = ?, updated_at = ? WHERE id = ?`,
+				domain.NodeUpgradeSucceeded, recoveredUpgradeDetail, stamp(updated), stamp(updated), stamp(updated), task.ID)
+		} else {
+			_, err = tx.Exec(`UPDATE node_upgrade_tasks SET status = ?, error_code = ?, detail = ?,
+				started_at = COALESCE(started_at, ?), completed_at = ?, updated_at = ? WHERE id = ?`,
+				domain.NodeUpgradeFailed, report.ErrorCode, report.Detail, stamp(updated), stamp(updated), stamp(updated), task.ID)
+		}
 	default:
 		return domain.NodeUpgradeTask{}, errors.New("invalid node upgrade report status")
 	}
@@ -198,12 +212,31 @@ func (s *Store) RecordNodeUpgradeReport(nodeID string, report domain.NodeUpgrade
 
 func (s *Store) ReconcileNodeUpgrades() error {
 	completed := now()
-	_, err := s.db.Exec(`UPDATE node_upgrade_tasks SET status = ?, error_code = 'upgrade_timeout',
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE node_upgrade_tasks SET status = ?, error_code = 'upgrade_timeout',
 		detail = 'edge did not complete the online upgrade before the deadline', completed_at = ?, updated_at = ?
 		WHERE status IN (?, ?) AND deadline_at <= ?`,
 		domain.NodeUpgradeFailed, stamp(completed), stamp(completed),
-		domain.NodeUpgradeQueued, domain.NodeUpgradeApplying, stamp(completed))
-	return err
+		domain.NodeUpgradeQueued, domain.NodeUpgradeApplying, stamp(completed)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE node_upgrade_tasks SET status = ?, error_code = '', detail = ?,
+		completed_at = ?, updated_at = ?
+		WHERE status = ? AND error_code = 'updater_interrupted'
+		AND NOT EXISTS (SELECT 1 FROM node_upgrade_tasks AS newer
+			WHERE newer.node_id = node_upgrade_tasks.node_id AND newer.created_at > node_upgrade_tasks.created_at)
+		AND EXISTS (SELECT 1 FROM nodes
+			WHERE nodes.id = node_upgrade_tasks.node_id
+			AND lower(nodes.agent_sha256) = lower(node_upgrade_tasks.target_sha256)
+			AND nodes.active_upgrade_task_id = '')`,
+		domain.NodeUpgradeSucceeded, recoveredUpgradeDetail, stamp(completed), stamp(completed), domain.NodeUpgradeFailed); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) HasActiveNodeUpgrade(nodeID string) (bool, error) {

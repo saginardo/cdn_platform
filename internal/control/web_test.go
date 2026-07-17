@@ -75,6 +75,23 @@ func TestEmbeddedConsoleSupportsSingleNodeOnlineUpgrade(t *testing.T) {
 			t.Fatalf("app.js does not contain %q", expected)
 		}
 	}
+	stateStart := strings.Index(script, "function nodeUpgradeStateText(status)")
+	if stateStart < 0 {
+		t.Fatal("online upgrade state renderer is missing")
+	}
+	stateEnd := strings.Index(script[stateStart:], "function setUpgradeError")
+	if stateEnd < 0 {
+		t.Fatal("online upgrade error renderer is missing")
+	}
+	stateRenderer := script[stateStart : stateStart+stateEnd]
+	upToDate := strings.Index(stateRenderer, "if (status.upgrade_up_to_date)")
+	failed := strings.Index(stateRenderer, "if (task?.status === 'failed')")
+	if upToDate < 0 || failed < 0 || upToDate > failed {
+		t.Fatal("actual installed digest does not override a stale failed task in the upgrade dialog")
+	}
+	if !strings.Contains(script, "status.upgrade_task?.status === 'failed' && !status.upgrade_up_to_date") {
+		t.Fatal("stale failed task still renders an error for an up-to-date node")
+	}
 	stylesContents, err := embeddedWeb.ReadFile("web/styles.css")
 	if err != nil {
 		t.Fatal(err)

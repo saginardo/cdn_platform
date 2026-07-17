@@ -35,6 +35,119 @@ func (f upgradeRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return f(request)
 }
 
+func TestUpgradeUnitStillRunningStates(t *testing.T) {
+	for _, state := range []string{"active", "activating", "reloading", "refreshing", "deactivating"} {
+		running, err := upgradeUnitStillRunning(state)
+		if err != nil || !running {
+			t.Errorf("state %q: running=%v err=%v", state, running, err)
+		}
+	}
+	for _, state := range []string{"inactive", "failed"} {
+		running, err := upgradeUnitStillRunning(state)
+		if err != nil || running {
+			t.Errorf("state %q: running=%v err=%v", state, running, err)
+		}
+	}
+	if _, err := upgradeUnitStillRunning("maintenance"); err == nil {
+		t.Fatal("unknown updater state was treated as terminal")
+	}
+}
+
+func TestAgentWaitsForUpdaterResultAfterFirstTerminalObservation(t *testing.T) {
+	stateDir := t.TempDir()
+	taskID := uuid.NewString()
+	directory := stateDir + "/upgrades/" + taskID
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir+"/active-upgrade-task", []byte(taskID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(directory+"/launched", []byte("launched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reports []domain.NodeUpgradeReport
+	client := &http.Client{Transport: upgradeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodPost && request.URL.Path == "/api/edge/v1/upgrade-report" {
+			var report domain.NodeUpgradeReport
+			if err := json.NewDecoder(request.Body).Decode(&report); err != nil {
+				return nil, err
+			}
+			reports = append(reports, report)
+			return upgradeHTTPResponse(http.StatusOK, []byte(`{}`)), nil
+		}
+		return upgradeHTTPResponse(http.StatusNotFound, nil), nil
+	})}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: stateDir, CertificateDir: stateDir + "/certs",
+		AgentSHA256: strings.Repeat("2", 64), HTTPClient: client, UpgradeRunner: &fakeUpgradeRunner{}, Runner: &fakeRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.ProcessUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 0 || agent.activeUpgradeID() != taskID {
+		t.Fatalf("first terminal observation: reports=%#v active=%q", reports, agent.activeUpgradeID())
+	}
+	if _, err := os.Stat(directory + "/updater-terminal"); err != nil {
+		t.Fatalf("terminal observation marker: %v", err)
+	}
+	success := domain.NodeUpgradeReport{
+		TaskID: taskID, Status: domain.NodeUpgradeSucceeded, Detail: "complete", InstalledSHA256: strings.Repeat("2", 64),
+	}
+	if err := writeLocalUpgradeReport(directory, success); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.ProcessUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 || reports[0].Status != domain.NodeUpgradeSucceeded || agent.activeUpgradeID() != "" {
+		t.Fatalf("delayed updater result: reports=%#v active=%q", reports, agent.activeUpgradeID())
+	}
+}
+
+func TestAgentReportsInterruptionAfterTwoTerminalObservations(t *testing.T) {
+	stateDir := t.TempDir()
+	taskID := uuid.NewString()
+	directory := stateDir + "/upgrades/" + taskID
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateDir+"/active-upgrade-task", []byte(taskID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(directory+"/launched", []byte("launched\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reports []domain.NodeUpgradeReport
+	client := &http.Client{Transport: upgradeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var report domain.NodeUpgradeReport
+		if err := json.NewDecoder(request.Body).Decode(&report); err != nil {
+			return nil, err
+		}
+		reports = append(reports, report)
+		return upgradeHTTPResponse(http.StatusOK, []byte(`{}`)), nil
+	})}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: stateDir, CertificateDir: stateDir + "/certs",
+		AgentSHA256: strings.Repeat("2", 64), HTTPClient: client, UpgradeRunner: &fakeUpgradeRunner{}, Runner: &fakeRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.ProcessUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.ProcessUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 || reports[0].Status != domain.NodeUpgradeFailed || reports[0].ErrorCode != "updater_interrupted" {
+		t.Fatalf("interruption reports = %#v", reports)
+	}
+}
+
 func TestAgentStagesOnlineUpgradeAndReportsResultAfterRestart(t *testing.T) {
 	stateDir := t.TempDir()
 	taskID := uuid.NewString()

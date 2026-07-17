@@ -39,15 +39,22 @@ func (SystemdUpgradeRunner) Start(taskID string) error {
 }
 
 func (SystemdUpgradeRunner) Active(taskID string) (bool, error) {
-	err := exec.Command("systemctl", "is-active", "--quiet", upgradeUnitName(taskID)).Run()
-	if err == nil {
+	output, err := exec.Command("systemctl", "show", "--property=ActiveState", "--value", upgradeUnitName(taskID)).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("inspect edge updater state: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return upgradeUnitStillRunning(string(output))
+}
+
+func upgradeUnitStillRunning(value string) (bool, error) {
+	switch strings.TrimSpace(value) {
+	case "active", "activating", "reloading", "refreshing", "deactivating":
 		return true, nil
-	}
-	var exitError *exec.ExitError
-	if errors.As(err, &exitError) {
+	case "inactive", "failed":
 		return false, nil
+	default:
+		return false, fmt.Errorf("unrecognized edge updater state %q", strings.TrimSpace(value))
 	}
-	return false, err
 }
 
 func upgradeUnitName(taskID string) string {
@@ -264,7 +271,8 @@ func (a *Agent) downloadUpgradeArtifact(ctx context.Context, artifact domain.Upg
 func (a *Agent) resumeUpgrade(ctx context.Context, taskID string) error {
 	directory := a.upgradeDirectory(taskID)
 	resultPath := filepath.Join(directory, "result.json")
-	if contents, err := os.ReadFile(resultPath); err == nil {
+	contents, resultErr := os.ReadFile(resultPath)
+	if resultErr == nil {
 		var report domain.NodeUpgradeReport
 		if err := json.Unmarshal(contents, &report); err != nil {
 			return fmt.Errorf("decode local upgrade result: %w", err)
@@ -273,6 +281,9 @@ func (a *Agent) resumeUpgrade(ctx context.Context, taskID string) error {
 			return err
 		}
 		return a.clearLocalUpgrade(directory, report)
+	}
+	if !errors.Is(resultErr, os.ErrNotExist) {
+		return resultErr
 	}
 	if _, err := os.Stat(filepath.Join(directory, "launched")); errors.Is(err, os.ErrNotExist) {
 		report := domain.NodeUpgradeReport{TaskID: taskID, Status: domain.NodeUpgradeFailed, ErrorCode: "updater_interrupted", Detail: "edge upgrade was interrupted before the updater started"}
@@ -288,7 +299,16 @@ func (a *Agent) resumeUpgrade(ctx context.Context, taskID string) error {
 		return err
 	}
 	if active {
+		if err := os.Remove(filepath.Join(directory, "updater-terminal")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 		return nil
+	}
+	terminalPath := filepath.Join(directory, "updater-terminal")
+	if _, err := os.Stat(terminalPath); errors.Is(err, os.ErrNotExist) {
+		return atomicWriteFile(terminalPath, []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"), 0o600)
+	} else if err != nil {
+		return err
 	}
 	report := domain.NodeUpgradeReport{TaskID: taskID, Status: domain.NodeUpgradeFailed, ErrorCode: "updater_interrupted", Detail: "edge updater stopped without recording a result"}
 	if err := writeLocalUpgradeReport(directory, report); err != nil {

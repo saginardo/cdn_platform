@@ -873,6 +873,9 @@ func (s *Store) HeartbeatWithAgent(nodeID string, appliedVersion int64, lastErro
 	if changed != 1 {
 		return ErrNotFound
 	}
+	if err := s.ReconcileNodeUpgrades(); err != nil {
+		return err
+	}
 	return s.ReconcilePublishTasks()
 }
 

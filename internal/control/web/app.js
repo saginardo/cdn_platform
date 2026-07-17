@@ -901,8 +901,8 @@ function nodeUpgradeStateText(status) {
   if (task?.status === 'queued') return '等待边缘代理领取升级任务。';
   if (task?.status === 'applying') return task.detail || '边缘节点正在校验制品并执行升级。';
   if (task?.status === 'succeeded') return task.detail || '边缘节点已升级并完成心跳确认。';
-  if (task?.status === 'failed') return '在线升级未完成，节点已保留或恢复升级前状态。';
   if (status.upgrade_up_to_date) return '节点已运行主控当前边缘制品。';
+  if (task?.status === 'failed') return '在线升级未完成，节点已保留或恢复升级前状态。';
   if (status.can_upgrade) return '节点可同步到主控当前边缘制品。';
   return status.upgrade_blocker || '当前无法执行在线升级。';
 }
@@ -922,7 +922,7 @@ function renderNodeUpgrade(status) {
   byId('node-upgrade-current').textContent = status.agent_sha256 || '尚未上报';
   byId('node-upgrade-target').textContent = status.target_agent_sha256 || '主控未配置';
   byId('node-upgrade-state').textContent = nodeUpgradeStateText(status);
-  setUpgradeError(status.upgrade_task?.status === 'failed' ? (status.upgrade_task.detail || status.upgrade_blocker || '升级失败') : '');
+  setUpgradeError(status.upgrade_task?.status === 'failed' && !status.upgrade_up_to_date ? (status.upgrade_task.detail || status.upgrade_blocker || '升级失败') : '');
   if (status.can_upgrade) {
     byId('start-node-upgrade').textContent = status.upgrade_task?.status === 'failed' ? '重试升级' : '开始升级';
     show('start-node-upgrade');

@@ -198,8 +198,8 @@ func (s *Server) edgeUpgradeReport(response http.ResponseWriter, request *http.R
 		writeStoreError(response, err)
 		return
 	}
-	if report.Status == domain.NodeUpgradeApplying || report.Status == domain.NodeUpgradeSucceeded || report.Status == domain.NodeUpgradeFailed {
-		s.audit(request, "edge:"+nodeID, "upgrade_"+string(report.Status), "node", nodeID, task.Detail)
+	if task.Status == domain.NodeUpgradeApplying || task.Status == domain.NodeUpgradeSucceeded || task.Status == domain.NodeUpgradeFailed {
+		s.audit(request, "edge:"+nodeID, "upgrade_"+string(task.Status), "node", nodeID, task.Detail)
 	}
 	writeJSON(response, http.StatusOK, task)
 }

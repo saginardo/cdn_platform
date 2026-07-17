@@ -4,12 +4,17 @@ import (
 	"errors"
 	"regexp"
 	"regexp/syntax"
+	"sort"
 	"strings"
 	"time"
 )
 
 const (
-	EdgeCapabilitySecurity = "edge_security_v1"
+	EdgeCapabilitySecurity  = "edge_security_v1"
+	EdgeCapabilityRateLimit = "edge_rate_limit_v1"
+	RateLimitKeyClientIP    = "client_ip"
+	MinRateLimitRPS         = 1
+	MaxRateLimitRPS         = 100000
 
 	DefaultSecurityPolicyID      = "00000000-0000-4000-8000-000000000001"
 	DefaultSecurityPolicyPattern = `(?i)^/+(?:[^/]+/)*(?:\.env(?:[._~-][A-Za-z0-9][A-Za-z0-9._~-]*)?|\.git(?:config|-credentials)?(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.(?:aws|azure|docker|svn|hg|ssh|kube|gnupg|terraform)|\.ht(?:access|passwd)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.DS_Store|\.(?:npmrc|pypirc|netrc)|\.(?:bash|zsh|mysql|psql|rediscli|python)_history|id_(?:rsa|dsa|ecdsa|ed25519)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|terraform\.tfstate(?:\.backup)?|wp-config\.php(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?)(?:/|$)`
@@ -38,6 +43,18 @@ type SecurityPolicy struct {
 	Priority           int                  `json:"priority"`
 	CreatedAt          time.Time            `json:"created_at"`
 	UpdatedAt          time.Time            `json:"updated_at"`
+}
+
+type RateLimitPolicy struct {
+	ID                       string    `json:"id"`
+	Name                     string    `json:"name"`
+	Enabled                  bool      `json:"enabled"`
+	Key                      string    `json:"key"`
+	RequestsPerSecond        int       `json:"requests_per_second"`
+	ResponseConditionEnabled bool      `json:"response_condition_enabled"`
+	ResponseStatusClasses    []int     `json:"response_status_classes,omitempty"`
+	CreatedAt                time.Time `json:"created_at"`
+	UpdatedAt                time.Time `json:"updated_at"`
 }
 
 type SecurityEvent struct {
@@ -139,6 +156,37 @@ func NormalizeSecurityPolicy(policy SecurityPolicy) (SecurityPolicy, error) {
 	default:
 		return SecurityPolicy{}, errors.New("security policy action is not supported")
 	}
+	return policy, nil
+}
+
+func NormalizeRateLimitPolicy(policy RateLimitPolicy) (RateLimitPolicy, error) {
+	policy.Name = strings.TrimSpace(policy.Name)
+	policy.Key = RateLimitKeyClientIP
+	if policy.Name == "" || len(policy.Name) > 80 {
+		return RateLimitPolicy{}, errors.New("rate limit policy name must be 1-80 characters")
+	}
+	if policy.RequestsPerSecond < MinRateLimitRPS || policy.RequestsPerSecond > MaxRateLimitRPS {
+		return RateLimitPolicy{}, errors.New("rate limit requests per second is out of range")
+	}
+	if !policy.ResponseConditionEnabled {
+		policy.ResponseStatusClasses = nil
+		return policy, nil
+	}
+	if len(policy.ResponseStatusClasses) == 0 {
+		return RateLimitPolicy{}, errors.New("rate limit response condition requires at least one status class")
+	}
+	classes := append([]int(nil), policy.ResponseStatusClasses...)
+	sort.Ints(classes)
+	normalized := classes[:0]
+	for _, class := range classes {
+		if class < 2 || class > 5 {
+			return RateLimitPolicy{}, errors.New("rate limit response status class must be between 2xx and 5xx")
+		}
+		if len(normalized) == 0 || normalized[len(normalized)-1] != class {
+			normalized = append(normalized, class)
+		}
+	}
+	policy.ResponseStatusClasses = normalized
 	return policy, nil
 }
 

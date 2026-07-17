@@ -61,11 +61,14 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 		"EDGE_CERT_DIR=/opt/cdn-edge/config/certs",
 		"EDGE_ACCESS_LOG=/opt/cdn-edge/logs/access.json",
 		"EDGE_SECURITY_LOG=/opt/cdn-edge/logs/security.json",
-		"EDGE_CAPABILITIES=tcp_stream_v1",
+		"EDGE_CAPABILITIES=tcp_stream_v1,edge_rate_limit_v1",
 	} {
 		if !strings.Contains(environment, expected) {
 			t.Fatalf("edge.env does not contain %q:\n%s", expected, environment)
 		}
+	}
+	if !strings.Contains(bootstrapEdgeScript, "libnginx-mod-http-lua") {
+		t.Fatal("edge installer does not install the Nginx Lua rate limit module")
 	}
 }
 

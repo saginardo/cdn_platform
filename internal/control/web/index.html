@@ -577,7 +577,8 @@
                 <div class="security-heading-actions">
                   <button id="refresh-security" class="secondary" type="button">刷新</button>
                   <button id="deploy-security" class="secondary" type="button">部署策略</button>
-                  <button id="add-security-policy" type="button">新增策略</button>
+                  <button id="add-rate-limit-policy" class="secondary" type="button">新增限速策略</button>
+                  <button id="add-security-policy" type="button">新增访问策略</button>
                 </div>
               </div>
 
@@ -599,6 +600,11 @@
                 <section class="security-section" aria-labelledby="security-policy-heading">
                   <div class="section-heading"><div><h2 id="security-policy-heading">通用访问策略</h2><p class="section-meta">按优先级匹配规范化请求路径</p></div></div>
                   <div class="table-wrap"><table class="security-table"><thead><tr><th>策略</th><th>匹配表达式</th><th>动作</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead><tbody id="security-policy-table"></tbody></table></div>
+                </section>
+
+                <section class="security-section" aria-labelledby="rate-limit-policy-heading">
+                  <div class="section-heading"><div><h2 id="rate-limit-policy-heading">通用速率限制</h2><p class="section-meta">边缘节点按客户端 IP 执行每秒请求限制</p></div></div>
+                  <div class="table-wrap"><table class="security-table"><thead><tr><th>策略</th><th>计数 Key</th><th>阈值</th><th>响应计数条件</th><th>状态</th><th>操作</th></tr></thead><tbody id="rate-limit-policy-table"></tbody></table></div>
                 </section>
 
                 <section class="security-section" aria-labelledby="security-ban-heading">
@@ -633,6 +639,34 @@
                   </div>
                   <p id="security-policy-error" class="dialog-error hidden" role="alert"></p>
                   <div class="dialog-actions"><button id="save-security-policy" type="submit">保存并部署</button></div>
+                </form>
+              </dialog>
+
+              <dialog id="rate-limit-policy-dialog" aria-labelledby="rate-limit-policy-dialog-title">
+                <form id="rate-limit-policy-form">
+                  <div class="dialog-header">
+                    <div><h2 id="rate-limit-policy-dialog-title">新增限速策略</h2><p class="section-meta">边缘本地一秒窗口</p></div>
+                    <button id="close-rate-limit-policy" type="button" class="secondary" aria-label="关闭">关闭</button>
+                  </div>
+                  <input id="rate-limit-policy-id" type="hidden">
+                  <div class="form-grid security-policy-fields">
+                    <label>名称 <input id="rate-limit-policy-name" required maxlength="80" autocomplete="off"></label>
+                    <label>每秒请求上限 <input id="rate-limit-policy-rps" required type="number" min="1" max="100000" step="1" value="20" inputmode="numeric"></label>
+                    <label>计数 Key <input value="客户端 IP" readonly aria-readonly="true"></label>
+                    <label class="checkbox-label"><input id="rate-limit-policy-enabled" type="checkbox" checked> 启用策略</label>
+                    <label class="checkbox-label security-pattern-field"><input id="rate-limit-response-condition-enabled" type="checkbox"> 仅统计满足响应条件的请求</label>
+                    <fieldset id="rate-limit-response-classes" class="rate-limit-response-classes security-pattern-field hidden">
+                      <legend>计入响应类别</legend>
+                      <div class="rate-limit-status-options">
+                        <label class="checkbox-label"><input type="checkbox" name="rate-limit-status-class" value="2"> 2xx</label>
+                        <label class="checkbox-label"><input type="checkbox" name="rate-limit-status-class" value="3"> 3xx</label>
+                        <label class="checkbox-label"><input type="checkbox" name="rate-limit-status-class" value="4" checked> 4xx</label>
+                        <label class="checkbox-label"><input type="checkbox" name="rate-limit-status-class" value="5" checked> 5xx</label>
+                      </div>
+                    </fieldset>
+                  </div>
+                  <p id="rate-limit-policy-error" class="dialog-error hidden" role="alert"></p>
+                  <div class="dialog-actions"><button id="save-rate-limit-policy" type="submit">保存并部署</button></div>
                 </form>
               </dialog>
             </section>

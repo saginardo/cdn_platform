@@ -13,23 +13,26 @@ import (
 )
 
 type securityCoverageNode struct {
-	ID             string            `json:"id"`
-	Name           string            `json:"name"`
-	Status         domain.NodeStatus `json:"status"`
-	Capable        bool              `json:"capable"`
-	Configured     bool              `json:"configured"`
-	DesiredVersion int64             `json:"desired_version"`
-	AppliedVersion int64             `json:"applied_version"`
-	LastError      string            `json:"last_error,omitempty"`
+	ID                  string            `json:"id"`
+	Name                string            `json:"name"`
+	Status              domain.NodeStatus `json:"status"`
+	Capable             bool              `json:"capable"`
+	Configured          bool              `json:"configured"`
+	RateLimitCapable    bool              `json:"rate_limit_capable"`
+	RateLimitConfigured bool              `json:"rate_limit_configured"`
+	DesiredVersion      int64             `json:"desired_version"`
+	AppliedVersion      int64             `json:"applied_version"`
+	LastError           string            `json:"last_error,omitempty"`
 }
 
 type securityOverviewResponse struct {
-	Policies        []domain.SecurityPolicy `json:"policies"`
-	Bans            []domain.SecurityBan    `json:"bans"`
-	ActiveBanCount  int                     `json:"active_ban_count"`
-	Events          []domain.SecurityEvent  `json:"events"`
-	Nodes           []securityCoverageNode  `json:"nodes"`
-	DeploymentError string                  `json:"deployment_error,omitempty"`
+	Policies          []domain.SecurityPolicy  `json:"policies"`
+	RateLimitPolicies []domain.RateLimitPolicy `json:"rate_limit_policies"`
+	Bans              []domain.SecurityBan     `json:"bans"`
+	ActiveBanCount    int                      `json:"active_ban_count"`
+	Events            []domain.SecurityEvent   `json:"events"`
+	Nodes             []securityCoverageNode   `json:"nodes"`
+	DeploymentError   string                   `json:"deployment_error,omitempty"`
 }
 
 type securityPolicyRequest struct {
@@ -41,8 +44,20 @@ type securityPolicyRequest struct {
 	Priority           int                         `json:"priority"`
 }
 
+type rateLimitPolicyRequest struct {
+	Name                     string `json:"name"`
+	Enabled                  bool   `json:"enabled"`
+	RequestsPerSecond        int    `json:"requests_per_second"`
+	ResponseConditionEnabled bool   `json:"response_condition_enabled"`
+	ResponseStatusClasses    []int  `json:"response_status_classes"`
+}
+
 func (s *Server) securityOverview(deploymentErr error) (securityOverviewResponse, error) {
 	policies, err := s.Store.ListSecurityPolicies()
+	if err != nil {
+		return securityOverviewResponse{}, err
+	}
+	rateLimitPolicies, err := s.Store.ListRateLimitPolicies()
 	if err != nil {
 		return securityOverviewResponse{}, err
 	}
@@ -68,20 +83,26 @@ func (s *Server) securityOverview(deploymentErr error) (securityOverviewResponse
 		if err != nil {
 			return securityOverviewResponse{}, err
 		}
-		configured := false
+		configured, rateLimitConfigured := false, false
 		if nodeState, _, stateErr := s.Store.NodeState(node.ID); stateErr == nil {
 			configured = nginx.HasSecurityRevision(nodeState.NginxConfig, policies)
+			rateLimitConfigured = nginx.HasRateLimitRevision(nodeState.NginxConfig, rateLimitPolicies)
 		} else if !errors.Is(stateErr, store.ErrNotFound) {
 			return securityOverviewResponse{}, stateErr
 		}
 		coverage = append(coverage, securityCoverageNode{
 			ID: node.ID, Name: node.Name, Status: node.Status,
-			Capable:        slices.Contains(node.Capabilities, domain.EdgeCapabilitySecurity),
-			Configured:     configured,
-			DesiredVersion: desiredVersion, AppliedVersion: node.AppliedVersion, LastError: node.LastError,
+			Capable:             slices.Contains(node.Capabilities, domain.EdgeCapabilitySecurity),
+			Configured:          configured,
+			RateLimitCapable:    slices.Contains(node.Capabilities, domain.EdgeCapabilityRateLimit),
+			RateLimitConfigured: rateLimitConfigured,
+			DesiredVersion:      desiredVersion, AppliedVersion: node.AppliedVersion, LastError: node.LastError,
 		})
 	}
-	result := securityOverviewResponse{Policies: policies, Bans: bans, ActiveBanCount: activeBanCount, Events: events, Nodes: coverage}
+	result := securityOverviewResponse{
+		Policies: policies, RateLimitPolicies: rateLimitPolicies, Bans: bans,
+		ActiveBanCount: activeBanCount, Events: events, Nodes: coverage,
+	}
 	if deploymentErr != nil {
 		result.DeploymentError = deploymentErr.Error()
 	}
@@ -101,6 +122,14 @@ func securityPolicyFromRequest(input securityPolicyRequest) domain.SecurityPolic
 	return domain.SecurityPolicy{
 		Name: input.Name, Enabled: input.Enabled, Pattern: input.Pattern, Action: input.Action,
 		BanDurationSeconds: input.BanDurationSeconds, Priority: input.Priority,
+	}
+}
+
+func rateLimitPolicyFromRequest(input rateLimitPolicyRequest) domain.RateLimitPolicy {
+	return domain.RateLimitPolicy{
+		Name: input.Name, Enabled: input.Enabled, RequestsPerSecond: input.RequestsPerSecond,
+		ResponseConditionEnabled: input.ResponseConditionEnabled,
+		ResponseStatusClasses:    input.ResponseStatusClasses,
 	}
 }
 
@@ -160,6 +189,66 @@ func (s *Server) deleteSecurityPolicy(response http.ResponseWriter, request *htt
 	}
 	deploymentErr := s.Publisher.PublishAll()
 	s.audit(request, adminID(request.Context()), "delete", "security_policy", id, "")
+	result, err := s.securityOverview(deploymentErr)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) createRateLimitPolicy(response http.ResponseWriter, request *http.Request) {
+	var input rateLimitPolicyRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	policy, err := s.Store.CreateRateLimitPolicy(rateLimitPolicyFromRequest(input))
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	deploymentErr := s.Publisher.PublishAll()
+	s.audit(request, adminID(request.Context()), "create", "rate_limit_policy", policy.ID, policy.Name)
+	result, err := s.securityOverview(deploymentErr)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusCreated, result)
+}
+
+func (s *Server) updateRateLimitPolicy(response http.ResponseWriter, request *http.Request) {
+	var input rateLimitPolicyRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	policy, err := s.Store.UpdateRateLimitPolicy(request.PathValue("id"), rateLimitPolicyFromRequest(input))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeStoreError(response, err)
+		} else {
+			writeError(response, http.StatusBadRequest, err)
+		}
+		return
+	}
+	deploymentErr := s.Publisher.PublishAll()
+	s.audit(request, adminID(request.Context()), "update", "rate_limit_policy", policy.ID, policy.Name)
+	result, err := s.securityOverview(deploymentErr)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, result)
+}
+
+func (s *Server) deleteRateLimitPolicy(response http.ResponseWriter, request *http.Request) {
+	id := request.PathValue("id")
+	if err := s.Store.DeleteRateLimitPolicy(id); err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	deploymentErr := s.Publisher.PublishAll()
+	s.audit(request, adminID(request.Context()), "delete", "rate_limit_policy", id, "")
 	result, err := s.securityOverview(deploymentErr)
 	if err != nil {
 		writeError(response, http.StatusInternalServerError, err)

@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestDefaultSecurityPolicyPatterns(t *testing.T) {
 	tests := []struct {
@@ -108,5 +111,39 @@ func TestNormalizeSecurityPolicy(t *testing.T) {
 	}
 	if _, err := NormalizeSecurityPolicy(SecurityPolicy{Name: "safe", Pattern: `(?i)^/+wp-admin(?:/.*|$)`, Action: SecurityActionBlock, Priority: 1}); err != nil {
 		t.Fatalf("safe custom pattern was rejected: %v", err)
+	}
+}
+
+func TestNormalizeRateLimitPolicy(t *testing.T) {
+	policy, err := NormalizeRateLimitPolicy(RateLimitPolicy{
+		Name: " API failures ", Enabled: true, RequestsPerSecond: 25,
+		ResponseConditionEnabled: true, ResponseStatusClasses: []int{5, 4, 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.Name != "API failures" || policy.Key != RateLimitKeyClientIP ||
+		!slices.Equal(policy.ResponseStatusClasses, []int{4, 5}) {
+		t.Fatalf("normalized rate limit policy = %#v", policy)
+	}
+
+	policy, err = NormalizeRateLimitPolicy(RateLimitPolicy{
+		Name: "all requests", RequestsPerSecond: 1, ResponseStatusClasses: []int{4, 5},
+	})
+	if err != nil || policy.ResponseStatusClasses != nil {
+		t.Fatalf("unconditional rate limit policy = %#v, err=%v", policy, err)
+	}
+
+	invalid := []RateLimitPolicy{
+		{Name: "", RequestsPerSecond: 1},
+		{Name: "too low", RequestsPerSecond: 0},
+		{Name: "too high", RequestsPerSecond: MaxRateLimitRPS + 1},
+		{Name: "missing class", RequestsPerSecond: 1, ResponseConditionEnabled: true},
+		{Name: "bad class", RequestsPerSecond: 1, ResponseConditionEnabled: true, ResponseStatusClasses: []int{1}},
+	}
+	for _, candidate := range invalid {
+		if _, err := NormalizeRateLimitPolicy(candidate); err == nil {
+			t.Fatalf("invalid rate limit policy was accepted: %#v", candidate)
+		}
 	}
 }

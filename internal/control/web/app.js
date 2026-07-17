@@ -262,6 +262,16 @@ function securityDurationLabel(seconds) {
   return ({ 3600: '1 小时', 21600: '6 小时', 43200: '12 小时', 86400: '24 小时' })[Number(seconds)] || '--';
 }
 
+function rateLimitKeyLabel(key) {
+  return key === 'client_ip' ? '客户端 IP' : key || '--';
+}
+
+function rateLimitResponseConditionLabel(policy) {
+  if (!policy.response_condition_enabled) return '全部请求';
+  const classes = (policy.response_status_classes || []).map((item) => `${Number(item)}xx`);
+  return classes.length ? `${classes.join('、')} 响应` : '响应条件无效';
+}
+
 function securityNodeName(nodeID) {
   return securityData?.nodes?.find((node) => node.id === nodeID)?.name || nodeID || '--';
 }
@@ -275,27 +285,35 @@ function securityRequestCell(item) {
 function renderSecurity() {
   if (!securityData) return;
   const policies = securityData.policies || [];
+  const rateLimitPolicies = securityData.rate_limit_policies || [];
   const bans = securityData.bans || [];
   const activeBanCount = Number(securityData.active_ban_count ?? bans.length);
   const events = securityData.events || [];
   const eligibleNodes = (securityData.nodes || []).filter((node) => ['active', 'draining'].includes(node.status));
-  const capableNodes = eligibleNodes.filter((node) => node.capable);
-  const appliedNodes = capableNodes.filter((node) => node.configured && node.desired_version > 0 && node.applied_version >= node.desired_version);
-  byId('security-policy-count').textContent = numberFormatter.format(policies.filter((policy) => policy.enabled).length);
+  const requiresAccessSecurity = policies.some((policy) => policy.enabled);
+  const requiresRateLimit = rateLimitPolicies.some((policy) => policy.enabled);
+  const capableNodes = eligibleNodes.filter((node) => (!requiresAccessSecurity || node.capable) && (!requiresRateLimit || node.rate_limit_capable));
+  const appliedNodes = capableNodes.filter((node) => (!requiresAccessSecurity || node.configured)
+    && (!requiresRateLimit || node.rate_limit_configured) && node.desired_version > 0 && node.applied_version >= node.desired_version);
+  const enabledPolicyCount = policies.filter((policy) => policy.enabled).length + rateLimitPolicies.filter((policy) => policy.enabled).length;
+  byId('security-policy-count').textContent = numberFormatter.format(enabledPolicyCount);
   byId('security-ban-count').textContent = numberFormatter.format(activeBanCount);
   byId('security-node-coverage').textContent = `${capableNodes.length} / ${eligibleNodes.length}`;
   byId('security-node-applied').textContent = `${appliedNodes.length} / ${capableNodes.length}`;
-  byId('security-meta').textContent = `${policies.length} 条策略 · ${numberFormatter.format(activeBanCount)} 个活动封禁${activeBanCount > bans.length ? ` · 显示前 ${numberFormatter.format(bans.length)} 条` : ''}`;
+  byId('security-meta').textContent = `${policies.length} 条访问策略 · ${rateLimitPolicies.length} 条限速策略 · ${numberFormatter.format(activeBanCount)} 个活动封禁${activeBanCount > bans.length ? ` · 显示前 ${numberFormatter.format(bans.length)} 条` : ''}`;
   byId('security-deployment-error').textContent = securityData.deployment_error || '';
   byId('security-deployment-error').classList.toggle('hidden', !securityData.deployment_error);
 
   byId('security-node-table').innerHTML = (securityData.nodes || []).length ? securityData.nodes.map((node) => {
+    const fullyCapable = (!requiresAccessSecurity || node.capable) && (!requiresRateLimit || node.rate_limit_capable);
+    const fullyConfigured = (!requiresAccessSecurity || node.configured) && (!requiresRateLimit || node.rate_limit_configured);
     let result = '<span class="status pending">需升级</span>';
-    if (node.capable && node.last_error) result = `<span class="status failed" title="${escapeHTML(node.last_error)}">节点错误</span>`;
-    else if (node.capable && !node.configured) result = '<span class="status pending">待部署</span>';
-    else if (node.capable && node.desired_version > 0 && node.applied_version >= node.desired_version) result = '<span class="status succeeded">已应用</span>';
-    else if (node.capable) result = '<span class="status applying">等待应用</span>';
-    return `<tr><td>${escapeHTML(node.name)}</td><td>${escapeHTML(nodeStatusLabel(node.status))}</td><td>${node.capable ? '已就绪' : '不支持'}</td><td>${numberFormatter.format(node.desired_version)}</td><td>${numberFormatter.format(node.applied_version)}</td><td>${result}</td></tr>`;
+    if (fullyCapable && node.last_error) result = `<span class="status failed" title="${escapeHTML(node.last_error)}">节点错误</span>`;
+    else if (fullyCapable && !fullyConfigured) result = '<span class="status pending">待部署</span>';
+    else if (fullyCapable && node.desired_version > 0 && node.applied_version >= node.desired_version) result = '<span class="status succeeded">已应用</span>';
+    else if (fullyCapable) result = '<span class="status applying">等待应用</span>';
+    const capabilities = `<span class="security-capability"><span>访问：${node.capable ? '已就绪' : '不支持'}</span><span>限速：${node.rate_limit_capable ? '已就绪' : '不支持'}</span></span>`;
+    return `<tr><td>${escapeHTML(node.name)}</td><td>${escapeHTML(nodeStatusLabel(node.status))}</td><td>${capabilities}</td><td>${numberFormatter.format(node.desired_version)}</td><td>${numberFormatter.format(node.applied_version)}</td><td>${result}</td></tr>`;
   }).join('') : '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
 
   byId('security-policy-table').innerHTML = policies.length ? policies.map((policy) => `<tr>
@@ -306,6 +324,15 @@ function renderSecurity() {
     <td><span class="status ${policy.enabled ? 'succeeded' : 'pending'}">${policy.enabled ? '已启用' : '已停用'}</span></td>
     <td class="actions"><button class="small secondary edit-security-policy" data-id="${escapeHTML(policy.id)}">编辑</button>${policy.builtin ? '' : `<button class="small danger delete-security-policy" data-id="${escapeHTML(policy.id)}">删除</button>`}</td>
   </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无访问策略</td></tr>';
+
+  byId('rate-limit-policy-table').innerHTML = rateLimitPolicies.length ? rateLimitPolicies.map((policy) => `<tr>
+    <td><strong>${escapeHTML(policy.name)}</strong></td>
+    <td>${escapeHTML(rateLimitKeyLabel(policy.key))}</td>
+    <td><strong>${numberFormatter.format(Number(policy.requests_per_second || 0))}</strong> 请求/秒</td>
+    <td><span class="rate-limit-condition">${escapeHTML(rateLimitResponseConditionLabel(policy))}</span></td>
+    <td><span class="status ${policy.enabled ? 'succeeded' : 'pending'}">${policy.enabled ? '已启用' : '已停用'}</span></td>
+    <td class="actions"><button class="small secondary edit-rate-limit-policy" data-id="${escapeHTML(policy.id)}">编辑</button><button class="small danger delete-rate-limit-policy" data-id="${escapeHTML(policy.id)}">删除</button></td>
+  </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无限速策略</td></tr>';
 
   byId('security-ban-table').innerHTML = bans.length ? bans.map((ban) => `<tr>
     <td><code>${escapeHTML(ban.ip)}</code></td><td>${escapeHTML(ban.policy_name || '--')}</td><td>${escapeHTML(securityNodeName(ban.trigger_node_id))}</td>
@@ -400,6 +427,53 @@ function securityPolicyPayload() {
     action,
     ban_duration_seconds: action === 'ban' ? Number(byId('security-policy-duration').value) : 0,
     priority: Number(byId('security-policy-priority').value),
+  };
+}
+
+function syncRateLimitResponseCondition() {
+  const enabled = byId('rate-limit-response-condition-enabled').checked;
+  byId('rate-limit-response-classes').classList.toggle('hidden', !enabled);
+  document.querySelectorAll('input[name="rate-limit-status-class"]').forEach((input) => { input.disabled = !enabled; });
+}
+
+function setRateLimitPolicyError(message = '') {
+  byId('rate-limit-policy-error').textContent = message;
+  byId('rate-limit-policy-error').classList.toggle('hidden', !message);
+}
+
+function openRateLimitPolicy(policy = null) {
+  byId('rate-limit-policy-form').reset();
+  byId('rate-limit-policy-id').value = policy?.id || '';
+  byId('rate-limit-policy-dialog-title').textContent = policy ? '编辑限速策略' : '新增限速策略';
+  byId('rate-limit-policy-name').value = policy?.name || '';
+  byId('rate-limit-policy-rps').value = String(policy?.requests_per_second || 20);
+  byId('rate-limit-policy-enabled').checked = policy ? Boolean(policy.enabled) : true;
+  byId('rate-limit-response-condition-enabled').checked = Boolean(policy?.response_condition_enabled);
+  const selectedClasses = new Set((policy?.response_status_classes || [4, 5]).map(Number));
+  document.querySelectorAll('input[name="rate-limit-status-class"]').forEach((input) => {
+    input.checked = selectedClasses.has(Number(input.value));
+  });
+  setRateLimitPolicyError();
+  syncRateLimitResponseCondition();
+  byId('rate-limit-policy-dialog').showModal();
+  byId('rate-limit-policy-name').focus();
+}
+
+function closeRateLimitPolicy() {
+  if (byId('rate-limit-policy-dialog').open) byId('rate-limit-policy-dialog').close();
+}
+
+function rateLimitPolicyPayload() {
+  const responseConditionEnabled = byId('rate-limit-response-condition-enabled').checked;
+  const responseStatusClasses = responseConditionEnabled
+    ? [...document.querySelectorAll('input[name="rate-limit-status-class"]:checked')].map((input) => Number(input.value))
+    : [];
+  return {
+    name: byId('rate-limit-policy-name').value,
+    enabled: byId('rate-limit-policy-enabled').checked,
+    requests_per_second: Number(byId('rate-limit-policy-rps').value),
+    response_condition_enabled: responseConditionEnabled,
+    response_status_classes: responseStatusClasses,
   };
 }
 
@@ -500,7 +574,7 @@ function renderNodeDetailOperations(node) {
 }
 
 function nodeCapabilityLabel(capability) {
-  const labels = { tcp_stream_v1: 'TCP 转发', online_upgrade_v1: '在线升级', edge_security_v1: '访问安全', cache_usage_v1: '缓存用量上报' };
+  const labels = { tcp_stream_v1: 'TCP 转发', online_upgrade_v1: '在线升级', edge_security_v1: '访问安全', edge_rate_limit_v1: '请求限速', cache_usage_v1: '缓存用量上报' };
   return labels[capability] || capability;
 }
 
@@ -2315,6 +2389,9 @@ byId('deploy-security').addEventListener('click', async () => {
 byId('add-security-policy').addEventListener('click', () => openSecurityPolicy());
 byId('close-security-policy').addEventListener('click', closeSecurityPolicy);
 byId('security-policy-action').addEventListener('change', syncSecurityPolicyDuration);
+byId('add-rate-limit-policy').addEventListener('click', () => openRateLimitPolicy());
+byId('close-rate-limit-policy').addEventListener('click', closeRateLimitPolicy);
+byId('rate-limit-response-condition-enabled').addEventListener('change', syncRateLimitResponseCondition);
 byId('security-policy-form').addEventListener('submit', async (event) => {
   event.preventDefault();
   if (securityActionPending || !event.currentTarget.reportValidity()) return;
@@ -2350,6 +2427,52 @@ byId('security-policy-table').addEventListener('click', async (event) => {
     securityData = await request(`/api/security/policies/${encodeURIComponent(policy.id)}`, { method: 'DELETE' });
     renderSecurity();
     notice('安全策略已删除', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    securityActionPending = false;
+  }
+});
+byId('rate-limit-policy-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (securityActionPending || !event.currentTarget.reportValidity()) return;
+  const payload = rateLimitPolicyPayload();
+  if (payload.response_condition_enabled && !payload.response_status_classes.length) {
+    setRateLimitPolicyError('启用响应计数条件后，至少选择一个响应类别。');
+    return;
+  }
+  securityActionPending = true;
+  securityDataGeneration += 1;
+  byId('save-rate-limit-policy').disabled = true;
+  setRateLimitPolicyError();
+  const id = byId('rate-limit-policy-id').value;
+  try {
+    securityData = await request(id ? `/api/security/rate-limit-policies/${encodeURIComponent(id)}` : '/api/security/rate-limit-policies', {
+      method: id ? 'PUT' : 'POST', body: JSON.stringify(payload),
+    });
+    renderSecurity();
+    closeRateLimitPolicy();
+    notice('限速策略已保存并进入边缘部署', true);
+  } catch (error) {
+    setRateLimitPolicyError(error.message);
+  } finally {
+    securityActionPending = false;
+    byId('save-rate-limit-policy').disabled = false;
+  }
+});
+byId('rate-limit-policy-table').addEventListener('click', async (event) => {
+  const button = event.target.closest('button');
+  if (!button?.dataset.id || securityActionPending) return;
+  const policy = securityData?.rate_limit_policies?.find((item) => item.id === button.dataset.id);
+  if (!policy) return;
+  if (button.classList.contains('edit-rate-limit-policy')) return openRateLimitPolicy(policy);
+  if (!button.classList.contains('delete-rate-limit-policy') || !window.confirm(`确定删除限速策略「${policy.name}」并重新部署吗？`)) return;
+  securityActionPending = true;
+  securityDataGeneration += 1;
+  try {
+    securityData = await request(`/api/security/rate-limit-policies/${encodeURIComponent(policy.id)}`, { method: 'DELETE' });
+    renderSecurity();
+    notice('限速策略已删除', true);
   } catch (error) {
     notice(error.message);
   } finally {

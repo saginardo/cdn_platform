@@ -230,6 +230,10 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 	if err != nil {
 		return nil, nil, err
 	}
+	rateLimitPolicies, err := p.Store.ListRateLimitPolicies()
+	if err != nil {
+		return nil, nil, err
+	}
 	updates := make([]store.NodeStateUpdate, 0, len(affected))
 	targets := make([]store.PublishTaskNode, 0, len(affected))
 	for _, node := range nodes {
@@ -264,7 +268,11 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 		if slices.Contains(node.Capabilities, domain.EdgeCapabilitySecurity) {
 			nodeSecurityPolicies = securityPolicies
 		}
-		config, err := nginx.RenderWithSecurity(nodeSites, nodeSecurityPolicies)
+		var nodeRateLimitPolicies []domain.RateLimitPolicy
+		if slices.Contains(node.Capabilities, domain.EdgeCapabilityRateLimit) {
+			nodeRateLimitPolicies = rateLimitPolicies
+		}
+		config, err := nginx.RenderWithSecurityAndRateLimit(nodeSites, nodeSecurityPolicies, nodeRateLimitPolicies)
 		if err != nil {
 			return nil, nil, err
 		}

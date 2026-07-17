@@ -749,6 +749,8 @@ func TestEmbeddedConsoleIncludesSecurityWorkspace(t *testing.T) {
 	page := string(pageContents)
 	for _, expected := range []string{
 		`data-view="security"`, `id="security"`, `id="security-policy-table"`,
+		`id="rate-limit-policy-table"`, `id="add-rate-limit-policy"`, `id="rate-limit-response-condition-enabled"`,
+		`name="rate-limit-status-class"`, `id="rate-limit-policy-dialog"`,
 		`id="security-node-table"`, `id="security-ban-table"`, `id="security-event-table"`, `id="security-policy-dialog"`,
 	} {
 		if !strings.Contains(page, expected) {
@@ -762,7 +764,8 @@ func TestEmbeddedConsoleIncludesSecurityWorkspace(t *testing.T) {
 	script := string(scriptContents)
 	for _, expected := range []string{
 		"function renderSecurity()", "function refreshSecurity()", "function openSecurityPolicy(policy = null)",
-		"/api/security/deploy", "/api/security/policies", "/api/security/bans/",
+		"function openRateLimitPolicy(policy = null)", "function rateLimitPolicyPayload()",
+		"/api/security/deploy", "/api/security/policies", "/api/security/rate-limit-policies", "/api/security/bans/",
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)
@@ -776,7 +779,7 @@ func TestEmbeddedConsoleIncludesSecurityWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{".security-summary", ".security-pattern", ".security-request"} {
+	for _, expected := range []string{".security-summary", ".security-pattern", ".security-request", ".rate-limit-response-classes"} {
 		if !strings.Contains(string(styleContents), expected) {
 			t.Fatalf("styles.css does not contain %q", expected)
 		}

@@ -427,6 +427,12 @@ td code { font-size: .77rem; overflow-wrap: anywhere; }
 .security-policy-fields { margin: 0; }
 .security-pattern-field { grid-column: 1 / -1; }
 .security-pattern-field textarea { width: 100%; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .8rem; line-height: 1.45; }
+.security-capability { display: grid; gap: .18rem; min-width: 8rem; }
+.security-capability span { color: var(--text-muted); font-size: .75rem; }
+.rate-limit-condition { display: inline-block; max-width: 18rem; line-height: 1.4; }
+.rate-limit-response-classes { margin: 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 6px; }
+.rate-limit-response-classes legend { padding: 0 .3rem; color: var(--text-muted); font-size: .78rem; font-weight: 650; }
+.rate-limit-status-options { display: flex; flex-wrap: wrap; gap: .5rem 1rem; }
 
 dialog {
   width: min(680px, calc(100% - 2rem));

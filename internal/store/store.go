@@ -302,6 +302,16 @@ CREATE TABLE IF NOT EXISTS node_uninstall_jobs (
 	  created_at TEXT NOT NULL,
 	  updated_at TEXT NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS rate_limit_policies (
+	  id TEXT PRIMARY KEY,
+	  name TEXT NOT NULL UNIQUE,
+	  enabled INTEGER NOT NULL DEFAULT 1,
+	  requests_per_second INTEGER NOT NULL,
+	  response_condition_enabled INTEGER NOT NULL DEFAULT 0,
+	  response_status_classes_json TEXT NOT NULL DEFAULT '[]',
+	  created_at TEXT NOT NULL,
+	  updated_at TEXT NOT NULL
+	);
 	CREATE TABLE IF NOT EXISTS security_bans (
 	  ip TEXT PRIMARY KEY,
 	  policy_id TEXT REFERENCES security_policies(id) ON DELETE SET NULL,

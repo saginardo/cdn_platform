@@ -1,6 +1,6 @@
-# Edge access security policies
+# Edge security policies
 
-The **Security** workspace manages global HTTP access policies and active edge bans. Policies are ordered by ascending priority and match Nginx's normalized `$uri` value before a request is redirected or proxied. The supported expression language is the RE2-compatible subset of PCRE plus non-capturing groups. Additional validation rejects Nginx variable interpolation, high-backtracking repeated groups, and overly complex expressions before a policy can reach an edge.
+The **Security** workspace manages global HTTP access policies, client-IP rate policies, and active edge bans. Access policies are ordered by ascending priority and match Nginx's normalized `$uri` value before a request is redirected or proxied. The supported expression language is the RE2-compatible subset of PCRE plus non-capturing groups. Additional validation rejects Nginx variable interpolation, high-backtracking repeated groups, and overly complex expressions before a policy can reach an edge.
 
 Two built-in policies are enabled by default. **Sensitive file scanning** detects segment-bounded probes for environment files, repository metadata, cloud and developer credentials, shell history, private keys, Terraform state, and `wp-config.php`; it uses the **IP ban** action for six hours. **PHP malicious file probing** blocks high-risk diagnostic and web-shell file names such as `phpinfo`, `shell`, `webshell`, `cmd`, `c99`, `r57`, and `wso`, while deliberately excluding normal entry points such as `index.php`, `api.php`, `admin.php`, and `config.php`. The PHP policy defaults to request-only blocking. Built-in policies can be edited or disabled but not deleted. Additional policies can either reject only the matching request or reject it and ban the source IPv4 for 1, 6, 12, or 24 hours.
 
@@ -22,6 +22,14 @@ security-log-offset
 
 An edge restart reconstructs the firewall from unexpired local state and the controller. If the control plane is unavailable, a newly detected ban still applies locally and its event remains queued.
 
+## Rate-limit flow
+
+Rate policies use `client_ip` as their first-version counting key. Each policy has an independent counter namespace, while the client value comes from Nginx `$remote_addr`. Counters live in a bounded 20 MiB Nginx Lua shared dictionary, so every Nginx worker on one edge observes the same state. The implementation combines the current and previous one-second buckets into an approximate sliding one-second rate. Exceeding the configured requests-per-second threshold returns HTTP 429 with `Retry-After: 1` and `Cache-Control: no-store` before origin proxying.
+
+Without a response condition, an attempted request is counted in the access phase. When the response condition is enabled, one or more of 2xx, 3xx, 4xx, and 5xx can be selected; the access phase checks the existing rate, and only a completed response whose final HTTP status belongs to a selected class increments the counter in the response-header phase. This deliberately means concurrently in-flight requests are not counted before their responses exist. Rate state is local to each edge node rather than coordinated across the fleet, avoiding a control-plane or network dependency in the request path.
+
+The installer adds Debian's `libnginx-mod-http-lua` package. Only nodes advertising `edge_rate_limit_v1` receive rate-limit configuration. A policy save rebuilds desired states for capable nodes through the same `nginx -t`, atomic apply, listener verification, and rollback path used by site and access-policy changes.
+
 ## Firewall ownership
 
 The installer adds Debian's `nftables` package but does not replace `/etc/nftables.conf` or enable an operator firewall policy. The Agent owns only this runtime object:
@@ -36,7 +44,7 @@ Only public IPv4 addresses are accepted as ban targets. Private, loopback, link-
 
 ## Rollout
 
-Existing agents do not receive security configuration until they have been upgraded to a release that advertises `edge_security_v1`. Upgrade one node at a time, verify the capability count in **Security**, then select **Deploy policies**. Nodes without the capability retain their previous Nginx configuration.
+Existing agents do not receive malicious-path configuration until they advertise `edge_security_v1`, and they do not receive rate-limit configuration until they advertise `edge_rate_limit_v1`. Upgrade one node at a time, verify both capability columns in **Security**, then select **Deploy policies**. Nodes without a required capability retain compatible Nginx configuration without the unsupported policy type.
 
 Use these checks on an upgraded edge:
 
@@ -44,6 +52,7 @@ Use these checks on an upgraded edge:
 sudo systemctl is-active cdn-edge-agent nginx
 sudo nft list table inet cdn_platform
 sudo nginx -T 2>/dev/null | grep -F cdn_security_policy_id
+sudo nginx -T 2>/dev/null | grep -F cdn_rate_limit
 sudo tail -n 20 /opt/cdn-edge/logs/security.json
 sudo journalctl -u cdn-edge-agent --since '-10 minutes' --no-pager
 ```
@@ -52,10 +61,10 @@ Keep public site DNS records in DNS-only/direct mode. The ban source is Nginx `$
 
 ## Current limits
 
-- Policies are global rather than scoped to individual sites.
-- At most 100 policies can exist at once. The edge queue retains the latest 10,000 events and both the edge and controller cap active ban state at 50,000 addresses.
+- Policies are global rather than scoped to individual sites. Rate counters are per policy, client IP, and edge node; they are not a fleet-wide aggregate.
+- At most 100 access policies and 50 rate policies can exist at once. The edge queue retains the latest 10,000 access-policy events and both the edge and controller cap active ban state at 50,000 addresses.
 - Matching covers normalized request paths, not query strings, headers, request bodies, or TCP forwarding traffic.
 - Ban enforcement is IPv4-only and scoped to HTTP/HTTPS ports.
-- The first matching policy wins. Saving a policy rebuilds capable node desired states and therefore causes a normal verified Nginx reload.
-- This is malicious-path blocking, not a request-rate limiter or application authentication layer.
+- The first matching path policy wins; every enabled rate policy is evaluated independently. Saving either policy type rebuilds capable node desired states and therefore causes a normal verified Nginx reload.
+- Rate conditions use final HTTP status classes, not response bodies, gRPC trailer status, or application-specific error fields. Security policies do not replace application authentication or a dedicated upstream DDoS service.
 - The controller retains at most 100,000 recent events and 50,000 simultaneous global bans; oldest entries are evicted first when these safety limits are reached. The console shows the 500 bans with the latest expiry while reporting the full active count.

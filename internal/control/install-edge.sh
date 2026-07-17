@@ -155,7 +155,7 @@ if systemctl is-active --quiet nginx.service 2>/dev/null; then old_nginx_active=
 if [[ -z "$ROOT_PREFIX" ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends nginx libnginx-mod-stream ca-certificates curl iproute2 nftables
+  apt-get install -y --no-install-recommends nginx libnginx-mod-stream libnginx-mod-http-lua ca-certificates curl iproute2 nftables
 fi
 
 transaction_dir=$(mktemp -d "$(root_path /tmp/cdn-edge-install.XXXXXX)")
@@ -306,7 +306,7 @@ NGINX_STREAM_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-stream.conf
 EDGE_CERT_DIR=/opt/cdn-edge/config/certs
 EDGE_ACCESS_LOG=/opt/cdn-edge/logs/access.json
 EDGE_SECURITY_LOG=/opt/cdn-edge/logs/security.json
-EDGE_CAPABILITIES=tcp_stream_v1
+EDGE_CAPABILITIES=tcp_stream_v1,edge_rate_limit_v1
 EOF
 chmod 0600 "$edge_root/config/edge.env"
 

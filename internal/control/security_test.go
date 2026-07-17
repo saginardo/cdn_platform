@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -37,12 +38,24 @@ func TestSecurityPoliciesRenderOnlyForCapableNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetNodeCapabilities(capable.ID, []string{domain.EdgeCapabilitySecurity}); err != nil {
+	accessOnly, err := database.CreateNode("security-access-only", "203.0.113.80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeCapabilities(capable.ID, []string{domain.EdgeCapabilitySecurity, domain.EdgeCapabilityRateLimit}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeCapabilities(accessOnly.ID, []string{domain.EdgeCapabilitySecurity}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.CreateRateLimitPolicy(domain.RateLimitPolicy{
+		Name: "all requests", Enabled: true, RequestsPerSecond: 20,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	site, err := database.CreateSite(domain.Site{
 		Name: "disabled-security-site", Domains: []string{"disabled.example.test"},
-		Nodes: []string{capable.ID, legacy.ID}, PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		Nodes: []string{capable.ID, accessOnly.ID, legacy.ID}, PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true},
 		Enabled: false,
 	}, "zone")
 	if err != nil {
@@ -63,7 +76,17 @@ func TestSecurityPoliciesRenderOnlyForCapableNodes(t *testing.T) {
 	if !strings.Contains(capableState.NginxConfig, "cdn_security_policy_id") || !strings.Contains(capableState.NginxConfig, "return 444") {
 		t.Fatalf("capable node lacks security configuration:\n%s", capableState.NginxConfig)
 	}
-	if strings.Contains(legacyState.NginxConfig, "cdn_security_policy_id") {
+	if !strings.Contains(capableState.NginxConfig, "lua_shared_dict cdn_rate_limit") {
+		t.Fatalf("capable node lacks rate limit configuration:\n%s", capableState.NginxConfig)
+	}
+	accessOnlyState, _, err := database.NodeState(accessOnly.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(accessOnlyState.NginxConfig, "cdn_security_policy_id") || strings.Contains(accessOnlyState.NginxConfig, "cdn_rate_limit") {
+		t.Fatalf("access-only node received the wrong security configuration:\n%s", accessOnlyState.NginxConfig)
+	}
+	if strings.Contains(legacyState.NginxConfig, "cdn_security_policy_id") || strings.Contains(legacyState.NginxConfig, "cdn_rate_limit") {
 		t.Fatalf("legacy node received unsupported security configuration:\n%s", legacyState.NginxConfig)
 	}
 	overview, err := (&Server{Store: database}).securityOverview(nil)
@@ -71,10 +94,13 @@ func TestSecurityPoliciesRenderOnlyForCapableNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, node := range overview.Nodes {
-		if node.ID == capable.ID && !node.Configured {
+		if node.ID == capable.ID && (!node.Configured || !node.RateLimitConfigured || !node.RateLimitCapable) {
 			t.Fatalf("capable node was not marked configured: %#v", node)
 		}
-		if node.ID == legacy.ID && node.Configured {
+		if node.ID == accessOnly.ID && (!node.Configured || node.RateLimitConfigured || node.RateLimitCapable) {
+			t.Fatalf("access-only node coverage is incorrect: %#v", node)
+		}
+		if node.ID == legacy.ID && (node.Configured || node.RateLimitConfigured) {
 			t.Fatalf("legacy node was marked configured: %#v", node)
 		}
 	}
@@ -133,5 +159,70 @@ func TestSecurityOverviewReportsCoverage(t *testing.T) {
 	}
 	if len(overview.Policies) != 2 || len(overview.Nodes) != 1 || !overview.Nodes[0].Capable || overview.Nodes[0].Configured {
 		t.Fatalf("security overview = %#v", overview)
+	}
+}
+
+func TestRateLimitPolicyAPI(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	server := &Server{Store: database, Publisher: Publisher{Store: database}}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/security/rate-limit-policies", strings.NewReader(`{
+		"name":"API errors","enabled":true,"requests_per_second":8,
+		"response_condition_enabled":true,"response_status_classes":[5,4]
+	}`))
+	response := httptest.NewRecorder()
+	server.createRateLimitPolicy(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var overview securityOverviewResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &overview); err != nil {
+		t.Fatal(err)
+	}
+	if len(overview.RateLimitPolicies) != 1 || overview.RateLimitPolicies[0].Key != domain.RateLimitKeyClientIP ||
+		overview.RateLimitPolicies[0].ResponseStatusClasses[0] != 4 {
+		t.Fatalf("create response = %#v", overview.RateLimitPolicies)
+	}
+	policyID := overview.RateLimitPolicies[0].ID
+
+	request = httptest.NewRequest(http.MethodPut, "/api/security/rate-limit-policies/"+policyID, strings.NewReader(`{
+		"name":"All traffic","enabled":true,"requests_per_second":30,
+		"response_condition_enabled":false,"response_status_classes":[4,5]
+	}`))
+	request.SetPathValue("id", policyID)
+	response = httptest.NewRecorder()
+	server.updateRateLimitPolicy(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("update status = %d, body=%s", response.Code, response.Body.String())
+	}
+	updated, err := database.RateLimitPolicy(policyID)
+	if err != nil || updated.RequestsPerSecond != 30 || updated.ResponseStatusClasses != nil {
+		t.Fatalf("updated policy = %#v, err=%v", updated, err)
+	}
+
+	request = httptest.NewRequest(http.MethodPut, "/api/security/rate-limit-policies/"+policyID, strings.NewReader(`{
+		"name":"Invalid","enabled":true,"requests_per_second":30,
+		"response_condition_enabled":true,"response_status_classes":[]
+	}`))
+	request.SetPathValue("id", policyID)
+	response = httptest.NewRecorder()
+	server.updateRateLimitPolicy(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid update status = %d, body=%s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodDelete, "/api/security/rate-limit-policies/"+policyID, nil)
+	request.SetPathValue("id", policyID)
+	response = httptest.NewRecorder()
+	server.deleteRateLimitPolicy(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("delete status = %d, body=%s", response.Code, response.Body.String())
+	}
+	if _, err := database.RateLimitPolicy(policyID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deleted policy lookup = %v", err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"cdn-platform/internal/domain"
 	"cdn-platform/internal/integrations"
 	"cdn-platform/internal/store"
 )
@@ -28,13 +29,18 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 		CloudflareAPIToken: "env-token",
 		SMTP:               SMTPProfile{Enabled: true, Host: "env.smtp.example.test", Port: 587, Username: "env-user", FromAddress: "cdn@example.test", Recipients: []string{"ops@example.test"}, Security: integrations.SMTPSecurityStartTLS},
 		SMTPPassword:       "env-password",
+		Backup: domain.BackupSettings{
+			Repository: "s3:https://env.r2.example.test/env-backup", AccessKeyID: "env-access", Region: "auto", BackupTime: "03:25", RandomDelaySeconds: 1200,
+		},
+		BackupAccessKey: "env-backup-secret",
+		BackupPassword:  "env-restic-password",
 	}
 	manager, err := NewSettingsManager(database, cipher, environment)
 	if err != nil {
 		t.Fatal(err)
 	}
 	view := manager.View()
-	if view.Cloudflare.Source != SettingsSourceEnvironment || view.SMTP.Source != SettingsSourceEnvironment || view.DNS.DefaultTTLSeconds != 60 {
+	if view.Cloudflare.Source != SettingsSourceEnvironment || view.SMTP.Source != SettingsSourceEnvironment || view.Backup.Source != SettingsSourceEnvironment || view.DNS.DefaultTTLSeconds != 60 {
 		t.Fatalf("unexpected environment view: %#v", view)
 	}
 	if token, _ := manager.CloudflareToken(); token != "env-token" {
@@ -65,12 +71,31 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 	if err := manager.SaveDNSDefaultTTL(180); err != nil {
 		t.Fatal(err)
 	}
+	backupSecret := "database-backup-secret"
+	backupPassword := "database-restic-password"
+	backup := domain.BackupSettings{Repository: "s3:https://db.r2.example.test/db-backup", AccessKeyID: "db-access", Region: "auto", BackupTime: "04:15", RandomDelaySeconds: 300}
+	if err := manager.SaveBackup(backup, &backupSecret, &backupPassword); err != nil {
+		t.Fatal(err)
+	}
+	backup.BackupTime = "04:30"
+	if err := manager.SaveBackup(backup, nil, nil); err != nil {
+		t.Fatalf("update backup while preserving secrets: %v", err)
+	}
+	for name, plaintext := range map[string]string{store.SecretBackupAccessKey: backupSecret, store.SecretBackupPassword: backupPassword} {
+		ciphertext, err := database.Secret(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(ciphertext, []byte(plaintext)) {
+			t.Fatalf("backup secret %s stored as plaintext", name)
+		}
+	}
 	reloaded, err := NewSettingsManager(database, cipher, environment)
 	if err != nil {
 		t.Fatal(err)
 	}
 	view = reloaded.View()
-	if view.Cloudflare.Source != SettingsSourceDatabase || view.SMTP.Source != SettingsSourceDatabase || view.SMTP.PasswordConfigured != true || view.DNS.DefaultTTLSeconds != 180 {
+	if view.Cloudflare.Source != SettingsSourceDatabase || view.SMTP.Source != SettingsSourceDatabase || view.SMTP.PasswordConfigured != true || view.Backup.Source != SettingsSourceDatabase || !view.Backup.Configured || view.DNS.DefaultTTLSeconds != 180 {
 		t.Fatalf("unexpected reloaded view: %#v", view)
 	}
 	if token, _ := reloaded.CloudflareToken(); token != "database-token" {
@@ -80,10 +105,17 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 	if loadedProfile.Host != profile.Host || loadedPassword != password {
 		t.Fatalf("SMTP override = %#v, %q", loadedProfile, loadedPassword)
 	}
+	loadedBackup := reloaded.BackupRuntime()
+	if loadedBackup.Settings != backup || loadedBackup.SecretAccessKey != backupSecret || loadedBackup.ResticPassword != backupPassword {
+		t.Fatalf("backup override = %#v", loadedBackup)
+	}
 	if err := reloaded.ClearCloudflareToken(); err != nil {
 		t.Fatal(err)
 	}
 	if err := reloaded.ClearSMTP(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reloaded.ClearBackup(); err != nil {
 		t.Fatal(err)
 	}
 	if token, _ := reloaded.CloudflareToken(); token != "env-token" {
@@ -92,6 +124,10 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 	loadedProfile, loadedPassword = reloaded.SMTPProfile()
 	if loadedProfile.Host != environment.SMTP.Host || loadedPassword != environment.SMTPPassword {
 		t.Fatalf("cleared SMTP did not fall back to env: %#v, %q", loadedProfile, loadedPassword)
+	}
+	loadedBackup = reloaded.BackupRuntime()
+	if loadedBackup.Settings != environment.Backup || loadedBackup.SecretAccessKey != environment.BackupAccessKey || loadedBackup.ResticPassword != environment.BackupPassword {
+		t.Fatalf("cleared backup did not fall back to env: %#v", loadedBackup)
 	}
 	if _, err := database.Secret(store.SecretCloudflareAPIToken); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("Cloudflare override remains: %v", err)

@@ -16,6 +16,8 @@ import (
 const (
 	SecretCloudflareAPIToken = "cloudflare_api_token"
 	SecretSMTPPassword       = "smtp_password"
+	SecretBackupAccessKey    = "backup_s3_secret_access_key"
+	SecretBackupPassword     = "backup_restic_password"
 )
 
 type SMTPSettings struct {
@@ -32,15 +34,34 @@ type SMTPSettings struct {
 type ControlSettings struct {
 	DNSDefaultTTLSeconds int
 	SMTP                 SMTPSettings
+	BackupOverride       bool
+	Backup               domain.BackupSettings
 	UpdatedAt            *time.Time
 }
 
+type BackupSettingsSnapshot struct {
+	Override            bool
+	Settings            domain.BackupSettings
+	AccessKeyCiphertext []byte
+	PasswordCiphertext  []byte
+}
+
 func (s *Store) ControlSettings() (ControlSettings, error) {
-	settings := ControlSettings{DNSDefaultTTLSeconds: domain.DefaultDNSTTLSeconds}
-	var smtpOverride, smtpEnabled int
+	settings := ControlSettings{
+		DNSDefaultTTLSeconds: domain.DefaultDNSTTLSeconds,
+		Backup: domain.BackupSettings{
+			Region:             domain.DefaultBackupRegion,
+			BackupTime:         domain.DefaultBackupTime,
+			RandomDelaySeconds: domain.DefaultBackupRandomDelaySeconds,
+		},
+	}
+	var smtpOverride, smtpEnabled, backupOverride int
 	var recipients, updatedAt string
-	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security, updated_at FROM control_settings WHERE id = 1`).
-		Scan(&settings.DNSDefaultTTLSeconds, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &settings.SMTP.Security, &updatedAt)
+	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security,
+		backup_override, backup_repository, backup_access_key_id, backup_region, backup_time, backup_random_delay_seconds, updated_at
+		FROM control_settings WHERE id = 1`).
+		Scan(&settings.DNSDefaultTTLSeconds, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &settings.SMTP.Security,
+			&backupOverride, &settings.Backup.Repository, &settings.Backup.AccessKeyID, &settings.Backup.Region, &settings.Backup.BackupTime, &settings.Backup.RandomDelaySeconds, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return settings, nil
 	}
@@ -55,12 +76,95 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 	}
 	settings.SMTP.Override = smtpOverride != 0
 	settings.SMTP.Enabled = smtpEnabled != 0
+	settings.BackupOverride = backupOverride != 0
+	settings.Backup = domain.NormalizeBackupSettings(settings.Backup)
 	parsed, err := parseTime(updatedAt)
 	if err != nil {
 		return ControlSettings{}, err
 	}
 	settings.UpdatedAt = &parsed
 	return settings, nil
+}
+
+// BackupSettingsSnapshot reads settings and both secrets in one SQLite
+// statement so a concurrent web update cannot produce mixed credentials.
+func (s *Store) BackupSettingsSnapshot() (BackupSettingsSnapshot, error) {
+	snapshot := BackupSettingsSnapshot{Settings: domain.BackupSettings{
+		Region:             domain.DefaultBackupRegion,
+		BackupTime:         domain.DefaultBackupTime,
+		RandomDelaySeconds: domain.DefaultBackupRandomDelaySeconds,
+	}}
+	var override int
+	err := s.db.QueryRow(`SELECT settings.backup_override, settings.backup_repository, settings.backup_access_key_id,
+		settings.backup_region, settings.backup_time, settings.backup_random_delay_seconds,
+		COALESCE(access_key.ciphertext, X''), COALESCE(repository_password.ciphertext, X'')
+		FROM control_settings AS settings
+		LEFT JOIN secrets AS access_key ON access_key.name = ?
+		LEFT JOIN secrets AS repository_password ON repository_password.name = ?
+		WHERE settings.id = 1`, SecretBackupAccessKey, SecretBackupPassword).
+		Scan(&override, &snapshot.Settings.Repository, &snapshot.Settings.AccessKeyID,
+			&snapshot.Settings.Region, &snapshot.Settings.BackupTime, &snapshot.Settings.RandomDelaySeconds,
+			&snapshot.AccessKeyCiphertext, &snapshot.PasswordCiphertext)
+	if errors.Is(err, sql.ErrNoRows) {
+		return snapshot, nil
+	}
+	if err != nil {
+		return BackupSettingsSnapshot{}, err
+	}
+	snapshot.Override = override != 0
+	snapshot.Settings = domain.NormalizeBackupSettings(snapshot.Settings)
+	return snapshot, nil
+}
+
+func (s *Store) SaveBackupSettings(settings domain.BackupSettings, accessKeyCiphertext []byte, replaceAccessKey bool, passwordCiphertext []byte, replacePassword bool) error {
+	settings = domain.NormalizeBackupSettings(settings)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO control_settings(id, backup_override, backup_repository, backup_access_key_id, backup_region, backup_time, backup_random_delay_seconds, updated_at)
+		VALUES (1, 1, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET backup_override=1, backup_repository=excluded.backup_repository,
+		backup_access_key_id=excluded.backup_access_key_id, backup_region=excluded.backup_region,
+		backup_time=excluded.backup_time, backup_random_delay_seconds=excluded.backup_random_delay_seconds,
+		updated_at=excluded.updated_at`, settings.Repository, settings.AccessKeyID, settings.Region,
+		settings.BackupTime, settings.RandomDelaySeconds, stamp(now()))
+	if err != nil {
+		return err
+	}
+	if replaceAccessKey {
+		if len(accessKeyCiphertext) == 0 {
+			return errors.New("encrypted S3 secret access key is required")
+		}
+		if _, err := tx.Exec(`INSERT INTO secrets(name, ciphertext, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, updated_at=excluded.updated_at`, SecretBackupAccessKey, accessKeyCiphertext, stamp(now())); err != nil {
+			return err
+		}
+	}
+	if replacePassword {
+		if len(passwordCiphertext) == 0 {
+			return errors.New("encrypted Restic repository password is required")
+		}
+		if _, err := tx.Exec(`INSERT INTO secrets(name, ciphertext, updated_at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET ciphertext=excluded.ciphertext, updated_at=excluded.updated_at`, SecretBackupPassword, passwordCiphertext, stamp(now())); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ClearBackupSettings() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE control_settings SET backup_override=0, updated_at=? WHERE id=1`, stamp(now())); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM secrets WHERE name IN (?, ?)`, SecretBackupAccessKey, SecretBackupPassword); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SaveDNSDefaultTTL(seconds int) error {
@@ -124,10 +228,7 @@ func (s *Store) DeleteSecret(name string) error {
 	return err
 }
 
-func ReadSecret(path, name string) ([]byte, error) {
-	if strings.TrimSpace(name) == "" {
-		return nil, errors.New("secret name is required")
-	}
+func OpenReadOnly(path string) (*Store, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
 	} else if err != nil {
@@ -138,17 +239,33 @@ func ReadSecret(path, name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer db.Close()
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+func ReadSecret(path, name string) ([]byte, error) {
+	if strings.TrimSpace(name) == "" {
+		return nil, errors.New("secret name is required")
+	}
+	store, err := OpenReadOnly(path)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
 	var tableCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='secrets'`).Scan(&tableCount); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='secrets'`).Scan(&tableCount); err != nil {
 		return nil, err
 	}
 	if tableCount == 0 {
 		return nil, ErrNotFound
 	}
 	var ciphertext []byte
-	err = db.QueryRow(`SELECT ciphertext FROM secrets WHERE name = ?`, name).Scan(&ciphertext)
+	err = store.db.QueryRow(`SELECT ciphertext FROM secrets WHERE name = ?`, name).Scan(&ciphertext)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

@@ -748,6 +748,47 @@
                     <button id="reset-smtp-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rotate-ccw"></use></svg><span>恢复环境变量</span></button>
                   </div>
                 </form>
+
+                <form id="backup-settings-form" class="settings-section settings-backup-section">
+                  <div class="settings-section-heading">
+                    <div><h2>S3 备份</h2><span id="backup-settings-source" class="settings-source">--</span></div>
+                  </div>
+                  <div class="settings-fields">
+                    <label class="settings-field-wide">仓库地址
+                      <input id="settings-backup-repository" required maxlength="2048" autocomplete="off" spellcheck="false" placeholder="s3:https://account.r2.cloudflarestorage.com/bucket">
+                    </label>
+                    <label>Access Key ID
+                      <input id="settings-backup-access-key-id" required maxlength="512" autocomplete="off" spellcheck="false">
+                    </label>
+                    <label>Secret Access Key
+                      <input id="settings-backup-secret-key" type="password" maxlength="4096" autocomplete="new-password">
+                    </label>
+                    <label>Region
+                      <input id="settings-backup-region" required maxlength="64" autocomplete="off" spellcheck="false" value="us-east-1">
+                    </label>
+                    <label>Restic 仓库密码
+                      <input id="settings-backup-restic-password" type="password" maxlength="4096" autocomplete="new-password">
+                    </label>
+                    <label>每日执行时间（Asia/Shanghai）
+                      <input id="settings-backup-time" type="time" required value="03:25">
+                    </label>
+                    <label>随机延迟
+                      <select id="settings-backup-random-delay">
+                        <option value="0">不延迟</option>
+                        <option value="300">最多 5 分钟</option>
+                        <option value="600">最多 10 分钟</option>
+                        <option value="1200" selected>最多 20 分钟</option>
+                        <option value="1800">最多 30 分钟</option>
+                        <option value="3600">最多 60 分钟</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div class="settings-actions">
+                    <button id="save-backup-settings" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#save"></use></svg><span>保存 S3 备份</span></button>
+                    <button id="test-backup-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#shield-check"></use></svg><span>验证仓库</span></button>
+                    <button id="reset-backup-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rotate-ccw"></use></svg><span>恢复环境变量</span></button>
+                  </div>
+                </form>
                 </div>
               </div>
             </section>

@@ -34,6 +34,8 @@ fi
 if [[ ! -e "$root/config/restic-password" ]]; then
   install -m 0600 /dev/null "$root/config/restic-password"
 fi
+chown root:10001 "$root/config/restic-password"
+chmod 0640 "$root/config/restic-password"
 
 echo "Installed Compose deployment at $root"
 echo "Configure $root/config/control.env, then run: cd $root && docker compose build control"

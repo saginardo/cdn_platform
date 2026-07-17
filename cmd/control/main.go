@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cdn-platform/internal/control"
+	"cdn-platform/internal/domain"
 	"cdn-platform/internal/integrations"
 	"cdn-platform/internal/logstore"
 	"cdn-platform/internal/store"
@@ -40,6 +41,10 @@ func main() {
 	}
 	if len(os.Args) == 3 && os.Args[1] == "cloudflare-credentials" {
 		writeCloudflareCredentials(os.Args[2])
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "backup-runtime" {
+		writeBackupRuntime(os.Args[2])
 		return
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -104,7 +109,7 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Cloudflare: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Settings: settings, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
+	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Cloudflare: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Settings: settings, BackupValidator: control.ResticBackupRepositoryValidator{}, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	healthManager := &control.HealthManager{Server: server}
@@ -224,6 +229,120 @@ func writeCloudflareCredentials(path string) {
 	}
 }
 
+func writeBackupRuntime(directory string) {
+	dataDir := env("CONTROL_DATA_DIR", "/var/lib/cdn-platform")
+	database, err := store.OpenReadOnly(filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		fatal("open backup settings database: " + err.Error())
+	}
+	defer database.Close()
+	key := os.Getenv("CONTROL_ENCRYPTION_KEY")
+	if key == "" {
+		fatal("CONTROL_ENCRYPTION_KEY is required to resolve backup settings")
+	}
+	cipher, err := control.NewCipher(key)
+	if err != nil {
+		fatal(err.Error())
+	}
+	runtimeFromEnvironment, environmentErr := backupRuntimeFromEnv()
+	persisted, err := database.BackupSettingsSnapshot()
+	if err != nil {
+		fatal("read backup settings: " + err.Error())
+	}
+	if !persisted.Override && environmentErr != nil {
+		fatal(environmentErr.Error())
+	}
+	runtime, databaseOverride, err := control.LoadBackupRuntime(database, cipher, runtimeFromEnvironment)
+	if err != nil {
+		fatal("resolve backup settings: " + err.Error())
+	}
+	directory = filepath.Clean(directory)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		fatal("create backup runtime directory: " + err.Error())
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		fatal("secure backup runtime directory: " + err.Error())
+	}
+	values := map[string]string{
+		"repository":           runtime.Settings.Repository,
+		"access-key-id":        runtime.Settings.AccessKeyID,
+		"secret-access-key":    runtime.SecretAccessKey,
+		"region":               runtime.Settings.Region,
+		"restic-password":      runtime.ResticPassword,
+		"backup-time":          runtime.Settings.BackupTime,
+		"random-delay-seconds": strconv.Itoa(runtime.Settings.RandomDelaySeconds),
+		"source":               control.SettingsSourceEnvironment,
+	}
+	if databaseOverride {
+		values["source"] = control.SettingsSourceDatabase
+	}
+	for name, value := range values {
+		if err := writePrivateRuntimeFile(directory, name, value); err != nil {
+			fatal("write backup runtime settings: " + err.Error())
+		}
+	}
+}
+
+func writePrivateRuntimeFile(directory, name, value string) error {
+	temporary, err := os.CreateTemp(directory, "."+name+"-*")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.WriteString(value); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	return os.Rename(temporaryPath, filepath.Join(directory, name))
+}
+
+func backupRuntimeFromEnv() (control.BackupRuntime, error) {
+	randomDelay := domain.DefaultBackupRandomDelaySeconds
+	var environmentErr error
+	if value := strings.TrimSpace(os.Getenv("BACKUP_RANDOM_DELAY_SECONDS")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			randomDelay = -1
+			environmentErr = errors.New("BACKUP_RANDOM_DELAY_SECONDS must be an integer")
+		} else {
+			randomDelay = parsed
+		}
+	}
+	password := os.Getenv("RESTIC_PASSWORD")
+	if password == "" {
+		passwordFile := strings.TrimSpace(os.Getenv("RESTIC_PASSWORD_FILE"))
+		if passwordFile != "" {
+			contents, err := os.ReadFile(passwordFile)
+			if err != nil {
+				if !errors.Is(err, os.ErrNotExist) && environmentErr == nil {
+					environmentErr = fmt.Errorf("read RESTIC_PASSWORD_FILE: %w", err)
+				}
+			} else {
+				password = strings.TrimRight(string(contents), "\r\n")
+			}
+		}
+	}
+	return control.BackupRuntime{
+		Settings: domain.NormalizeBackupSettings(domain.BackupSettings{
+			Repository:         os.Getenv("RESTIC_REPOSITORY"),
+			AccessKeyID:        os.Getenv("AWS_ACCESS_KEY_ID"),
+			Region:             env("AWS_DEFAULT_REGION", domain.DefaultBackupRegion),
+			BackupTime:         env("BACKUP_TIME", domain.DefaultBackupTime),
+			RandomDelaySeconds: randomDelay,
+		}),
+		SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		ResticPassword:  password,
+	}, environmentErr
+}
+
 func settingsFromEnv() (control.EnvironmentSettings, error) {
 	recipients := split(os.Getenv("SMTP_TO"))
 	security := strings.ToLower(env("SMTP_SECURITY", integrations.SMTPSecurityStartTLS))
@@ -247,10 +366,17 @@ func settingsFromEnv() (control.EnvironmentSettings, error) {
 			port = parsed
 		}
 	}
+	// Backup is optional, and a database override must remain usable even when
+	// the environment fallback is incomplete or stale. The backup command
+	// reports fallback errors when it actually needs the environment values.
+	backup, _ := backupRuntimeFromEnv()
 	return control.EnvironmentSettings{
 		CloudflareAPIToken: os.Getenv("CLOUDFLARE_API_TOKEN"),
 		SMTP:               control.SMTPProfile{Enabled: len(recipients) != 0, Host: os.Getenv("SMTP_HOST"), Port: port, Username: os.Getenv("SMTP_USER"), FromAddress: os.Getenv("SMTP_FROM"), Recipients: recipients, Security: security},
 		SMTPPassword:       os.Getenv("SMTP_PASSWORD"),
+		Backup:             backup.Settings,
+		BackupAccessKey:    backup.SecretAccessKey,
+		BackupPassword:     backup.ResticPassword,
 	}, nil
 }
 func env(name, fallback string) string {

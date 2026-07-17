@@ -2,8 +2,11 @@
 set -euo pipefail
 umask 077
 
-: "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required}"
-: "${RESTIC_PASSWORD_FILE:?RESTIC_PASSWORD_FILE is required}"
+runtime_dir=$(mktemp -d /tmp/cdn-backup-runtime.XXXXXX)
+trap 'rm -rf "$runtime_dir"' EXIT
+# shellcheck source=/dev/null
+source /usr/local/lib/cdn-platform/compose-backup-common.sh
+load_backup_runtime "$runtime_dir"
 
 data_dir="${CONTROL_DATA_DIR:-/var/lib/cdn-platform}"
 tls_dir="${CONTROL_TLS_DIR:-/var/lib/cdn-control-tls}"
@@ -13,6 +16,10 @@ clickhouse_database="${CLICKHOUSE_DATABASE:-cdn_platform}"
 snapshot_name="cdn-platform-current"
 control_staging="$staging_dir/control"
 clickhouse_staging="$staging_dir/clickhouse/$snapshot_name"
+cleanup() {
+  rm -rf "$runtime_dir" "$control_staging" "$clickhouse_staging"
+}
+trap cleanup EXIT
 
 for required in "$data_dir/control.db" "$RESTIC_PASSWORD_FILE"; do
   if [[ ! -r "$required" ]]; then
@@ -51,4 +58,3 @@ restic backup \
   /deployment/Dockerfile \
   --tag cdn-control-compose
 restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
-rm -rf "$control_staging" "$clickhouse_staging"

@@ -12,7 +12,7 @@ A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-
 - Nginx OSS cache policy with a 5 GiB default disk cap per edge node, normalized cache generation, cache locking, revalidation, background refresh, stale fallback, and HTTP(S) primary/backup origin failover. Authorization and non-static Cookie requests bypass shared cache; common CSS, JavaScript, font, and image extensions remain cacheable across browser cookies and are fetched from the origin without Cookie when no Authorization header is present. HTTP(S) sites automatically bypass cache and response buffering for WebSocket upgrades, SSE accept headers, `X-CDN-Stream: 1`, and POST responses; full passthrough mode disables cache and buffering for the entire hostname while forwarding byte ranges. `grpc://` and `grpcs://` origins use native gRPC proxying over the client HTTP/2 listener.
 - Nginx stream TCP forwarding with independently selectable client TLS termination and verified upstream TLS/SNI, dynamic upstream DNS resolution, per-port timeouts, atomic multi-file rollback, and TCP-only sites that do not open ports 80/443.
 - Cloudflare DNS-only A-record reconciliation after node reachability and per-site HTTPS/SNI/certificate health hysteresis: 3 failed probes remove a node; 5 successful probes restore it. If every node is bad, DNS is deliberately left unchanged.
-- Authenticated runtime settings for a 60-300 second DNS TTL, per-site published TTL overrides, an encrypted Cloudflare API token override, and encrypted STARTTLS or implicit-TLS SMTP notification settings. Database overrides take precedence over environment fallbacks without a controller restart.
+- Authenticated runtime settings for a 60-300 second DNS TTL, per-site published TTL overrides, encrypted Cloudflare and SMTP settings, and encrypted Restic S3/R2 backup credentials and scheduling. Database overrides take precedence over environment fallbacks without a controller restart.
 - DNS-01 certificates through Certbot's Cloudflare plugin; certificate private keys remain encrypted in SQLite and are only delivered over mTLS.
 - ClickHouse raw request logs with a 7-day TTL and minute aggregates with a 30-day TTL. Edge logs locally queue while the control plane is unavailable.
 - SMTP alert interface and encrypted restic S3-compatible daily backups for the SQLite database, control configuration/TLS material, internal CA, and certificate material.
@@ -165,7 +165,7 @@ The failure window is roughly 1-2 minutes with a 60-second TTL and can approach 
 
 ## Backup and restore
 
-The Compose backup workflow uses SQLite's online backup API and a native ClickHouse backup, then writes the complete recovery set to encrypted Restic storage. It retains 7 daily, 4 weekly, and 6 monthly snapshots. Configuration and restore steps are documented in [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md).
+The Compose backup workflow uses SQLite's online backup API and a native ClickHouse backup, then writes the complete recovery set to encrypted Restic storage. It retains 7 daily, 4 weekly, and 6 monthly snapshots. Repository credentials and the daily schedule can be managed from the authenticated Settings view with database-over-environment precedence; offline recovery credentials remain mandatory. Configuration and restore steps are documented in [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md).
 
 ## Capacity and next limits
 

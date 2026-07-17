@@ -930,6 +930,13 @@ func TestEmbeddedConsoleIncludesRuntimeSettingsForms(t *testing.T) {
 		`<option value="starttls">STARTTLS</option>`,
 		`<option value="tls">隐式 TLS</option>`,
 		`id="test-smtp-settings"`,
+		`id="backup-settings-form"`,
+		`id="settings-backup-repository"`,
+		`id="settings-backup-secret-key" type="password"`,
+		`id="settings-backup-restic-password" type="password"`,
+		`id="settings-backup-time" type="time"`,
+		`id="test-backup-settings"`,
+		`id="reset-backup-settings"`,
 	} {
 		if !strings.Contains(page, expected) {
 			t.Fatalf("index.html does not contain %q", expected)
@@ -944,8 +951,13 @@ func TestEmbeddedConsoleIncludesRuntimeSettingsForms(t *testing.T) {
 		"request('/api/settings')",
 		"request('/api/settings/cloudflare'",
 		"request('/api/settings/smtp/test'",
+		"request('/api/settings/backup'",
+		"request('/api/settings/backup/test'",
+		"function backupSettingsPayload()",
+		"if (secretAccessKey) payload.secret_access_key = secretAccessKey",
+		"if (resticPassword) payload.restic_password = resticPassword",
 		"function settingsFormsDirty()",
-		"preserveDirtySections: ['cloudflare', 'smtp']",
+		"preserveDirtySections: ['cloudflare', 'smtp', 'backup']",
 		"function restoreSettingsDraft(draft, sections)",
 		"dns_ttl_seconds: byId('site-dns-ttl-inherit').checked ? null",
 	} {

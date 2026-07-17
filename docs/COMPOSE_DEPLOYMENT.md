@@ -51,7 +51,7 @@ curl -fsS https://control.example.com/healthz
 
 The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 at startup; a configured `EDGE_BINARY_SHA256` must match or startup fails.
 
-The authenticated **Settings** view stores runtime overrides in SQLite. Cloudflare Token and SMTP password values are encrypted with `CONTROL_ENCRYPTION_KEY`; API responses never return them. Database overrides take precedence over `CLOUDFLARE_API_TOKEN` and `SMTP_*`, while reset actions restore those environment fallbacks. Retain the environment Cloudflare token because a fresh installation needs it before the UI and database exist. Control-certificate bootstrap and renewal containers mount the control database read-only and refresh their temporary Certbot credentials before each certificate operation.
+The authenticated **Settings** view stores runtime overrides in SQLite. Cloudflare Token, SMTP password, S3 secret access key, and Restic repository password values are encrypted with `CONTROL_ENCRYPTION_KEY`; API responses never return them. Database overrides take precedence over their environment fallbacks, while reset actions restore those fallbacks. Retain the environment Cloudflare token because a fresh installation needs it before the UI and database exist. Control-certificate bootstrap and renewal containers mount the control database read-only and refresh their temporary Certbot credentials before each certificate operation.
 
 When a release changes generated Nginx paths, deploy the new controller without publishing site changes, migrate every legacy edge using its generated deployment/upgrade command, and only then run `docker compose run --rm --no-deps control publish-all`. Existing desired state is retained across the controller restart, so this order keeps legacy nodes on their last working configuration during migration.
 
@@ -59,13 +59,24 @@ To rebuild only one site's affected nodes after a renderer fix, use `docker comp
 
 ## Backup
 
-The backup container uses SQLite's online backup API and a native ClickHouse `BACKUP DATABASE` operation. It does not copy either live database directory. Configure `config/backup.env`, write a non-empty `config/restic-password`, and store the Restic repository coordinates, password, and S3 credentials in a separate offline recovery record.
+The backup container uses SQLite's online backup API and a native ClickHouse `BACKUP DATABASE` operation. It does not copy either live database directory. `config/backup.env` and `config/restic-password` are bootstrap and fallback settings. After the controller is running, the authenticated **Settings > S3 backup** form can override the repository URL, S3 credentials, region, Restic password, daily time, and random delay. The scheduler reloads these effective settings at least once per minute, so saving or resetting the form does not require a container restart.
+
+The web override is stored inside the control database, so it cannot be the only recovery copy of the credentials needed to open that database's Restic snapshot. Always retain the repository coordinates, S3 credentials, `CONTROL_ENCRYPTION_KEY`, and Restic password in a separate offline recovery record. Keep working fallback values in `config/backup.env` and `config/restic-password` when practical.
 
 Initialize a new Restic repository once before starting the scheduler:
 
 ```bash
 cd /opt/cdn-platform
-sudo docker compose --profile backup run --rm --entrypoint restic backup init
+sudo docker compose --profile backup run --rm --entrypoint \
+  /usr/local/lib/cdn-platform/compose-backup-restic.sh backup init
+```
+
+The wrapper resolves the database override first and falls back to `config/backup.env`. Saving settings does not initialize or migrate a repository. Initialize each new repository once, then use **Validate repository** in the web form. Other manual Restic operations must use the same wrapper, for example:
+
+```bash
+sudo docker compose --profile backup run --rm --entrypoint \
+  /usr/local/lib/cdn-platform/compose-backup-restic.sh backup \
+  snapshots --tag cdn-control-compose
 ```
 
 Start the optional scheduler only after these values are complete:
@@ -77,11 +88,11 @@ sudo docker compose --profile backup run --rm --entrypoint \
   /usr/local/lib/cdn-platform/compose-backup.sh backup
 ```
 
-The default schedule is 03:25 Asia/Shanghai with up to 20 minutes of random delay. Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `cdn_platform` ClickHouse database, not recreatable `system` diagnostic tables.
+The default schedule is 03:25 Asia/Shanghai with up to 20 minutes of random delay. Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `cdn_platform` ClickHouse database, not recreatable `system` diagnostic tables. After an upgrade that changes the backup scripts or image, rebuild the image and recreate the optional scheduler with `docker compose --profile backup up -d --build backup`.
 
 ## Restore
 
-On a replacement host, install the same source revision and populate `config/backup.env`, `config/restic-password`, and the S3 credentials from the offline recovery record. Do not initialize the control plane first. Then run:
+On a replacement host, install the same source revision and populate `config/backup.env`, `config/restic-password`, and `CONTROL_ENCRYPTION_KEY` from the offline recovery record. Disaster recovery intentionally uses these environment credentials because the web override is inside the snapshot being restored. Do not initialize the control plane first. Then run:
 
 ```bash
 sudo CDN_PLATFORM_ROOT=/opt/cdn-platform \

@@ -2,6 +2,7 @@ package control
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,16 @@ import (
 	"cdn-platform/internal/integrations"
 	"cdn-platform/internal/store"
 )
+
+type recordingBackupValidator struct {
+	runtime BackupRuntime
+	err     error
+}
+
+func (v *recordingBackupValidator) Validate(_ context.Context, runtime BackupRuntime) error {
+	v.runtime = runtime
+	return v.err
+}
 
 func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
@@ -36,7 +47,11 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	}
 	key, _ := NewEncryptionKey()
 	cipher, _ := NewCipher(key)
-	settings, err := NewSettingsManager(database, cipher, EnvironmentSettings{CloudflareAPIToken: "env-token", SMTPPassword: "env-password"})
+	environmentBackup := domain.BackupSettings{Repository: "s3:https://env.r2.example.test/env-backup", AccessKeyID: "env-access", Region: "auto", BackupTime: "03:25", RandomDelaySeconds: 1200}
+	settings, err := NewSettingsManager(database, cipher, EnvironmentSettings{
+		CloudflareAPIToken: "env-token", SMTPPassword: "env-password",
+		Backup: environmentBackup, BackupAccessKey: "env-backup-secret", BackupPassword: "env-restic-password",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +76,8 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	}))
 	defer cloudflareServer.Close()
 	cloudflare := &integrations.CloudflareDNS{BaseURL: cloudflareServer.URL, Token: settings.CloudflareToken}
-	server := &Server{Store: database, Cipher: cipher, Settings: settings, Cloudflare: cloudflare}
+	backupValidator := &recordingBackupValidator{}
+	server := &Server{Store: database, Cipher: cipher, Settings: settings, Cloudflare: cloudflare, BackupValidator: backupValidator}
 
 	response := settingsRequest(t, server, http.MethodPut, "/api/settings/dns", map[string]any{"default_ttl_seconds": 59}, true)
 	if response.Code != http.StatusBadRequest {
@@ -94,18 +110,47 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	if response.Code != http.StatusOK {
 		t.Fatalf("SMTP save = %d %s", response.Code, response.Body.String())
 	}
+	backupSecret := "database-backup-secret"
+	backupPassword := "database-restic-password"
+	backupInput := map[string]any{
+		"repository": "s3:https://account.r2.example.test/cdn-backup", "access_key_id": "database-access",
+		"secret_access_key": backupSecret, "region": "auto", "restic_password": backupPassword,
+		"backup_time": "04:20", "random_delay_seconds": 600,
+	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/backup", backupInput, true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("backup save = %d %s", response.Code, response.Body.String())
+	}
+	delete(backupInput, "secret_access_key")
+	delete(backupInput, "restic_password")
+	response = settingsRequest(t, server, http.MethodPost, "/api/settings/backup/test", backupInput, true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("backup test = %d %s", response.Code, response.Body.String())
+	}
+	if backupValidator.runtime.SecretAccessKey != backupSecret || backupValidator.runtime.ResticPassword != backupPassword {
+		t.Fatalf("backup validator did not preserve stored secrets: %#v", backupValidator.runtime)
+	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/backup", map[string]any{
+		"repository": "s3:https://missing-bucket.example.test", "access_key_id": "access", "region": "auto", "backup_time": "03:25", "random_delay_seconds": 0,
+	}, true)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid backup repository = %d %s", response.Code, response.Body.String())
+	}
 	response = settingsRequest(t, server, http.MethodGet, "/api/settings", nil, false)
 	if response.Code != http.StatusOK {
 		t.Fatalf("settings GET = %d %s", response.Code, response.Body.String())
 	}
 	body := response.Body.String()
-	for _, secret := range []string{"good-token", "env-token", smtpPassword, "env-password"} {
+	for _, secret := range []string{"good-token", "env-token", smtpPassword, "env-password", backupSecret, backupPassword, "env-backup-secret", "env-restic-password"} {
 		if strings.Contains(body, secret) {
 			t.Fatalf("settings response leaked %q: %s", secret, body)
 		}
 	}
 	if !strings.Contains(body, `"source":"database"`) || !strings.Contains(body, `"password_configured":true`) {
 		t.Fatalf("settings response lacks non-secret status: %s", body)
+	}
+	if !strings.Contains(body, `"secret_access_key_configured":true`) || !strings.Contains(body, `"restic_password_configured":true`) {
+		t.Fatalf("settings response lacks backup secret status: %s", body)
 	}
 
 	response = settingsRequest(t, server, http.MethodDelete, "/api/settings/cloudflare", nil, true)
@@ -114,6 +159,13 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	}
 	if token, _ := settings.CloudflareToken(); token != "env-token" {
 		t.Fatalf("reset token = %q", token)
+	}
+	response = settingsRequest(t, server, http.MethodDelete, "/api/settings/backup", nil, true)
+	if response.Code != http.StatusOK {
+		t.Fatalf("backup reset = %d %s", response.Code, response.Body.String())
+	}
+	if runtime := settings.BackupRuntime(); runtime.Settings != environmentBackup || runtime.SecretAccessKey != "env-backup-secret" || runtime.ResticPassword != "env-restic-password" {
+		t.Fatalf("backup reset did not restore environment: %#v", runtime)
 	}
 	response = settingsRequest(t, server, http.MethodPut, "/api/settings/dns", map[string]any{"default_ttl_seconds": 120}, false)
 	if response.Code != http.StatusForbidden {

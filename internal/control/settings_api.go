@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"cdn-platform/internal/domain"
 )
 
 func (s *Server) getSettings(response http.ResponseWriter, _ *http.Request) {
@@ -204,6 +206,82 @@ func (s *Server) testSMTPSettings(response http.ResponseWriter, request *http.Re
 	testCtx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
 	defer cancel()
 	if err := smtpNotifier(profile, password).Notify(testCtx, "CDN Platform SMTP test", "This message confirms that the CDN Platform SMTP settings can send notifications."); err != nil {
+		writeError(response, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, map[string]bool{"ok": true})
+}
+
+type backupSettingsRequest struct {
+	Repository         string  `json:"repository"`
+	AccessKeyID        string  `json:"access_key_id"`
+	SecretAccessKey    *string `json:"secret_access_key"`
+	Region             string  `json:"region"`
+	ResticPassword     *string `json:"restic_password"`
+	BackupTime         string  `json:"backup_time"`
+	RandomDelaySeconds int     `json:"random_delay_seconds"`
+}
+
+func (input backupSettingsRequest) settings() domain.BackupSettings {
+	return domain.BackupSettings{
+		Repository:         input.Repository,
+		AccessKeyID:        input.AccessKeyID,
+		Region:             input.Region,
+		BackupTime:         input.BackupTime,
+		RandomDelaySeconds: input.RandomDelaySeconds,
+	}
+}
+
+func (s *Server) updateBackupSettings(response http.ResponseWriter, request *http.Request) {
+	if s.Settings == nil {
+		writeError(response, http.StatusServiceUnavailable, errors.New("backup settings are not configured"))
+		return
+	}
+	var input backupSettingsRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	if err := s.Settings.SaveBackup(input.settings(), input.SecretAccessKey, input.ResticPassword); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	view := s.Settings.View().Backup
+	s.audit(request, adminID(request.Context()), "update_backup", "settings", "backup",
+		fmt.Sprintf("source=database; repository=%s; region=%s; backup_time=%s; random_delay_seconds=%d",
+			view.Repository, view.Region, view.BackupTime, view.RandomDelaySeconds))
+	writeJSON(response, http.StatusOK, view)
+}
+
+func (s *Server) clearBackupSettings(response http.ResponseWriter, request *http.Request) {
+	if s.Settings == nil {
+		writeError(response, http.StatusServiceUnavailable, errors.New("backup settings are not configured"))
+		return
+	}
+	if err := s.Settings.ClearBackup(); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	s.audit(request, adminID(request.Context()), "clear_backup", "settings", "backup", "restored environment fallback")
+	writeJSON(response, http.StatusOK, s.Settings.View().Backup)
+}
+
+func (s *Server) testBackupSettings(response http.ResponseWriter, request *http.Request) {
+	if s.Settings == nil || s.BackupValidator == nil {
+		writeError(response, http.StatusServiceUnavailable, errors.New("backup repository validation is not configured"))
+		return
+	}
+	var input backupSettingsRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	runtime, err := s.Settings.ResolveBackup(input.settings(), input.SecretAccessKey, input.ResticPassword)
+	if err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	validationCtx, cancel := context.WithTimeout(request.Context(), 30*time.Second)
+	defer cancel()
+	if err := s.BackupValidator.Validate(validationCtx, runtime); err != nil {
 		writeError(response, http.StatusBadGateway, err)
 		return
 	}

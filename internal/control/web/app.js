@@ -180,6 +180,26 @@ function populateSettingsForms() {
   byId('settings-smtp-recipients').value = (smtp.recipients || []).join(', ');
   byId('reset-smtp-settings').disabled = !smtp.override_configured;
   syncSMTPControls();
+
+  const backup = settingsData.backup || {};
+  byId('backup-settings-source').textContent = settingsSourceLabel(backup.source);
+  byId('settings-backup-repository').value = backup.repository || '';
+  byId('settings-backup-access-key-id').value = backup.access_key_id || '';
+  byId('settings-backup-secret-key').value = '';
+  byId('settings-backup-secret-key').placeholder = backup.secret_access_key_configured ? '已保存，留空保持不变' : '';
+  byId('settings-backup-secret-key').required = !backup.secret_access_key_configured;
+  byId('settings-backup-region').value = backup.region || 'us-east-1';
+  byId('settings-backup-restic-password').value = '';
+  byId('settings-backup-restic-password').placeholder = backup.restic_password_configured ? '已保存，留空保持不变' : '';
+  byId('settings-backup-restic-password').required = !backup.restic_password_configured;
+  byId('settings-backup-time').value = backup.backup_time || '03:25';
+  const configuredRandomDelay = Number(backup.random_delay_seconds ?? 1200);
+  const randomDelay = String(configuredRandomDelay >= 0 && configuredRandomDelay <= 86400 ? configuredRandomDelay : 1200);
+  if (![...byId('settings-backup-random-delay').options].some((option) => option.value === randomDelay)) {
+    byId('settings-backup-random-delay').add(new Option(`${Number(randomDelay)} 秒`, randomDelay));
+  }
+  byId('settings-backup-random-delay').value = randomDelay;
+  byId('reset-backup-settings').disabled = !backup.override_configured;
   settingsFormReady = true;
   markSettingsFormClean();
 }
@@ -199,11 +219,27 @@ function smtpSettingsPayload() {
   return payload;
 }
 
+function backupSettingsPayload() {
+  const payload = {
+    repository: byId('settings-backup-repository').value,
+    access_key_id: byId('settings-backup-access-key-id').value,
+    region: byId('settings-backup-region').value,
+    backup_time: byId('settings-backup-time').value,
+    random_delay_seconds: Number(byId('settings-backup-random-delay').value),
+  };
+  const secretAccessKey = byId('settings-backup-secret-key').value;
+  const resticPassword = byId('settings-backup-restic-password').value;
+  if (secretAccessKey) payload.secret_access_key = secretAccessKey;
+  if (resticPassword) payload.restic_password = resticPassword;
+  return payload;
+}
+
 function settingsFormState() {
   return {
     dns: { default_ttl_seconds: Number(byId('settings-dns-ttl').value) },
     cloudflare: { token: byId('settings-cloudflare-token').value },
     smtp: smtpSettingsPayload(),
+    backup: backupSettingsPayload(),
   };
 }
 
@@ -232,6 +268,16 @@ function restoreSettingsDraft(draft, sections) {
     byId('settings-smtp-recipients').value = smtp.recipients.join(', ');
     syncSMTPControls();
   }
+  if (sections.has('backup')) {
+    const backup = draft.backup;
+    byId('settings-backup-repository').value = backup.repository;
+    byId('settings-backup-access-key-id').value = backup.access_key_id;
+    byId('settings-backup-secret-key').value = backup.secret_access_key || '';
+    byId('settings-backup-region').value = backup.region;
+    byId('settings-backup-restic-password').value = backup.restic_password || '';
+    byId('settings-backup-time').value = backup.backup_time;
+    byId('settings-backup-random-delay').value = String(backup.random_delay_seconds);
+  }
 }
 
 function settingsFormsDirty() {
@@ -250,6 +296,7 @@ function setSettingsBusy(formID, busy) {
     byId('reset-cloudflare-settings').disabled = !settingsData.cloudflare?.override_configured;
     byId('test-cloudflare-settings').disabled = !settingsData.cloudflare?.configured;
     byId('reset-smtp-settings').disabled = !settingsData.smtp?.override_configured;
+    byId('reset-backup-settings').disabled = !settingsData.backup?.override_configured;
     syncSMTPControls();
   }
 }
@@ -2623,7 +2670,7 @@ byId('dns-settings-form').addEventListener('submit', async (event) => {
   setSettingsBusy('dns-settings-form', true);
   try {
     await request('/api/settings/dns', { method: 'PUT', body: JSON.stringify({ default_ttl_seconds: Number(byId('settings-dns-ttl').value) }) });
-    await refreshSettings({ force: true, preserveDirtySections: ['cloudflare', 'smtp'] });
+    await refreshSettings({ force: true, preserveDirtySections: ['cloudflare', 'smtp', 'backup'] });
     notice('DNS 设置已保存', true);
   } catch (error) {
     notice(error.message);
@@ -2639,7 +2686,7 @@ byId('cloudflare-settings-form').addEventListener('submit', async (event) => {
   setSettingsBusy('cloudflare-settings-form', true);
   try {
     await request('/api/settings/cloudflare', { method: 'PUT', body: JSON.stringify({ token }) });
-    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'smtp'] });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'smtp', 'backup'] });
     notice('Cloudflare API Token 已验证并保存', true);
   } catch (error) {
     notice(error.message);
@@ -2665,7 +2712,7 @@ byId('reset-cloudflare-settings').addEventListener('click', async () => {
   setSettingsBusy('cloudflare-settings-form', true);
   try {
     await request('/api/settings/cloudflare', { method: 'DELETE' });
-    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'smtp'] });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'smtp', 'backup'] });
     notice('Cloudflare 已恢复环境变量配置', true);
   } catch (error) {
     notice(error.message);
@@ -2680,7 +2727,7 @@ byId('smtp-settings-form').addEventListener('submit', async (event) => {
   setSettingsBusy('smtp-settings-form', true);
   try {
     await request('/api/settings/smtp', { method: 'PUT', body: JSON.stringify(smtpSettingsPayload()) });
-    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare'] });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare', 'backup'] });
     notice('SMTP 设置已保存', true);
   } catch (error) {
     notice(error.message);
@@ -2707,12 +2754,54 @@ byId('reset-smtp-settings').addEventListener('click', async () => {
   setSettingsBusy('smtp-settings-form', true);
   try {
     await request('/api/settings/smtp', { method: 'DELETE' });
-    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare'] });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare', 'backup'] });
     notice('SMTP 已恢复环境变量配置', true);
   } catch (error) {
     notice(error.message);
   } finally {
     setSettingsBusy('smtp-settings-form', false);
+  }
+});
+
+byId('backup-settings-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!event.currentTarget.reportValidity()) return;
+  setSettingsBusy('backup-settings-form', true);
+  try {
+    await request('/api/settings/backup', { method: 'PUT', body: JSON.stringify(backupSettingsPayload()) });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare', 'smtp'] });
+    notice('S3 备份设置已保存', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('backup-settings-form', false);
+  }
+});
+
+byId('test-backup-settings').addEventListener('click', async () => {
+  if (!byId('backup-settings-form').reportValidity()) return;
+  setSettingsBusy('backup-settings-form', true);
+  try {
+    await request('/api/settings/backup/test', { method: 'POST', body: JSON.stringify(backupSettingsPayload()) });
+    notice('S3 备份仓库验证通过', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('backup-settings-form', false);
+  }
+});
+
+byId('reset-backup-settings').addEventListener('click', async () => {
+  if (!window.confirm('确定删除控制台 S3 备份配置，并恢复使用环境变量吗？')) return;
+  setSettingsBusy('backup-settings-form', true);
+  try {
+    await request('/api/settings/backup', { method: 'DELETE' });
+    await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare', 'smtp'] });
+    notice('S3 备份已恢复环境变量配置', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    setSettingsBusy('backup-settings-form', false);
   }
 });
 

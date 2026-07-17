@@ -655,6 +655,7 @@ dialog::backdrop { background: rgb(23 33 43 / 38%); }
   .settings-dns-section { grid-column: 1; grid-row: 1; }
   .settings-cloudflare-section { grid-column: 1; grid-row: 2; }
   .settings-smtp-section { grid-column: 2; grid-row: 1 / span 2; padding-left: 1.5rem; border-left: 1px solid var(--line); }
+  .settings-backup-section { grid-column: 1 / -1; grid-row: 3; }
 }
 
 @media (min-width: 1500px) {

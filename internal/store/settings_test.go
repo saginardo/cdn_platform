@@ -26,6 +26,9 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if settings.DNSDefaultTTLSeconds != domain.DefaultDNSTTLSeconds || settings.SMTP.Override {
 		t.Fatalf("unexpected defaults: %#v", settings)
 	}
+	if settings.BackupOverride || settings.Backup.Region != domain.DefaultBackupRegion || settings.Backup.BackupTime != domain.DefaultBackupTime {
+		t.Fatalf("unexpected backup defaults: %#v", settings.Backup)
+	}
 	if err := database.SaveDNSDefaultTTL(120); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +62,39 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	}
 	if _, err := database.Secret(SecretSMTPPassword); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SMTP password remains after reset: %v", err)
+	}
+	backup := domain.BackupSettings{Repository: "s3:https://account.r2.cloudflarestorage.com/backup", AccessKeyID: "access", Region: "auto", BackupTime: "04:10", RandomDelaySeconds: 600}
+	if err := database.SaveBackupSettings(backup, []byte("encrypted-access-key"), true, []byte("encrypted-password"), true); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = database.ControlSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.BackupOverride || settings.Backup != backup {
+		t.Fatalf("saved backup settings = %#v", settings.Backup)
+	}
+	if secret, err := database.Secret(SecretBackupAccessKey); err != nil || !bytes.Equal(secret, []byte("encrypted-access-key")) {
+		t.Fatalf("stored backup access key = %q, %v", secret, err)
+	}
+	snapshot, err := database.BackupSettingsSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Override || snapshot.Settings != backup || !bytes.Equal(snapshot.AccessKeyCiphertext, []byte("encrypted-access-key")) || !bytes.Equal(snapshot.PasswordCiphertext, []byte("encrypted-password")) {
+		t.Fatalf("backup settings snapshot = %#v", snapshot)
+	}
+	if err := database.ClearBackupSettings(); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = database.ControlSettings()
+	if err != nil || settings.BackupOverride {
+		t.Fatalf("cleared backup settings = %#v, %v", settings.Backup, err)
+	}
+	for _, name := range []string{SecretBackupAccessKey, SecretBackupPassword} {
+		if _, err := database.Secret(name); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("backup secret %s remains after reset: %v", name, err)
+		}
 	}
 }
 

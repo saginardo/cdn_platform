@@ -32,6 +32,9 @@ type EnvironmentSettings struct {
 	CloudflareAPIToken string
 	SMTP               SMTPProfile
 	SMTPPassword       string
+	Backup             domain.BackupSettings
+	BackupAccessKey    string
+	BackupPassword     string
 }
 
 type CloudflareSettingsView struct {
@@ -49,27 +52,42 @@ type SMTPSettingsView struct {
 	EnvironmentSet     bool   `json:"environment_configured"`
 }
 
+type BackupSettingsView struct {
+	domain.BackupSettings
+	Source                   string `json:"source"`
+	Configured               bool   `json:"configured"`
+	OverrideConfigured       bool   `json:"override_configured"`
+	AccessKeyConfigured      bool   `json:"secret_access_key_configured"`
+	ResticPasswordConfigured bool   `json:"restic_password_configured"`
+	EnvironmentSet           bool   `json:"environment_configured"`
+}
+
 type SettingsView struct {
 	DNS struct {
 		DefaultTTLSeconds int `json:"default_ttl_seconds"`
 	} `json:"dns"`
 	Cloudflare CloudflareSettingsView `json:"cloudflare"`
 	SMTP       SMTPSettingsView       `json:"smtp"`
+	Backup     BackupSettingsView     `json:"backup"`
 }
 
 type SettingsManager struct {
 	Store  *store.Store
 	Cipher *Cipher
 
-	updateMu sync.Mutex
-	mu       sync.RWMutex
-	env      EnvironmentSettings
-	dnsTTL   int
-	token    string
-	tokenDB  bool
-	smtp     SMTPProfile
-	smtpPass string
-	smtpDB   bool
+	updateMu     sync.Mutex
+	mu           sync.RWMutex
+	env          EnvironmentSettings
+	dnsTTL       int
+	token        string
+	tokenDB      bool
+	smtp         SMTPProfile
+	smtpPass     string
+	smtpDB       bool
+	backup       domain.BackupSettings
+	backupSecret string
+	backupPass   string
+	backupDB     bool
 }
 
 func NewSettingsManager(database *store.Store, cipher *Cipher, environment EnvironmentSettings) (*SettingsManager, error) {
@@ -78,6 +96,7 @@ func NewSettingsManager(database *store.Store, cipher *Cipher, environment Envir
 	}
 	environment.CloudflareAPIToken = strings.TrimSpace(environment.CloudflareAPIToken)
 	environment.SMTP = normalizeSMTPProfile(environment.SMTP)
+	environment.Backup = domain.NormalizeBackupSettings(environment.Backup)
 	manager := &SettingsManager{Store: database, Cipher: cipher, env: environment, dnsTTL: domain.DefaultDNSTTLSeconds}
 	persisted, err := database.ControlSettings()
 	if err != nil {
@@ -112,6 +131,37 @@ func NewSettingsManager(database *store.Store, cipher *Cipher, environment Envir
 			manager.smtpPass = ""
 		}
 	}
+	manager.backup = environment.Backup
+	manager.backupSecret = environment.BackupAccessKey
+	manager.backupPass = environment.BackupPassword
+	if persisted.BackupOverride {
+		manager.backup = domain.NormalizeBackupSettings(persisted.Backup)
+		manager.backupDB = true
+		ciphertext, err := database.Secret(store.SecretBackupAccessKey)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, errors.New("stored backup override is missing the S3 secret access key")
+			}
+			return nil, err
+		}
+		plaintext, err := cipher.Decrypt(ciphertext)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt S3 secret access key: %w", err)
+		}
+		manager.backupSecret = string(plaintext)
+		ciphertext, err = database.Secret(store.SecretBackupPassword)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil, errors.New("stored backup override is missing the Restic repository password")
+			}
+			return nil, err
+		}
+		plaintext, err = cipher.Decrypt(ciphertext)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt Restic repository password: %w", err)
+		}
+		manager.backupPass = string(plaintext)
+	}
 	return manager, nil
 }
 
@@ -142,6 +192,20 @@ func (m *SettingsManager) View() SettingsView {
 		view.SMTP.Source = SettingsSourceEnvironment
 	default:
 		view.SMTP.Source = SettingsSourceUnconfigured
+	}
+	view.Backup.BackupSettings = m.backup
+	view.Backup.OverrideConfigured = m.backupDB
+	view.Backup.AccessKeyConfigured = m.backupSecret != ""
+	view.Backup.ResticPasswordConfigured = m.backupPass != ""
+	view.Backup.EnvironmentSet = domain.ValidateBackupSettings(m.env.Backup, m.env.BackupAccessKey, m.env.BackupPassword) == nil
+	view.Backup.Configured = domain.ValidateBackupSettings(m.backup, m.backupSecret, m.backupPass) == nil
+	switch {
+	case m.backupDB:
+		view.Backup.Source = SettingsSourceDatabase
+	case view.Backup.EnvironmentSet:
+		view.Backup.Source = SettingsSourceEnvironment
+	default:
+		view.Backup.Source = SettingsSourceUnconfigured
 	}
 	return view
 }

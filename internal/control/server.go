@@ -47,6 +47,7 @@ type Server struct {
 	CertificateManager *CertificateManager
 	SiteDeleter        *SiteDeletionManager
 	Settings           *SettingsManager
+	BackupValidator    BackupRepositoryValidator
 	Notifier           integrations.Notifier
 	Logs               logstore.Store
 	ControlURL         string
@@ -84,6 +85,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings/smtp", s.requireAdmin(s.updateSMTPSettings))
 	mux.HandleFunc("DELETE /api/settings/smtp", s.requireAdmin(s.clearSMTPSettings))
 	mux.HandleFunc("POST /api/settings/smtp/test", s.requireAdmin(s.testSMTPSettings))
+	mux.HandleFunc("PUT /api/settings/backup", s.requireAdmin(s.updateBackupSettings))
+	mux.HandleFunc("DELETE /api/settings/backup", s.requireAdmin(s.clearBackupSettings))
+	mux.HandleFunc("POST /api/settings/backup/test", s.requireAdmin(s.testBackupSettings))
 	mux.HandleFunc("GET /api/security", s.requireAdmin(s.getSecurityOverview))
 	mux.HandleFunc("POST /api/security/policies", s.requireAdmin(s.createSecurityPolicy))
 	mux.HandleFunc("PUT /api/security/policies/{id}", s.requireAdmin(s.updateSecurityPolicy))

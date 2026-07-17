@@ -228,6 +228,12 @@ CREATE TABLE IF NOT EXISTS control_settings (
   smtp_from_address TEXT NOT NULL DEFAULT '',
   smtp_recipients_json TEXT NOT NULL DEFAULT '[]',
   smtp_security TEXT NOT NULL DEFAULT 'starttls',
+  backup_override INTEGER NOT NULL DEFAULT 0,
+  backup_repository TEXT NOT NULL DEFAULT '',
+  backup_access_key_id TEXT NOT NULL DEFAULT '',
+  backup_region TEXT NOT NULL DEFAULT 'us-east-1',
+  backup_time TEXT NOT NULL DEFAULT '03:25',
+  backup_random_delay_seconds INTEGER NOT NULL DEFAULT 1200,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS node_health (
@@ -375,6 +381,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN agent_sha256 TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN active_upgrade_task_id TEXT NOT NULL DEFAULT ''`)
 	_, _ = s.db.Exec(`ALTER TABLE deployment_tasks ADD COLUMN deadline_at TEXT`)
+	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_override INTEGER NOT NULL DEFAULT 0`)
+	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_repository TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_access_key_id TEXT NOT NULL DEFAULT ''`)
+	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_region TEXT NOT NULL DEFAULT 'us-east-1'`)
+	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_time TEXT NOT NULL DEFAULT '03:25'`)
+	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_random_delay_seconds INTEGER NOT NULL DEFAULT 1200`)
 	// JSON null distinguishes pre-capability HTTP states from an intentional
 	// empty listener set. New publishers always persist an explicit array.
 	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN public_ports_json TEXT NOT NULL DEFAULT 'null'`)

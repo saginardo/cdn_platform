@@ -10,14 +10,27 @@ import (
 
 	"cdn-platform/internal/domain"
 	"cdn-platform/internal/logstore"
+	"cdn-platform/internal/store"
 )
 
-const nodeCacheWindow = 24 * time.Hour
+const (
+	nodeCacheWindow           = 24 * time.Hour
+	nodeCacheStorageFreshness = 15 * time.Minute
+)
 
 type nodeCacheStatusBucket struct {
 	Status   string `json:"status"`
 	Requests uint64 `json:"requests"`
 	Bytes    int64  `json:"bytes"`
+}
+
+type nodeCacheStorageStatus struct {
+	Available         bool       `json:"available"`
+	UnavailableReason string     `json:"unavailable_reason,omitempty"`
+	UsedBytes         int64      `json:"used_bytes"`
+	TotalBytes        int64      `json:"total_bytes"`
+	CollectedAt       *time.Time `json:"collected_at,omitempty"`
+	Stale             bool       `json:"stale"`
 }
 
 type nodeCacheStatusResponse struct {
@@ -35,6 +48,7 @@ type nodeCacheStatusResponse struct {
 	Uncached          uint64                  `json:"uncached"`
 	HitRate           float64                 `json:"hit_rate"`
 	Statuses          []nodeCacheStatusBucket `json:"statuses"`
+	Storage           nodeCacheStorageStatus  `json:"storage"`
 }
 
 type nodeSiteSummary struct {
@@ -87,7 +101,8 @@ func (s *Server) nodeDetail(response http.ResponseWriter, request *http.Request)
 
 func (s *Server) nodeCacheStatus(response http.ResponseWriter, request *http.Request) {
 	nodeID := request.PathValue("id")
-	if _, err := s.Store.GetNode(nodeID); err != nil {
+	node, err := s.Store.GetNode(nodeID)
+	if err != nil {
 		writeStoreError(response, err)
 		return
 	}
@@ -108,7 +123,31 @@ func (s *Server) nodeCacheStatus(response http.ResponseWriter, request *http.Req
 			}
 		}
 	}
+	cache.Storage = s.nodeCacheStorageStatus(node, to)
 	writeJSON(response, http.StatusOK, cache)
+}
+
+func (s *Server) nodeCacheStorageStatus(node domain.Node, at time.Time) nodeCacheStorageStatus {
+	usage, err := s.Store.GetNodeCacheStorage(node.ID)
+	if err == nil {
+		collectedAt := usage.CollectedAt.UTC()
+		return nodeCacheStorageStatus{
+			Available: true, UsedBytes: usage.UsedBytes, TotalBytes: usage.TotalBytes,
+			CollectedAt: &collectedAt, Stale: collectedAt.Before(at.Add(-nodeCacheStorageFreshness)),
+		}
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		if s.Logger != nil {
+			s.Logger.Warn("node cache storage unavailable", "node_id", node.ID, "error", err)
+		}
+		return nodeCacheStorageStatus{UnavailableReason: "缓存空间上报暂不可用"}
+	}
+	for _, capability := range node.Capabilities {
+		if capability == domain.EdgeCapabilityCacheUsage {
+			return nodeCacheStorageStatus{UnavailableReason: "等待边缘节点首次采集缓存空间"}
+		}
+	}
+	return nodeCacheStorageStatus{UnavailableReason: "升级边缘代理后可查看缓存空间"}
 }
 
 func buildNodeCacheStatus(from, to time.Time, buckets []logstore.NodeCacheBucket, available bool, unavailableReason string) nodeCacheStatusResponse {

@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,79 @@ func (s nodeCacheLogStore) NodeCache(context.Context, string, time.Time, time.Ti
 	return s.buckets, s.err
 }
 
+func TestEdgeHeartbeatRecordsCacheStorageIndependentlyOfLogStats(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("cache-reporting-edge", "203.0.113.24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	collectedAt := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
+	payload, err := json.Marshal(heartbeatRequest{
+		Capabilities: []string{domain.EdgeCapabilityCacheUsage},
+		CacheStorage: &domain.CacheStorageUsage{UsedBytes: 3 << 30, TotalBytes: 5 << 30, CollectedAt: collectedAt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	heartbeat := httptest.NewRequest(http.MethodPost, "/api/edge/v1/heartbeat", bytes.NewReader(payload))
+	heartbeat = heartbeat.WithContext(context.WithValue(heartbeat.Context(), edgeContextKey{}, node.ID))
+	heartbeatResponse := httptest.NewRecorder()
+	server.heartbeat(heartbeatResponse, heartbeat)
+	if heartbeatResponse.Code != http.StatusOK {
+		t.Fatalf("heartbeat status = %d, body=%s", heartbeatResponse.Code, heartbeatResponse.Body.String())
+	}
+
+	cacheRequest := httptest.NewRequest(http.MethodGet, "/api/nodes/"+node.ID+"/cache-status", nil)
+	cacheRequest.SetPathValue("id", node.ID)
+	cacheResponse := httptest.NewRecorder()
+	server.nodeCacheStatus(cacheResponse, cacheRequest)
+	if cacheResponse.Code != http.StatusOK {
+		t.Fatalf("cache status = %d, body=%s", cacheResponse.Code, cacheResponse.Body.String())
+	}
+	var cache nodeCacheStatusResponse
+	if err := json.Unmarshal(cacheResponse.Body.Bytes(), &cache); err != nil {
+		t.Fatal(err)
+	}
+	if cache.Available || !cache.Storage.Available || cache.Storage.UsedBytes != 3<<30 || cache.Storage.TotalBytes != 5<<30 || !cache.Storage.Stale {
+		t.Fatalf("cache response = %#v", cache)
+	}
+	futurePayload, err := json.Marshal(heartbeatRequest{
+		CacheStorage: &domain.CacheStorageUsage{UsedBytes: 4 << 30, TotalBytes: 5 << 30, CollectedAt: time.Now().Add(time.Hour)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := httptest.NewRequest(http.MethodPost, "/api/edge/v1/heartbeat", bytes.NewReader(futurePayload))
+	future = future.WithContext(context.WithValue(future.Context(), edgeContextKey{}, node.ID))
+	futureResponse := httptest.NewRecorder()
+	server.heartbeat(futureResponse, future)
+	if futureResponse.Code != http.StatusOK {
+		t.Fatalf("future heartbeat status = %d, body=%s", futureResponse.Code, futureResponse.Body.String())
+	}
+	if usage, err := database.GetNodeCacheStorage(node.ID); err != nil || usage.UsedBytes != 3<<30 {
+		t.Fatalf("future report replaced cache storage: %#v, err=%v", usage, err)
+	}
+
+	invalidPayload, err := json.Marshal(heartbeatRequest{
+		CacheStorage: &domain.CacheStorageUsage{UsedBytes: -1, TotalBytes: 5 << 30, CollectedAt: time.Now()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := httptest.NewRequest(http.MethodPost, "/api/edge/v1/heartbeat", bytes.NewReader(invalidPayload))
+	invalid = invalid.WithContext(context.WithValue(invalid.Context(), edgeContextKey{}, node.ID))
+	invalidResponse := httptest.NewRecorder()
+	server.heartbeat(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid heartbeat status = %d, body=%s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+}
+
 func TestNodeDetailReturnsManagementContextAndIndependentCacheStatus(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
@@ -48,7 +122,7 @@ func TestNodeDetailReturnsManagementContextAndIndependentCacheStatus(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetNodeCapabilities(node.ID, []string{domain.EdgeCapabilityOnlineUpgrade}); err != nil {
+	if err := database.SetNodeCapabilities(node.ID, []string{domain.EdgeCapabilityOnlineUpgrade, domain.EdgeCapabilityCacheUsage}); err != nil {
 		t.Fatal(err)
 	}
 	agentDigest := strings.Repeat("a", 64)
@@ -73,6 +147,12 @@ func TestNodeDetailReturnsManagementContextAndIndependentCacheStatus(t *testing.
 		t.Fatal(err)
 	}
 	seen := time.Date(2026, 7, 17, 2, 0, 0, 0, time.UTC)
+	storageCollectedAt := time.Now().UTC().Add(-time.Minute)
+	if err := database.RecordNodeCacheStorage(node.ID, domain.CacheStorageUsage{
+		UsedBytes: 2 << 30, TotalBytes: 5 << 30, CollectedAt: storageCollectedAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	logs := nodeCacheLogStore{buckets: []logstore.NodeCacheBucket{
 		{Status: "hit", Requests: 60, Bytes: 6000, LastSeenAt: seen},
 		{Status: "STALE", Requests: 5, Bytes: 500, LastSeenAt: seen.Add(time.Minute)},
@@ -116,6 +196,9 @@ func TestNodeDetailReturnsManagementContextAndIndependentCacheStatus(t *testing.
 	if len(cache.Statuses) != 6 || cache.Statuses[0].Status != "HIT" || cache.Statuses[1].Status != "MISS" || cache.Statuses[2].Status != "BYPASS" || cache.Statuses[5].Status != "UNCACHED" {
 		t.Fatalf("unexpected cache status order: %#v", cache.Statuses)
 	}
+	if !cache.Storage.Available || cache.Storage.UsedBytes != 2<<30 || cache.Storage.TotalBytes != 5<<30 || cache.Storage.CollectedAt == nil || cache.Storage.Stale {
+		t.Fatalf("unexpected cache storage: %#v", cache.Storage)
+	}
 }
 
 func TestNodeCacheStatusDegradesWithoutBlockingNodeDetail(t *testing.T) {
@@ -154,7 +237,7 @@ func TestNodeCacheStatusDegradesWithoutBlockingNodeDetail(t *testing.T) {
 	if err := json.Unmarshal(cacheResponse.Body.Bytes(), &cache); err != nil {
 		t.Fatal(err)
 	}
-	if cache.Available || cache.UnavailableReason != "缓存统计暂不可用" || cache.Statuses == nil {
+	if cache.Available || cache.UnavailableReason != "缓存统计暂不可用" || cache.Statuses == nil || cache.Storage.Available || cache.Storage.UnavailableReason != "升级边缘代理后可查看缓存空间" {
 		t.Fatalf("unexpected unavailable cache response: %#v", cache)
 	}
 }

@@ -40,6 +40,18 @@ type Node struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
+type CacheStorageUsage struct {
+	UsedBytes   int64     `json:"used_bytes"`
+	TotalBytes  int64     `json:"total_bytes"`
+	CollectedAt time.Time `json:"collected_at"`
+}
+
+func ValidCacheStorageUsage(usage CacheStorageUsage) bool {
+	const maxReportedBytes int64 = 1 << 60
+	return usage.UsedBytes >= 0 && usage.UsedBytes <= maxReportedBytes &&
+		usage.TotalBytes > 0 && usage.TotalBytes <= maxReportedBytes && !usage.CollectedAt.IsZero()
+}
+
 type Origin struct {
 	URL           string `json:"url"`
 	HostHeader    string `json:"host_header"`
@@ -62,6 +74,7 @@ const (
 const (
 	EdgeCapabilityTCPStream     = "tcp_stream_v1"
 	EdgeCapabilityOnlineUpgrade = "online_upgrade_v1"
+	EdgeCapabilityCacheUsage    = "cache_usage_v1"
 )
 
 type TCPForward struct {

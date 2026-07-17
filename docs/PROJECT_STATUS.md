@@ -85,7 +85,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 | `cmd/control` | 已实现 | 控制面进程；支持 `keygen` 和仅本机使用的 `publish-all`。 |
 | `internal/control` | 已实现 | HTTP API、认证、证书任务、发布、DNS 健康对账、审计、嵌入式管理界面。 |
 | `internal/store` | 已实现 | SQLite schema、迁移、站点/节点/任务/会话/证书/状态持久化。 |
-| `internal/edge` | 已实现 | 注册、mTLS、配置同步、原子应用、Nginx 回滚、心跳和日志转发。 |
+| `internal/edge` | 已实现 | 注册、mTLS、配置同步、原子应用、Nginx 回滚、心跳、日志转发和低频缓存磁盘占用采集。 |
 | `internal/nginx` | 已实现 | HTTP 缓存、整站透传、回源、TLS、WebSocket/SSE、gRPC、备用源站配置渲染。 |
 | `internal/integrations` | 已实现 | Cloudflare、Certbot、SMTP 等外部适配器。 |
 | `internal/logstore` | 已实现 | ClickHouse 原始日志、分钟指标、节点缓存状态聚合和带过滤分页的检索读写。 |
@@ -97,7 +97,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 - 概览：节点数、运行节点数、站点数、最近 24 小时请求量/传输量/错误率/状态码；站点请求趋势支持按站点、请求总量或传输量升降序排列，条目可进入独立分析页查看站点请求量、传输量、错误汇总、状态码分布和分时折线图。
 - 日志：从左侧导航进入，默认检索全部站点最近 1 小时原始日志，支持时间、站点、节点、方法、状态码、路径、客户端 IP、缓存状态筛选和每页 100 条手动分页；原始日志保留 7 天。
 - 安全：全局访问策略增删改、内置敏感文件扫描与独立 PHP 恶意文件探测规则、拦截/IP 封禁动作、1/6/12/24 小时档位、节点能力覆盖、活动封禁解封和最近命中查看。
-- 节点：列表仅保留运行概览和管理入口；独立二级页面集中提供部署/升级命令、在线升级、暂停/启用调度、撤销/重新启用、卸载/删除、分配站点、心跳、能力与应用版本查看，并按最近 24 小时 ClickHouse 原始日志展示节点级缓存命中率及 `HIT/MISS/BYPASS/EXPIRED/STALE/UPDATING/REVALIDATED` 分布。缓存统计独立加载，故障时不阻塞节点管理。
+- 节点：列表仅保留运行概览和管理入口；独立二级页面集中提供部署/升级命令、在线升级、暂停/启用调度、撤销/重新启用、卸载/删除、分配站点、心跳、能力与应用版本查看，并展示边缘上报的缓存已用空间/5 GiB 总容量，以及最近 24 小时 ClickHouse 原始日志聚合的缓存命中率和 `HIT/MISS/BYPASS/EXPIRED/STALE/UPDATING/REVALIDATED` 分布。磁盘上报与请求统计独立降级，任一故障不阻塞节点管理。
 - 站点：创建、编辑、节点分配、主/备源站、独立回源 TLS SNI、回源读写空闲超时、整站透传开关、发布、申请 TLS、缓存刷新、源站 CIDR 查看，以及输入站点名确认的安全删除流程。
 - 站点列表采用紧凑工作台布局，仅展示节点、TLS 与发布状态，并保留发布和管理入口；创建、编辑、协议、缓存、请求体、超时、TLS、缓存刷新和源站 CIDR 均集中在独立二级页面。
 - TLS 状态不再解析历史任务文本。接口 `GET /api/sites/{id}/tls-status` 返回最新证书任务及 `published_after_certificate`，只要签发完成后存在成功发布任务就显示“已签发”。

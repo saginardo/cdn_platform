@@ -500,11 +500,40 @@ function renderNodeDetailOperations(node) {
 }
 
 function nodeCapabilityLabel(capability) {
-  const labels = { tcp_stream_v1: 'TCP 转发', online_upgrade_v1: '在线升级', edge_security_v1: '访问安全' };
+  const labels = { tcp_stream_v1: 'TCP 转发', online_upgrade_v1: '在线升级', edge_security_v1: '访问安全', cache_usage_v1: '缓存用量上报' };
   return labels[capability] || capability;
 }
 
+function renderNodeCacheStorage(storage) {
+  const available = Boolean(storage?.available) && Number(storage.total_bytes || 0) > 0;
+  const usedBytes = available ? Math.max(0, Number(storage.used_bytes || 0)) : 0;
+  const totalBytes = available ? Math.max(0, Number(storage.total_bytes || 0)) : 0;
+  const ratio = totalBytes ? usedBytes / totalBytes : 0;
+  const percentage = Math.max(0, Math.min(100, ratio * 100));
+  const value = byId('node-cache-storage-value');
+  const meta = byId('node-cache-storage-meta');
+  const track = byId('node-cache-storage-track');
+  value.textContent = available ? `${formatBytes(usedBytes)} / ${formatBytes(totalBytes)}` : '-- / --';
+  value.title = available ? `已用 ${formatBytes(usedBytes)}，总容量 ${formatBytes(totalBytes)}` : '';
+  if (available) {
+    const collectedAt = storage.collected_at ? formatDateTime(storage.collected_at) : '';
+    meta.textContent = storage.stale
+      ? `数据已过期${collectedAt ? ` · 采集于 ${collectedAt}` : ''}`
+      : `${formatPercent(ratio)}${collectedAt ? ` · 采集于 ${collectedAt}` : ''}`;
+  } else {
+    meta.textContent = storage?.unavailable_reason || '缓存空间上报暂不可用';
+  }
+  track.value = percentage;
+  track.classList.toggle('is-unavailable', !available);
+  track.classList.toggle('is-warning', available && ratio >= 0.75 && ratio < 0.9);
+  track.classList.toggle('is-critical', available && ratio >= 0.9);
+  track.setAttribute('aria-label', available
+    ? `缓存空间已用 ${formatBytes(usedBytes)}，总容量 ${formatBytes(totalBytes)}，占用 ${formatPercent(ratio)}`
+    : meta.textContent);
+}
+
 function renderNodeCacheStatus(cache) {
+  renderNodeCacheStorage(cache?.storage);
   const available = Boolean(cache?.available);
   byId('node-cache-hit-rate').textContent = available && Number(cache.cache_lookups || 0) ? formatPercent(cache.hit_rate) : '--';
   byId('node-cache-lookups').textContent = available ? numberFormatter.format(Number(cache.cache_lookups || 0)) : '--';

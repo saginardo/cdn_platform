@@ -136,6 +136,7 @@ func TestEmbeddedConsoleUsesNodeManagementDetailAndCacheStatus(t *testing.T) {
 	for _, expected := range []string{
 		`id="node-list-page"`, `id="node-detail-page"`, `id="node-detail-back"`,
 		`id="node-cache-hit-rate"`, `id="node-cache-status-list"`, `id="node-sites-table"`,
+		`id="node-cache-storage-value"`, `id="node-cache-storage-meta"`, `id="node-cache-storage-track"`,
 		`id="node-deployment-actions"`, `id="node-scheduling-actions"`,
 		`id="node-authorization-actions"`, `id="node-removal-actions"`, `id="node-command"`,
 	} {
@@ -151,7 +152,8 @@ func TestEmbeddedConsoleUsesNodeManagementDetailAndCacheStatus(t *testing.T) {
 	script := string(scriptContents)
 	for _, expected := range []string{
 		"function renderNodeRoute(route", "function renderNodeDetail(detail)",
-		"function renderNodeCacheStatus(cache)", "function renderNodeDetailOperations(node)",
+		"function renderNodeCacheStorage(storage)", "function renderNodeCacheStatus(cache)", "function renderNodeDetailOperations(node)",
+		"storage.used_bytes", "storage.total_bytes", "storage.stale", "track.value = percentage",
 		"request(`/api/nodes/${nodeID}`)", "request(`/api/nodes/${nodeID}/cache-status`)",
 		"navigateTo(`#/nodes/${encodeURIComponent(button.dataset.id)}`)",
 	} {
@@ -199,7 +201,7 @@ func TestEmbeddedConsoleUsesNodeManagementDetailAndCacheStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	styles := string(stylesContents)
-	for _, expected := range []string{".node-detail-page", ".node-cache-summary", ".node-cache-status-row", ".node-operation-list"} {
+	for _, expected := range []string{".node-detail-page", ".node-cache-storage", ".node-cache-storage-track", ".node-cache-summary", ".node-cache-status-row", ".node-operation-list"} {
 		if !strings.Contains(styles, expected) {
 			t.Fatalf("styles.css does not contain %q", expected)
 		}

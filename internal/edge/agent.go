@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"cdn-platform/internal/domain"
+	"cdn-platform/internal/nginx"
 	"github.com/google/uuid"
 )
 
@@ -54,6 +55,7 @@ type Agent struct {
 	Config           Config
 	logs             *LogForwarder
 	security         *SecurityManager
+	cacheUsage       *cacheUsageCollector
 	lastApplyReport  *domain.ApplyReport
 	lastUpgradeError string
 }
@@ -114,6 +116,7 @@ func New(config Config) (*Agent, error) {
 	}
 	config.AgentSHA256 = strings.ToLower(strings.TrimSpace(config.AgentSHA256))
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityOnlineUpgrade)
+	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityCacheUsage)
 	config.SecurityFirewall = defaultSecurityFirewall(config.SecurityFirewall)
 	if config.SecurityFirewall != nil {
 		config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilitySecurity)
@@ -124,7 +127,10 @@ func New(config Config) (*Agent, error) {
 	if err := os.MkdirAll(config.CertificateDir, 0o700); err != nil {
 		return nil, err
 	}
-	agent := &Agent{Config: config, logs: NewLogForwarder(config.StateDir, config.AccessLogPath)}
+	agent := &Agent{
+		Config: config, logs: NewLogForwarder(config.StateDir, config.AccessLogPath),
+		cacheUsage: newCacheUsageCollector(nginx.DefaultCachePath, nginx.DefaultCacheMaxBytes, defaultCacheUsageInterval),
+	}
 	if config.SecurityFirewall != nil {
 		agent.security = NewSecurityManager(config.StateDir, config.SecurityLogPath, config.SecurityPollInterval, config.SecurityFirewall)
 	}
@@ -135,6 +141,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.EnsureEnrollment(ctx); err != nil {
 		return err
 	}
+	go a.cacheUsage.Run(ctx)
 	if a.security != nil {
 		go a.security.Run(ctx, a.Config.ControlURL, a.client)
 	}
@@ -302,6 +309,7 @@ func (a *Agent) Heartbeat(ctx context.Context, appliedVersion int64, lastError s
 		"last_error": lastError, "applied_version": appliedVersion, "apply_report": report,
 		"capabilities": append([]string(nil), a.Config.Capabilities...),
 		"agent_sha256": a.Config.AgentSHA256, "active_upgrade_task_id": a.activeUpgradeID(),
+		"cache_storage": a.cacheUsage.Snapshot(),
 	})
 	if err != nil {
 		return err

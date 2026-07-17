@@ -98,6 +98,8 @@ For a TCP-only node, replace the HTTP health request with listener checks for it
 
 After every node has migrated, run `cdn-control publish-all` through the control Compose service, wait for each node's applied version to catch up, and confirm the control UI shows recent heartbeats without `last_error`.
 
+The edge agent advertises `cache_usage_v1` and scans `/opt/cdn-edge/cache` in the background every five minutes. Heartbeats report the allocated cache-file bytes, the fixed Nginx `max_size=5g` capacity, and the collection time. The node cache page treats reports older than 15 minutes as stale. This capacity is the managed Nginx cache limit, not the host filesystem's total size; access-log or ClickHouse failures do not hide the last cache-space report.
+
 The restart requirement, asynchronous reload failure mode, worker-generation check, and per-site HTTPS/SNI acceptance commands are documented in [NGINX_APPLY_SAFETY.md](NGINX_APPLY_SAFETY.md).
 
 ## Failure and rollback

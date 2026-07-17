@@ -238,6 +238,13 @@ CREATE TABLE IF NOT EXISTS node_health (
   last_checked_at TEXT,
   last_error TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS node_cache_storage (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  used_bytes INTEGER NOT NULL,
+  total_bytes INTEGER NOT NULL,
+  collected_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS site_node_health (
   site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

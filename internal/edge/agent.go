@@ -37,6 +37,7 @@ type Config struct {
 	ClientCertPath        string
 	CAPath                string
 	AccessLogPath         string
+	SecurityLogPath       string
 	Capabilities          []string
 	AgentSHA256           string
 	PollInterval          time.Duration
@@ -45,11 +46,14 @@ type Config struct {
 	HTTPClient            *http.Client
 	Runner                Runner
 	UpgradeRunner         UpgradeRunner
+	SecurityFirewall      SecurityFirewall
+	SecurityPollInterval  time.Duration
 }
 
 type Agent struct {
 	Config           Config
 	logs             *LogForwarder
+	security         *SecurityManager
 	lastApplyReport  *domain.ApplyReport
 	lastUpgradeError string
 }
@@ -84,6 +88,9 @@ func New(config Config) (*Agent, error) {
 	if config.AccessLogPath == "" {
 		config.AccessLogPath = "/opt/cdn-edge/logs/access.json"
 	}
+	if config.SecurityLogPath == "" {
+		config.SecurityLogPath = "/opt/cdn-edge/logs/security.json"
+	}
 	if config.PollInterval == 0 {
 		config.PollInterval = 30 * time.Second
 	}
@@ -107,18 +114,29 @@ func New(config Config) (*Agent, error) {
 	}
 	config.AgentSHA256 = strings.ToLower(strings.TrimSpace(config.AgentSHA256))
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityOnlineUpgrade)
+	config.SecurityFirewall = defaultSecurityFirewall(config.SecurityFirewall)
+	if config.SecurityFirewall != nil {
+		config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilitySecurity)
+	}
 	if err := os.MkdirAll(config.StateDir, 0o750); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(config.CertificateDir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Agent{Config: config, logs: NewLogForwarder(config.StateDir, config.AccessLogPath)}, nil
+	agent := &Agent{Config: config, logs: NewLogForwarder(config.StateDir, config.AccessLogPath)}
+	if config.SecurityFirewall != nil {
+		agent.security = NewSecurityManager(config.StateDir, config.SecurityLogPath, config.SecurityPollInterval, config.SecurityFirewall)
+	}
+	return agent, nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
 	if err := a.EnsureEnrollment(ctx); err != nil {
 		return err
+	}
+	if a.security != nil {
+		go a.security.Run(ctx, a.Config.ControlURL, a.client)
 	}
 	for {
 		lastError := a.lastUpgradeError
@@ -134,6 +152,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		if err := a.logs.Flush(ctx, a.Config.ControlURL, a.client()); err != nil && lastError == "" {
 			lastError = "upload access logs: " + err.Error()
+		}
+		if a.security != nil && a.security.LastError() != "" && lastError == "" {
+			lastError = "edge security: " + a.security.LastError()
 		}
 		if err := a.Heartbeat(ctx, a.appliedVersion(), lastError, a.lastApplyReport); err == nil {
 			a.lastApplyReport = nil

@@ -282,12 +282,52 @@ CREATE TABLE IF NOT EXISTS node_uninstall_jobs (
 	  created_at TEXT NOT NULL,
 	  updated_at TEXT NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS security_policies (
+	  id TEXT PRIMARY KEY,
+	  name TEXT NOT NULL UNIQUE,
+	  enabled INTEGER NOT NULL DEFAULT 1,
+	  pattern TEXT NOT NULL,
+	  action TEXT NOT NULL,
+	  ban_duration_seconds INTEGER NOT NULL DEFAULT 0,
+	  priority INTEGER NOT NULL,
+	  created_at TEXT NOT NULL,
+	  updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS security_bans (
+	  ip TEXT PRIMARY KEY,
+	  policy_id TEXT REFERENCES security_policies(id) ON DELETE SET NULL,
+	  policy_name TEXT NOT NULL,
+	  trigger_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+	  host TEXT NOT NULL DEFAULT '',
+	  path TEXT NOT NULL DEFAULT '',
+	  method TEXT NOT NULL DEFAULT '',
+	  expires_at TEXT NOT NULL,
+	  created_at TEXT NOT NULL,
+	  updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS security_events (
+	  id TEXT PRIMARY KEY,
+	  node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
+	  policy_id TEXT REFERENCES security_policies(id) ON DELETE SET NULL,
+	  policy_name TEXT NOT NULL,
+	  client_ip TEXT NOT NULL,
+	  host TEXT NOT NULL DEFAULT '',
+	  path TEXT NOT NULL,
+	  method TEXT NOT NULL DEFAULT '',
+	  action TEXT NOT NULL,
+	  observed_at TEXT NOT NULL,
+	  ban_expires_at TEXT,
+	  created_at TEXT NOT NULL
+	);
 CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON deployment_tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_publish_task_nodes_node ON publish_task_nodes(node_id, status);
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_site_node_health_node ON site_node_health(node_id);
 	CREATE INDEX IF NOT EXISTS idx_node_upgrade_tasks_node ON node_upgrade_tasks(node_id, created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_security_policies_priority ON security_policies(priority, created_at);
+	CREATE INDEX IF NOT EXISTS idx_security_bans_expires ON security_bans(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at DESC);
 	`)
 	if err != nil {
 		return err
@@ -350,6 +390,13 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 		ON node_upgrade_tasks(node_id)
 		WHERE status IN ('queued', 'applying')`); err != nil {
 		return fmt.Errorf("create active node upgrade index: %w", err)
+	}
+	seededAt := stamp(now())
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO security_policies(
+		id, name, enabled, pattern, action, ban_duration_seconds, priority, created_at, updated_at)
+		VALUES (?, ?, 1, ?, ?, 21600, 100, ?, ?)`, domain.DefaultSecurityPolicyID,
+		"敏感文件扫描", domain.DefaultSecurityPolicyPattern, domain.SecurityActionBan, seededAt, seededAt); err != nil {
+		return fmt.Errorf("seed default security policy: %w", err)
 	}
 	if err := s.backfillSitePublications(); err != nil {
 		return err

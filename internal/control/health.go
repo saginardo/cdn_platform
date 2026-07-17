@@ -51,6 +51,9 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 		if err := m.Server.Store.ReconcileNodeUpgrades(); err != nil {
 			return err
 		}
+		if err := m.Server.Store.ReconcileSecurity(); err != nil {
+			return err
+		}
 	}
 	if m.Server.SiteDeleter != nil {
 		if err := m.Server.SiteDeleter.Reconcile(ctx); err != nil {

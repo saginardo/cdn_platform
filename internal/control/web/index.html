@@ -53,6 +53,7 @@
           <nav class="side-nav" aria-label="主导航">
             <button class="nav active" data-view="overview">概览</button>
             <button class="nav" data-view="logs">日志</button>
+            <button class="nav" data-view="security">安全</button>
             <button class="nav" data-view="nodes">节点</button>
             <button class="nav" data-view="sites">站点</button>
             <button class="nav" data-view="settings">设置</button>
@@ -477,6 +478,72 @@
                 <div class="dialog-actions">
                   <button id="confirm-site-delete" type="button" class="danger">开始安全删除</button>
                 </div>
+              </dialog>
+            </section>
+
+            <section id="security" class="view hidden" aria-busy="false">
+              <div class="section-heading security-heading">
+                <div class="heading-copy"><h1 id="security-title" tabindex="-1">安全</h1><p id="security-meta" class="section-meta">访问策略与边缘封禁</p></div>
+                <div class="security-heading-actions">
+                  <button id="refresh-security" class="secondary" type="button">刷新</button>
+                  <button id="deploy-security" class="secondary" type="button">部署策略</button>
+                  <button id="add-security-policy" type="button">新增策略</button>
+                </div>
+              </div>
+
+              <div id="security-state" class="overview-state" role="status" aria-live="polite">正在加载安全状态…</div>
+              <div id="security-content" class="security-content hidden">
+                <dl class="security-summary">
+                  <div><dt>启用策略</dt><dd id="security-policy-count">0</dd></div>
+                  <div><dt>活动封禁</dt><dd id="security-ban-count">0</dd></div>
+                  <div><dt>能力覆盖</dt><dd id="security-node-coverage">0 / 0</dd></div>
+                  <div><dt>已应用节点</dt><dd id="security-node-applied">0 / 0</dd></div>
+                </dl>
+                <p id="security-deployment-error" class="dialog-error hidden" role="alert"></p>
+
+                <section class="security-section" aria-labelledby="security-node-heading">
+                  <div class="section-heading"><div><h2 id="security-node-heading">节点部署</h2><p class="section-meta">能力与策略应用版本</p></div></div>
+                  <div class="table-wrap"><table class="security-table"><thead><tr><th>节点</th><th>状态</th><th>安全能力</th><th>期望版本</th><th>已应用版本</th><th>结果</th></tr></thead><tbody id="security-node-table"></tbody></table></div>
+                </section>
+
+                <section class="security-section" aria-labelledby="security-policy-heading">
+                  <div class="section-heading"><div><h2 id="security-policy-heading">通用访问策略</h2><p class="section-meta">按优先级匹配规范化请求路径</p></div></div>
+                  <div class="table-wrap"><table class="security-table"><thead><tr><th>策略</th><th>匹配表达式</th><th>动作</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead><tbody id="security-policy-table"></tbody></table></div>
+                </section>
+
+                <section class="security-section" aria-labelledby="security-ban-heading">
+                  <div class="section-heading"><div><h2 id="security-ban-heading">活动封禁</h2><p class="section-meta">由边缘节点执行，自动到期</p></div></div>
+                  <div class="table-wrap"><table class="security-table"><thead><tr><th>IP</th><th>触发策略</th><th>节点</th><th>请求</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="security-ban-table"></tbody></table></div>
+                </section>
+
+                <section class="security-section" aria-labelledby="security-event-heading">
+                  <div class="section-heading"><div><h2 id="security-event-heading">最近命中</h2><p class="section-meta">保留 7 天，显示最近 100 条</p></div></div>
+                  <div class="table-wrap"><table class="security-table"><thead><tr><th>时间</th><th>IP</th><th>策略</th><th>节点</th><th>请求</th><th>动作</th></tr></thead><tbody id="security-event-table"></tbody></table></div>
+                </section>
+              </div>
+
+              <dialog id="security-policy-dialog" aria-labelledby="security-policy-dialog-title">
+                <form id="security-policy-form">
+                  <div class="dialog-header">
+                    <div><h2 id="security-policy-dialog-title">新增访问策略</h2><p class="section-meta">PCRE 兼容安全子集</p></div>
+                    <button id="close-security-policy" type="button" class="secondary" aria-label="关闭">关闭</button>
+                  </div>
+                  <input id="security-policy-id" type="hidden">
+                  <div class="form-grid security-policy-fields">
+                    <label>名称 <input id="security-policy-name" required maxlength="80" autocomplete="off"></label>
+                    <label>优先级 <input id="security-policy-priority" required type="number" min="1" max="10000" step="1" value="100"></label>
+                    <label>动作
+                      <select id="security-policy-action"><option value="ban">IP 封禁</option><option value="block">仅拦截请求</option></select>
+                    </label>
+                    <label id="security-policy-duration-wrap">封禁时间
+                      <select id="security-policy-duration"><option value="3600">1 小时</option><option value="21600" selected>6 小时</option><option value="43200">12 小时</option><option value="86400">24 小时</option></select>
+                    </label>
+                    <label class="checkbox-label"><input id="security-policy-enabled" type="checkbox" checked> 启用策略</label>
+                    <label class="security-pattern-field">路径正则 <textarea id="security-policy-pattern" required maxlength="2048" rows="7" spellcheck="false"></textarea></label>
+                  </div>
+                  <p id="security-policy-error" class="dialog-error hidden" role="alert"></p>
+                  <div class="dialog-actions"><button id="save-security-policy" type="submit">保存并部署</button></div>
+                </form>
               </dialog>
             </section>
 

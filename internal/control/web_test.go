@@ -297,7 +297,7 @@ func TestEmbeddedConsoleUsesDedicatedLogSearchRoute(t *testing.T) {
 	}
 	script := string(scriptContents)
 	for _, expected := range []string{
-		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites', 'settings'])",
+		"const consoleViews = new Set(['overview', 'logs', 'security', 'nodes', 'sites', 'settings'])",
 		"function runLogSearch({ offset = 0, keepWindow = false } = {})",
 		"request(`/api/logs?${params.toString()}`",
 		"function renderLogRows(logs)",
@@ -378,7 +378,7 @@ func TestEmbeddedConsolePreservesSelectedViewInURLHash(t *testing.T) {
 	}
 	script := string(contents)
 	for _, expected := range []string{
-		"const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites', 'settings'])",
+		"const consoleViews = new Set(['overview', 'logs', 'security', 'nodes', 'sites', 'settings'])",
 		"function parseRouteHash(hash)",
 		"hash.replace(/^#\\/?/, '')",
 		"if (segments.length === 2 && segments[1] === 'new')",
@@ -550,7 +550,7 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	}
 	script := string(scriptContents)
 	for _, expected := range []string{
-		"const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点', settings: '设置' }",
+		"const viewLabels = { overview: '概览', logs: '日志', security: '安全', nodes: '节点', sites: '站点', settings: '设置' }",
 		"function setSidebarOpen(open, restoreFocus = false)",
 		"setAttribute('aria-expanded', String(open))",
 		"event.key === 'Escape'",
@@ -558,6 +558,44 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+}
+
+func TestEmbeddedConsoleIncludesSecurityWorkspace(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`data-view="security"`, `id="security"`, `id="security-policy-table"`,
+		`id="security-node-table"`, `id="security-ban-table"`, `id="security-event-table"`, `id="security-policy-dialog"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"function renderSecurity()", "function refreshSecurity()", "function openSecurityPolicy(policy = null)",
+		"/api/security/deploy", "/api/security/policies", "/api/security/bans/",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{".security-summary", ".security-pattern", ".security-request"} {
+		if !strings.Contains(string(styleContents), expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
 		}
 	}
 }

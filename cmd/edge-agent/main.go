@@ -34,7 +34,8 @@ func main() {
 		StateDir: env("EDGE_STATE_DIR", "/opt/cdn-edge/data"), NginxConfigPath: env("NGINX_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform.conf"),
 		NginxStreamConfigPath: env("NGINX_STREAM_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform-stream.conf"),
 		CertificateDir:        env("EDGE_CERT_DIR", "/opt/cdn-edge/config/certs"), AccessLogPath: env("EDGE_ACCESS_LOG", "/opt/cdn-edge/logs/access.json"), PollInterval: time.Duration(pollSeconds) * time.Second,
-		Capabilities: splitValues(os.Getenv("EDGE_CAPABILITIES")),
+		SecurityLogPath: env("EDGE_SECURITY_LOG", "/opt/cdn-edge/logs/security.json"),
+		Capabilities:    splitValues(os.Getenv("EDGE_CAPABILITIES")),
 	})
 	if err != nil {
 		fatal(err.Error())

@@ -40,7 +40,7 @@ func TestUninstallEdgeScriptRemovesOnlyPlatformFiles(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(root, "etc/nginx/nginx.conf")); statErr != nil {
 		t.Fatalf("unrelated Nginx configuration was removed: %v", statErr)
 	}
-	for _, expected := range []string{"uninstall/start", "uninstall/complete", "nginx -t", "systemctl reload nginx", "systemctl daemon-reload"} {
+	for _, expected := range []string{"uninstall/start", "uninstall/complete", "nginx -t", "systemctl reload nginx", "systemctl daemon-reload", "nft delete table inet cdn_platform"} {
 		if !strings.Contains(log, expected) {
 			t.Fatalf("mock log does not contain %q:\n%s", expected, log)
 		}
@@ -236,6 +236,10 @@ case "$1" in
 esac
 if [[ "$1" == "reload" && "$2" == "nginx" && "${MOCK_RELOAD_FAIL:-0}" == "1" ]]; then exit 1; fi
 if [[ "$1" == "stop" && "${MOCK_STOP_FAIL:-0}" == "1" ]]; then exit 1; fi
+exit 0
+`,
+		"nft": `#!/usr/bin/env bash
+printf 'nft %s\n' "$*" >> "$MOCK_LOG"
 exit 0
 `,
 	}

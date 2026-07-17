@@ -226,6 +226,10 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 	if err != nil {
 		return nil, nil, err
 	}
+	securityPolicies, err := p.Store.ListSecurityPolicies()
+	if err != nil {
+		return nil, nil, err
+	}
 	updates := make([]store.NodeStateUpdate, 0, len(affected))
 	targets := make([]store.PublishTaskNode, 0, len(affected))
 	for _, node := range nodes {
@@ -256,7 +260,11 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 		if siteRequiresTCPStream(nodeSites) && !slices.Contains(node.Capabilities, domain.EdgeCapabilityTCPStream) {
 			return nil, nil, fmt.Errorf("node %s must be upgraded before publishing TCP forwards", node.Name)
 		}
-		config, err := nginx.Render(nodeSites)
+		var nodeSecurityPolicies []domain.SecurityPolicy
+		if slices.Contains(node.Capabilities, domain.EdgeCapabilitySecurity) {
+			nodeSecurityPolicies = securityPolicies
+		}
+		config, err := nginx.RenderWithSecurity(nodeSites, nodeSecurityPolicies)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -39,6 +39,11 @@ let settingsData = null;
 let settingsFormBaseline = '';
 let settingsFormReady = false;
 let settingsLoading = false;
+let securityData = null;
+let securityLoading = false;
+let securityPollTimer = null;
+let securityActionPending = false;
+let securityDataGeneration = 0;
 
 const nodeStatusLabels = {
   pending: '待激活',
@@ -62,10 +67,11 @@ const defaultReadWriteTimeoutSeconds = 360;
 const defaultTCPConnectTimeoutSeconds = 10;
 const defaultTCPIdleTimeoutSeconds = 300;
 const defaultDNSTTLSeconds = 60;
+const defaultSecurityPolicyPattern = String.raw`(?i)^/+(?:\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|(?:[^/]+/)*\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|\.git(?:/|$|-)|\.aws(?:/|$)|\.docker/(?:config\.json|)|\.svn(?:/|$)|\.hg(?:/|$)|\.ht(?:access|passwd)|\.DS_Store$)`;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const compactNumberFormatter = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
-const consoleViews = new Set(['overview', 'logs', 'nodes', 'sites', 'settings']);
-const viewLabels = { overview: '概览', logs: '日志', nodes: '节点', sites: '站点', settings: '设置' };
+const consoleViews = new Set(['overview', 'logs', 'security', 'nodes', 'sites', 'settings']);
+const viewLabels = { overview: '概览', logs: '日志', security: '安全', nodes: '节点', sites: '站点', settings: '设置' };
 const mobileSidebarQuery = window.matchMedia('(max-width: 800px)');
 const overviewStatusColors = ['#3274d9', '#168a7a', '#6d5bc5', '#d29224', '#c44f4f', '#2b8fa3', '#8b99a2'];
 
@@ -227,6 +233,155 @@ function setSettingsBusy(formID, busy) {
 
 function syncSMTPControls() {
   byId('test-smtp-settings').disabled = byId('smtp-settings-form').classList.contains('is-busy') || !byId('settings-smtp-enabled').checked;
+}
+
+function securityActionLabel(action) {
+  return action === 'ban' ? 'IP 封禁' : '仅拦截';
+}
+
+function securityDurationLabel(seconds) {
+  return ({ 3600: '1 小时', 21600: '6 小时', 43200: '12 小时', 86400: '24 小时' })[Number(seconds)] || '--';
+}
+
+function securityNodeName(nodeID) {
+  return securityData?.nodes?.find((node) => node.id === nodeID)?.name || nodeID || '--';
+}
+
+function securityRequestCell(item) {
+  const authority = item.host || '--';
+  const method = item.method || '--';
+  return `<span class="security-request"><span>${escapeHTML(method)} · ${escapeHTML(authority)}</span><code>${escapeHTML(item.path || '--')}</code></span>`;
+}
+
+function renderSecurity() {
+  if (!securityData) return;
+  const policies = securityData.policies || [];
+  const bans = securityData.bans || [];
+  const activeBanCount = Number(securityData.active_ban_count ?? bans.length);
+  const events = securityData.events || [];
+  const eligibleNodes = (securityData.nodes || []).filter((node) => ['active', 'draining'].includes(node.status));
+  const capableNodes = eligibleNodes.filter((node) => node.capable);
+  const appliedNodes = capableNodes.filter((node) => node.configured && node.desired_version > 0 && node.applied_version >= node.desired_version);
+  byId('security-policy-count').textContent = numberFormatter.format(policies.filter((policy) => policy.enabled).length);
+  byId('security-ban-count').textContent = numberFormatter.format(activeBanCount);
+  byId('security-node-coverage').textContent = `${capableNodes.length} / ${eligibleNodes.length}`;
+  byId('security-node-applied').textContent = `${appliedNodes.length} / ${capableNodes.length}`;
+  byId('security-meta').textContent = `${policies.length} 条策略 · ${numberFormatter.format(activeBanCount)} 个活动封禁${activeBanCount > bans.length ? ` · 显示前 ${numberFormatter.format(bans.length)} 条` : ''}`;
+  byId('security-deployment-error').textContent = securityData.deployment_error || '';
+  byId('security-deployment-error').classList.toggle('hidden', !securityData.deployment_error);
+
+  byId('security-node-table').innerHTML = (securityData.nodes || []).length ? securityData.nodes.map((node) => {
+    let result = '<span class="status pending">需升级</span>';
+    if (node.capable && node.last_error) result = `<span class="status failed" title="${escapeHTML(node.last_error)}">节点错误</span>`;
+    else if (node.capable && !node.configured) result = '<span class="status pending">待部署</span>';
+    else if (node.capable && node.desired_version > 0 && node.applied_version >= node.desired_version) result = '<span class="status succeeded">已应用</span>';
+    else if (node.capable) result = '<span class="status applying">等待应用</span>';
+    return `<tr><td>${escapeHTML(node.name)}</td><td>${escapeHTML(nodeStatusLabel(node.status))}</td><td>${node.capable ? '已就绪' : '不支持'}</td><td>${numberFormatter.format(node.desired_version)}</td><td>${numberFormatter.format(node.applied_version)}</td><td>${result}</td></tr>`;
+  }).join('') : '<tr><td colspan="6" class="muted">暂无节点</td></tr>';
+
+  byId('security-policy-table').innerHTML = policies.length ? policies.map((policy) => `<tr>
+    <td><strong>${escapeHTML(policy.name)}</strong></td>
+    <td><code class="security-pattern">${escapeHTML(policy.pattern)}</code></td>
+    <td>${escapeHTML(securityActionLabel(policy.action))}${policy.action === 'ban' ? `<br><span class="muted">${escapeHTML(securityDurationLabel(policy.ban_duration_seconds))}</span>` : ''}</td>
+    <td>${numberFormatter.format(policy.priority)}</td>
+    <td><span class="status ${policy.enabled ? 'succeeded' : 'pending'}">${policy.enabled ? '已启用' : '已停用'}</span></td>
+    <td class="actions"><button class="small secondary edit-security-policy" data-id="${escapeHTML(policy.id)}">编辑</button>${policy.builtin ? '' : `<button class="small danger delete-security-policy" data-id="${escapeHTML(policy.id)}">删除</button>`}</td>
+  </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无访问策略</td></tr>';
+
+  byId('security-ban-table').innerHTML = bans.length ? bans.map((ban) => `<tr>
+    <td><code>${escapeHTML(ban.ip)}</code></td><td>${escapeHTML(ban.policy_name || '--')}</td><td>${escapeHTML(securityNodeName(ban.trigger_node_id))}</td>
+    <td>${securityRequestCell(ban)}</td><td>${formatDateTime(ban.expires_at)}</td>
+    <td><button class="small danger unban-security-ip" data-ip="${escapeHTML(ban.ip)}">解除封禁</button></td>
+  </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无活动封禁</td></tr>';
+
+  byId('security-event-table').innerHTML = events.length ? events.map((event) => `<tr>
+    <td>${formatDateTime(event.observed_at)}</td><td><code>${escapeHTML(event.client_ip)}</code></td><td>${escapeHTML(event.policy_name || '--')}</td>
+    <td>${escapeHTML(securityNodeName(event.node_id))}</td><td>${securityRequestCell(event)}</td><td>${escapeHTML(securityActionLabel(event.action))}</td>
+  </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无策略命中</td></tr>';
+  hide('security-state');
+  show('security-content');
+}
+
+function scheduleSecurityRefresh() {
+  window.clearTimeout(securityPollTimer);
+  securityPollTimer = null;
+  if (activeRoute.view === 'security') {
+    securityPollTimer = window.setTimeout(() => refreshSecurity().catch((error) => setSecurityState(error.message)), 15000);
+  }
+}
+
+function setSecurityState(message) {
+  byId('security-state').textContent = message;
+  show('security-state');
+}
+
+async function refreshSecurity() {
+  if (securityLoading) return;
+  securityLoading = true;
+  const generation = securityDataGeneration;
+  try {
+    const data = await request('/api/security');
+    if (generation === securityDataGeneration) {
+      securityData = data;
+      renderSecurity();
+    }
+  } finally {
+    securityLoading = false;
+    scheduleSecurityRefresh();
+  }
+}
+
+function renderSecurityRoute({ routeChanged = false } = {}) {
+  if (securityData) renderSecurity();
+  if ((routeChanged || !securityData) && !securityLoading) {
+    setSecurityState('正在加载安全状态…');
+    void refreshSecurity().catch((error) => setSecurityState(error.message));
+  } else {
+    scheduleSecurityRefresh();
+  }
+}
+
+function syncSecurityPolicyDuration() {
+  const banned = byId('security-policy-action').value === 'ban';
+  byId('security-policy-duration-wrap').classList.toggle('hidden', !banned);
+  byId('security-policy-duration').disabled = !banned;
+}
+
+function setSecurityPolicyError(message = '') {
+  byId('security-policy-error').textContent = message;
+  byId('security-policy-error').classList.toggle('hidden', !message);
+}
+
+function openSecurityPolicy(policy = null) {
+  byId('security-policy-form').reset();
+  byId('security-policy-id').value = policy?.id || '';
+  byId('security-policy-dialog-title').textContent = policy ? '编辑访问策略' : '新增访问策略';
+  byId('security-policy-name').value = policy?.name || '';
+  byId('security-policy-priority').value = String(policy?.priority || Math.min(10000, Math.max(100, ...(securityData?.policies || []).map((item) => item.priority + 10))));
+  byId('security-policy-action').value = policy?.action || 'ban';
+  byId('security-policy-duration').value = String(policy?.ban_duration_seconds || 21600);
+  byId('security-policy-enabled').checked = policy ? Boolean(policy.enabled) : true;
+  byId('security-policy-pattern').value = policy?.pattern || defaultSecurityPolicyPattern;
+  setSecurityPolicyError();
+  syncSecurityPolicyDuration();
+  byId('security-policy-dialog').showModal();
+  byId('security-policy-name').focus();
+}
+
+function closeSecurityPolicy() {
+  if (byId('security-policy-dialog').open) byId('security-policy-dialog').close();
+}
+
+function securityPolicyPayload() {
+  const action = byId('security-policy-action').value;
+  return {
+    name: byId('security-policy-name').value,
+    enabled: byId('security-policy-enabled').checked,
+    pattern: byId('security-policy-pattern').value,
+    action,
+    ban_duration_seconds: action === 'ban' ? Number(byId('security-policy-duration').value) : 0,
+    priority: Number(byId('security-policy-priority').value),
+  };
 }
 
 async function refresh() {
@@ -1625,6 +1780,10 @@ function activateRoute(route, { forceForm = false, focus = true } = {}) {
   const previousRoute = activeRoute;
   const routeChanged = routeKey(previousRoute) !== routeKey(route);
   if (previousRoute.view === 'logs' && route.view !== 'logs' && logRequestController) cancelLogSearch();
+  if (previousRoute.view === 'security' && route.view !== 'security') {
+    window.clearTimeout(securityPollTimer);
+    securityPollTimer = null;
+  }
   activeRoute = route;
   const restoreSidebarFocus = sidebarOpen();
   document.querySelectorAll('.nav').forEach((button) => {
@@ -1635,6 +1794,7 @@ function activateRoute(route, { forceForm = false, focus = true } = {}) {
   document.querySelectorAll('.view').forEach((section) => section.classList.toggle('hidden', section.id !== route.view));
   if (route.view === 'overview') renderOverviewRoute(route, { routeChanged });
   if (route.view === 'logs') renderLogsRoute({ routeChanged });
+  if (route.view === 'security') renderSecurityRoute({ routeChanged });
   if (route.view === 'sites') renderSiteRoute(route, { populateForm: forceForm || routeChanged, routeChanged });
   if (route.view === 'settings') renderSettingsRoute({ routeChanged });
   const site = route.view === 'sites' && route.page === 'detail' ? sites.find((item) => item.id === route.siteID) : null;
@@ -1646,6 +1806,7 @@ function activateRoute(route, { forceForm = false, focus = true } = {}) {
     if (route.view === 'sites' && route.page !== 'list') window.requestAnimationFrame(() => byId('site-detail-title').focus());
     if (route.view === 'overview' && route.page === 'site-analytics') window.requestAnimationFrame(() => byId('overview-site-title').focus());
     if (route.view === 'logs') window.requestAnimationFrame(() => byId('logs-title').focus());
+    if (route.view === 'security') window.requestAnimationFrame(() => byId('security-title').focus());
     if (route.view === 'settings') window.requestAnimationFrame(() => byId('settings-title').focus());
   }
 }
@@ -1750,11 +1911,13 @@ byId('logout').addEventListener('click', async () => {
     window.clearTimeout(certificatePollTimer);
     window.clearTimeout(publishPollTimer);
     window.clearTimeout(siteDeletePollTimer);
+    window.clearTimeout(securityPollTimer);
     closeNodeUninstall();
     closeSiteDelete();
     certificatePollTimer = null;
     publishPollTimer = null;
     siteDeletePollTimer = null;
+    securityPollTimer = null;
     tlsStatuses = new Map();
     publishStatuses = new Map();
     deletionStatuses = new Map();
@@ -1764,6 +1927,8 @@ byId('logout').addEventListener('click', async () => {
     settingsData = null;
     settingsFormReady = false;
     settingsFormBaseline = '';
+    securityData = null;
+    securityDataGeneration += 1;
     overviewLoaded = false;
     overviewData = null;
     csrf = '';
@@ -1786,6 +1951,85 @@ document.addEventListener('keydown', (event) => {
 mobileSidebarQuery.addEventListener('change', syncSidebarMode);
 byId('refresh-overview').addEventListener('click', refreshOverview);
 byId('refresh-site-analytics').addEventListener('click', refreshOverview);
+byId('refresh-security').addEventListener('click', () => {
+  setSecurityState('正在刷新安全状态…');
+  refreshSecurity().catch((error) => setSecurityState(error.message));
+});
+byId('deploy-security').addEventListener('click', async () => {
+  if (securityActionPending) return;
+  securityActionPending = true;
+  securityDataGeneration += 1;
+  byId('deploy-security').disabled = true;
+  try {
+    securityData = await request('/api/security/deploy', { method: 'POST', body: '{}' });
+    renderSecurity();
+    notice('安全策略已重新部署', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    securityActionPending = false;
+    byId('deploy-security').disabled = false;
+  }
+});
+byId('add-security-policy').addEventListener('click', () => openSecurityPolicy());
+byId('close-security-policy').addEventListener('click', closeSecurityPolicy);
+byId('security-policy-action').addEventListener('change', syncSecurityPolicyDuration);
+byId('security-policy-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (securityActionPending || !event.currentTarget.reportValidity()) return;
+  securityActionPending = true;
+  securityDataGeneration += 1;
+  byId('save-security-policy').disabled = true;
+  setSecurityPolicyError();
+  const id = byId('security-policy-id').value;
+  try {
+    securityData = await request(id ? `/api/security/policies/${encodeURIComponent(id)}` : '/api/security/policies', {
+      method: id ? 'PUT' : 'POST', body: JSON.stringify(securityPolicyPayload()),
+    });
+    renderSecurity();
+    closeSecurityPolicy();
+    notice('安全策略已保存并进入边缘部署', true);
+  } catch (error) {
+    setSecurityPolicyError(error.message);
+  } finally {
+    securityActionPending = false;
+    byId('save-security-policy').disabled = false;
+  }
+});
+byId('security-policy-table').addEventListener('click', async (event) => {
+  const button = event.target.closest('button');
+  if (!button?.dataset.id || securityActionPending) return;
+  const policy = securityData?.policies?.find((item) => item.id === button.dataset.id);
+  if (!policy) return;
+  if (button.classList.contains('edit-security-policy')) return openSecurityPolicy(policy);
+  if (!button.classList.contains('delete-security-policy') || !window.confirm(`确定删除策略「${policy.name}」并重新部署吗？`)) return;
+  securityActionPending = true;
+  securityDataGeneration += 1;
+  try {
+    securityData = await request(`/api/security/policies/${encodeURIComponent(policy.id)}`, { method: 'DELETE' });
+    renderSecurity();
+    notice('安全策略已删除', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    securityActionPending = false;
+  }
+});
+byId('security-ban-table').addEventListener('click', async (event) => {
+  const button = event.target.closest('.unban-security-ip');
+  if (!button?.dataset.ip || securityActionPending || !window.confirm(`确定解除 ${button.dataset.ip} 的封禁吗？`)) return;
+  securityActionPending = true;
+  securityDataGeneration += 1;
+  try {
+    securityData = await request(`/api/security/bans/${encodeURIComponent(button.dataset.ip)}`, { method: 'DELETE' });
+    renderSecurity();
+    notice('IP 封禁已解除，边缘节点将在下一轮同步', true);
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    securityActionPending = false;
+  }
+});
 byId('log-time-range').addEventListener('change', toggleLogCustomRange);
 byId('log-search-form').addEventListener('submit', (event) => {
   event.preventDefault();

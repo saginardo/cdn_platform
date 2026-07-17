@@ -104,6 +104,12 @@ else
   systemctl stop cdn-edge-agent.service >/dev/null 2>&1 || true
 fi
 
+# The agent owns only this dedicated table. Leave all distribution and
+# operator-managed firewall tables untouched.
+if command -v nft >/dev/null 2>&1 && nft list table inet cdn_platform >/dev/null 2>&1; then
+  nft delete table inet cdn_platform >/dev/null
+fi
+
 nginx_config=$(root_path /etc/nginx/conf.d/cdn-platform.conf)
 nginx_stream_entry=$(root_path /etc/nginx/modules-enabled/99-cdn-platform-stream.conf)
 if [[ -e "$nginx_config" ]]; then

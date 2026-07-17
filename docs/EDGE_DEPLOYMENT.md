@@ -20,7 +20,11 @@ Edge nodes use the Debian Nginx package and a host systemd service. Docker is no
     access-log-offset
     active-upgrade-task
     upgrades/                    # transient online-upgrade state
+    security-bans.json
+    security-event-queue.json
+    security-log-offset
   logs/access.json
+  logs/security.json
   cache/
   systemd/cdn-edge-agent.service
   systemd/cdn-edge-updater@.service
@@ -35,7 +39,7 @@ Two system integration links remain outside this root because systemd and the De
 /etc/nginx/modules-enabled/99-cdn-platform-stream.conf
 ```
 
-The second Nginx integration file owns a top-level `stream { include ...; }` block; HTTP virtual hosts remain in `conf.d`. The installer adds Debian's `libnginx-mod-stream` package. Nginx itself, its global configuration, system error log, and the agent journal remain managed by Debian. The agent runs as root because it atomically writes site certificates and both generated configurations, validates Nginx, and reloads the service. Nginx cache files are owned by `www-data`.
+The second Nginx integration file owns a top-level `stream { include ...; }` block; HTTP virtual hosts remain in `conf.d`. The installer adds Debian's `libnginx-mod-stream` and `nftables` packages. Nginx itself, its global configuration, system error log, and the agent journal remain managed by Debian. The agent runs as root because it atomically writes site certificates and both generated configurations, validates and reloads Nginx, and manages the isolated `inet cdn_platform` firewall table. Nginx cache files are owned by `www-data`.
 
 ## Fresh installation and upgrades
 
@@ -47,7 +51,7 @@ The installer is idempotent and recognizes these states:
 - Legacy deployment: migrates `/usr/local/bin/cdn-edge-agent`, `/etc/cdn-platform`, `/var/lib/cdn-platform`, `/var/log/cdn-platform`, `/var/cache/cdn-platform`, the Nginx include, and the systemd unit.
 - Existing `/opt/cdn-edge`: replaces the checksum-verified binary and service definition, adds the stream integration when missing, and preserves configuration data, identity, logs, and cache.
 
-The installed environment advertises `tcp_stream_v1` and `online_upgrade_v1` in every authenticated heartbeat. The controller refuses to publish a TCP rule to a node until the stream capability is present, so deploying a newer controller does not send stream state to an older Agent. Rerun the node's generated deployment/upgrade command before its first TCP publication.
+The installed environment advertises `tcp_stream_v1`, `online_upgrade_v1`, and, when nftables is available, `edge_security_v1` in every authenticated heartbeat. The controller refuses to publish a TCP rule to a node until the stream capability is present and only renders access security policies for nodes with the security capability. Rerun the node's generated deployment/upgrade command before its first TCP or security publication.
 
 For a node that already has a control-plane certificate fingerprint, the generated upgrade command contains no new enrollment token. The installer requires the complete local mTLS key/certificate/CA set instead. This preserves the node identity and avoids leaving an unused valid enrollment token after an upgrade.
 

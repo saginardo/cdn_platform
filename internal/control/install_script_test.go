@@ -16,6 +16,9 @@ func TestInstallEdgeScriptSyntax(t *testing.T) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("bash -n: %v\n%s", err, output)
 	}
+	if !strings.Contains(bootstrapEdgeScript, "iproute2 nftables") {
+		t.Fatal("edge installer does not install nftables")
+	}
 }
 
 func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
@@ -57,6 +60,7 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 		"NGINX_STREAM_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-stream.conf",
 		"EDGE_CERT_DIR=/opt/cdn-edge/config/certs",
 		"EDGE_ACCESS_LOG=/opt/cdn-edge/logs/access.json",
+		"EDGE_SECURITY_LOG=/opt/cdn-edge/logs/security.json",
 		"EDGE_CAPABILITIES=tcp_stream_v1",
 	} {
 		if !strings.Contains(environment, expected) {

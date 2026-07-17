@@ -62,6 +62,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 - 边缘自有文件统一位于 `/opt/cdn-edge`：`bin/`、`config/`、`data/`、`logs/`、`cache/` 和 `systemd/`。系统路径仅保留 systemd 与 Nginx 的发现链接；Nginx 包、全局配置和 journald 仍由 Debian 管理。
 - Agent 默认每 30 秒拉取一次状态；配置或证书写入采用原子替换，先执行 `nginx -t`，仅在成功时 reload，失败会恢复上一个已知可用版本。
 - Agent 上报自身 SHA-256 和 `online_upgrade_v1` 能力；主控可对单节点下发当前制品，独立 updater 在替换主进程后等待新 Agent 完成 mTLS 心跳，失败恢复旧二进制和 systemd/Nginx 集成。
+- 安全工作台管理全局请求路径策略、活动 IP 封禁和最近命中；Nginx 在回源前按正则返回 444，Agent 使用自有 nftables 表即时封禁 80/443，并通过 mTLS 在节点间同步和自动过期。
 - Nginx 为每个站点生成独立 `server` 和 `upstream`：80 强制跳转 HTTPS，443 使用 TLS 1.2/1.3，并通过独立的 `http2 on` 指令启用 HTTP/2。
 - CDN 业务 HTTPS server 显式使用 `keepalive_timeout 300s` 和 `keepalive_requests 1000`；每个 upstream、每个 worker 的空闲回源连接池为 `keepalive 30`，HTTP/gRPC 回源连接超时统一为 10 秒。普通 HTTP 代理显式清空 `Upgrade`/`Connection`，确保 HTTP/1.1 上游连接可以复用；WebSocket、SSE 和 POST 由请求特征自动进入独立无缓存分支。
 
@@ -95,6 +96,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 
 - 概览：节点数、运行节点数、站点数、最近 24 小时请求量/传输量/错误率/状态码；站点请求趋势条目可进入独立分析页，查看站点请求量、传输量、错误汇总、状态码分布和分时折线图。
 - 日志：从左侧导航进入，默认检索全部站点最近 1 小时原始日志，支持时间、站点、节点、方法、状态码、路径、客户端 IP、缓存状态筛选和每页 100 条手动分页；原始日志保留 7 天。
+- 安全：全局访问策略增删改、内置敏感文件扫描规则、拦截/IP 封禁动作、1/6/12/24 小时档位、节点能力覆盖、活动封禁解封和最近命中查看。
 - 节点：创建、生成幂等部署/升级命令、按节点在线升级、代理制品摘要与进度查看、暂停/启用调度、撤销/重新启用、心跳与应用版本查看。
 - 站点：创建、编辑、节点分配、主/备源站、独立回源 TLS SNI、回源读写空闲超时、整站透传开关、发布、申请 TLS、缓存刷新、源站 CIDR 查看，以及输入站点名确认的安全删除流程。
 - 站点列表采用紧凑工作台布局，仅展示节点、TLS 与发布状态，并保留发布和管理入口；创建、编辑、协议、缓存、请求体、超时、TLS、缓存刷新和源站 CIDR 均集中在独立二级页面。
@@ -146,6 +148,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 12. Nginx reload 假成功：旧目录迁移改变 `cdn_cache` 路径时改为冷重启；Agent reload 后必须观察到新 worker 才确认应用成功，否则回滚且不推进 applied version。根因、restart 边界和验收命令见 [NGINX_APPLY_SAFETY.md](NGINX_APPLY_SAFETY.md)。
 13. 站点级访问健康：控制面除节点 HTTP 探测外，新增直连节点 443、保留真实域名 Host/SNI 并校验证书和站点专属响应体的检查；按站点和节点独立执行 3 次失败摘除、5 次成功恢复，避免端口正常但虚拟主机仍错误时继续把该节点视为健康。
 14. Edge 在线升级：节点页按代理 SHA-256 判断是否落后，通过 mTLS 下发单节点任务；制品预检、独立 systemd updater、新代理心跳 readiness、持久化结果补报和失败回滚组成完整闭环。存量旧代理需最后手动升级一次以获得该能力。
+15. 通用访问安全：控制端持久化有序正则策略，Nginx 命中后在回源前关闭请求；边缘 Agent 将公网 IPv4 写入带超时的 nftables 集合，本地先执行、控制端校验记录、全节点同步，并提供手动解封。
 
 ## 7. 当前问题、风险与下一步
 

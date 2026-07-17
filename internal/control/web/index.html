@@ -10,7 +10,7 @@
     <main class="shell">
       <section id="boot-shell" class="boot-shell" role="status" aria-live="polite" aria-busy="true">
         <div class="boot-status">
-          <div class="boot-brand"><span class="brand">CDN Platform</span><span class="tag">控制面</span></div>
+          <div class="boot-brand brand-lockup"><span class="brand-emblem"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#globe"></use></svg></span><span><span class="brand">CDN Platform</span><span class="tag">控制面</span></span></div>
           <span class="boot-spinner" aria-hidden="true"></span>
           <span class="boot-label">正在验证登录状态</span>
         </div>
@@ -18,7 +18,7 @@
 
       <section id="auth-shell" class="auth-shell hidden">
         <header class="auth-header">
-          <span class="brand">CDN Platform</span><span class="tag">控制面</span>
+          <span class="brand-emblem"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#globe"></use></svg></span><span class="brand">CDN Platform</span><span class="tag">控制面</span>
         </header>
         <div id="auth-notice" class="auth-notice" role="status" aria-live="polite"></div>
 
@@ -47,25 +47,25 @@
       <section id="app" class="console-shell hidden">
         <aside id="sidebar" class="sidebar" aria-label="控制台导航">
           <div class="sidebar-heading">
-            <div><span class="brand">CDN Platform</span><span class="tag">控制面</span></div>
-            <button id="sidebar-close" class="sidebar-close" type="button" aria-label="关闭导航"><span aria-hidden="true">&times;</span></button>
+            <div class="brand-lockup"><span class="brand-emblem"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#globe"></use></svg></span><span><span class="brand">CDN Platform</span><span class="tag">控制面</span></span></div>
+            <button id="sidebar-close" class="sidebar-close icon-button" type="button" title="关闭导航" aria-label="关闭导航"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#panel-left-close"></use></svg></button>
           </div>
           <nav class="side-nav" aria-label="主导航">
-            <button class="nav active" data-view="overview">概览</button>
-            <button class="nav" data-view="logs">日志</button>
-            <button class="nav" data-view="security">安全</button>
-            <button class="nav" data-view="nodes">节点</button>
-            <button class="nav" data-view="sites">站点</button>
-            <button class="nav" data-view="settings">设置</button>
+            <button class="nav active" data-view="overview"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#layout-dashboard"></use></svg><span>概览</span></button>
+            <button class="nav" data-view="logs"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#scroll-text"></use></svg><span>日志</span></button>
+            <button class="nav" data-view="security"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#shield-check"></use></svg><span>安全</span></button>
+            <button class="nav" data-view="nodes"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#server"></use></svg><span>节点</span></button>
+            <button class="nav" data-view="sites"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#globe"></use></svg><span>站点</span></button>
+            <button class="nav" data-view="settings"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#settings"></use></svg><span>设置</span></button>
           </nav>
-          <button id="logout" class="sidebar-logout secondary hidden" title="退出登录">退出登录</button>
+          <button id="logout" class="sidebar-logout secondary hidden" title="退出登录"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#log-out"></use></svg><span>退出</span></button>
         </aside>
         <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" tabindex="-1" aria-label="关闭导航"></button>
 
         <div class="workspace">
           <header class="mobile-bar">
             <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-controls="sidebar" aria-expanded="false" aria-label="打开导航">
-              <span class="menu-icon" aria-hidden="true"><span></span><span></span><span></span></span>
+              <svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#panel-left-open"></use></svg>
             </button>
             <div class="mobile-title"><span class="mobile-brand">CDN Platform</span><span id="mobile-page-title">概览</span></div>
           </header>
@@ -84,8 +84,8 @@
                     <span class="range-label">最近 24 小时</span>
                     <span id="overview-updated">等待加载</span>
                   </div>
-                  <button id="refresh-overview" class="secondary" type="button" title="刷新概览数据">
-                    <span class="refresh-mark" aria-hidden="true">↻</span><span>刷新</span>
+                  <button id="refresh-overview" class="secondary icon-button" type="button" title="刷新概览数据" aria-label="刷新概览数据">
+                    <svg class="icon refresh-mark" aria-hidden="true"><use href="/lucide-icons.svg#refresh-cw"></use></svg>
                   </button>
                 </div>
               </div>
@@ -130,12 +130,12 @@
                     <span id="overview-site-count" class="overview-site-count">0 个站点</span>
                   </div>
                   <div class="table-wrap overview-site-table-wrap">
-                    <table class="overview-site-table">
+                    <table class="overview-site-table responsive-table" data-table="overview-sites">
                       <thead id="overview-site-sort-head">
                         <tr>
-                          <th scope="col" aria-sort="none"><button class="overview-sort-button" type="button" data-overview-sort="name" data-sort-label="站点" aria-label="按站点升序排序"><span>站点</span><span class="overview-sort-indicator" aria-hidden="true">↕</span></button></th>
-                          <th scope="col" aria-sort="descending"><button class="overview-sort-button is-active" type="button" data-overview-sort="requests" data-sort-label="请求总量" aria-label="按请求总量升序排序"><span>请求总量</span><span class="overview-sort-indicator" aria-hidden="true">↓</span></button></th>
-                          <th scope="col" aria-sort="none"><button class="overview-sort-button" type="button" data-overview-sort="bytes" data-sort-label="传输量" aria-label="按传输量降序排序"><span>传输量</span><span class="overview-sort-indicator" aria-hidden="true">↕</span></button></th>
+                          <th scope="col" aria-sort="none"><button class="overview-sort-button" type="button" data-overview-sort="name" data-sort-label="站点" aria-label="按站点升序排序"><span>站点</span><span class="overview-sort-indicator" aria-hidden="true"><svg class="icon"><use href="/lucide-icons.svg#arrow-up-down"></use></svg></span></button></th>
+                          <th scope="col" aria-sort="descending"><button class="overview-sort-button is-active" type="button" data-overview-sort="requests" data-sort-label="请求总量" aria-label="按请求总量升序排序"><span>请求总量</span><span class="overview-sort-indicator" aria-hidden="true"><svg class="icon"><use href="/lucide-icons.svg#arrow-down"></use></svg></span></button></th>
+                          <th scope="col" aria-sort="none"><button class="overview-sort-button" type="button" data-overview-sort="bytes" data-sort-label="传输量" aria-label="按传输量降序排序"><span>传输量</span><span class="overview-sort-indicator" aria-hidden="true"><svg class="icon"><use href="/lucide-icons.svg#arrow-up-down"></use></svg></span></button></th>
                           <th scope="col">24 小时请求趋势</th>
                         </tr>
                       </thead>
@@ -149,15 +149,15 @@
               <div id="overview-site-detail-page" class="overview-site-detail-page hidden">
                 <header class="analytics-detail-header">
                   <div class="analytics-detail-heading">
-                    <button id="overview-site-back" class="analytics-detail-back secondary" type="button" aria-label="返回概览"><span aria-hidden="true">←</span><span>概览</span></button>
+                    <button id="overview-site-back" class="analytics-detail-back secondary icon-button" type="button" title="返回概览" aria-label="返回概览"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#arrow-left"></use></svg></button>
                     <div class="analytics-detail-title-wrap">
                       <h1 id="overview-site-title" tabindex="-1">站点请求详情</h1>
                       <p id="overview-site-meta" class="section-meta">最近 24 小时</p>
                     </div>
                   </div>
                   <div class="analytics-detail-actions">
-                    <button id="refresh-site-analytics" class="secondary" type="button"><span class="refresh-mark" aria-hidden="true">↻</span><span>刷新</span></button>
-                    <button id="overview-site-manage" type="button">管理站点</button>
+                    <button id="refresh-site-analytics" class="secondary icon-button" type="button" title="刷新站点分析" aria-label="刷新站点分析"><svg class="icon refresh-mark" aria-hidden="true"><use href="/lucide-icons.svg#refresh-cw"></use></svg></button>
+                    <button id="overview-site-manage" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#settings-2"></use></svg><span>管理站点</span></button>
                   </div>
                 </header>
 
@@ -199,7 +199,7 @@
               <div class="logs-page">
                 <div class="section-heading logs-heading">
                   <div class="heading-copy"><h1 id="logs-title" tabindex="-1">日志</h1><p class="section-meta">原始请求日志 · 保留 7 天</p></div>
-                  <button id="refresh-logs" class="secondary" type="button"><span class="refresh-mark" aria-hidden="true">↻</span><span>刷新</span></button>
+                  <button id="refresh-logs" class="secondary icon-button" type="button" title="刷新日志" aria-label="刷新日志"><svg class="icon refresh-mark" aria-hidden="true"><use href="/lucide-icons.svg#refresh-cw"></use></svg></button>
                 </div>
 
                 <form id="log-search-form" class="log-search-form">
@@ -257,8 +257,8 @@
                     </label>
                   </div>
                   <div class="log-search-actions">
-                    <button id="log-search-submit" type="submit">检索</button>
-                    <button id="log-search-reset" class="secondary" type="button">重置</button>
+                    <button id="log-search-submit" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#search"></use></svg><span>检索</span></button>
+                    <button id="log-search-reset" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rotate-ccw"></use></svg><span>重置</span></button>
                   </div>
                 </form>
 
@@ -266,15 +266,15 @@
                 <div id="log-results-content" class="log-results-content hidden">
                   <div class="log-results-heading"><p id="log-results-meta" class="section-meta"></p></div>
                   <div class="table-wrap log-table-wrap">
-                    <table class="log-table">
+                    <table class="log-table responsive-table" data-table="logs">
                       <thead><tr><th scope="col">时间</th><th scope="col">站点 / 节点</th><th scope="col">请求</th><th scope="col">状态</th><th scope="col">客户端 IP</th><th scope="col">传输 / 耗时</th><th scope="col">缓存</th><th scope="col">源站</th></tr></thead>
                       <tbody id="log-table"></tbody>
                     </table>
                   </div>
                   <div class="log-pagination" aria-label="日志分页">
-                    <button id="log-prev" class="secondary" type="button">上一页</button>
+                    <button id="log-prev" class="secondary icon-button" type="button" title="上一页" aria-label="上一页"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#chevron-left"></use></svg></button>
                     <span id="log-page-label">第 1 页</span>
-                    <button id="log-next" class="secondary" type="button">下一页</button>
+                    <button id="log-next" class="secondary icon-button" type="button" title="下一页" aria-label="下一页"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#chevron-right"></use></svg></button>
                   </div>
                 </div>
               </div>
@@ -284,32 +284,32 @@
               <div id="node-list-page">
                 <div class="section-heading node-heading">
                   <div class="heading-copy"><h1>节点</h1><p id="node-list-meta" class="section-meta">0 个节点</p></div>
-                  <button id="show-node-form" type="button">添加节点</button>
+                  <button id="show-node-form" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#plus"></use></svg><span>添加节点</span></button>
                 </div>
                 <form id="node-form" class="form-grid hidden">
                   <label>名称 <input id="node-name" required placeholder="sg-edge-01"></label>
                   <label>公网 IPv4 <input id="node-ip" required placeholder="203.0.113.10"></label>
-                  <div><button type="submit">创建节点</button><button type="button" class="secondary cancel">取消</button></div>
+                  <div class="form-actions"><button type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#plus"></use></svg><span>创建</span></button><button type="button" class="secondary cancel"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg><span>取消</span></button></div>
                 </form>
-                <div class="table-wrap node-table-wrap"><table class="node-list-table"><thead><tr><th scope="col">名称</th><th scope="col">IPv4</th><th scope="col">状态</th><th scope="col">代理版本</th><th scope="col">最近心跳</th><th scope="col">站点</th><th scope="col">操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
+                <div class="table-wrap node-table-wrap"><table class="node-list-table responsive-table" data-table="nodes"><thead><tr><th scope="col">名称</th><th scope="col">IPv4</th><th scope="col">状态</th><th scope="col">代理版本</th><th scope="col">最近心跳</th><th scope="col">站点</th><th scope="col">操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
               </div>
 
               <div id="node-detail-page" class="node-detail-page hidden">
                 <header class="node-detail-header">
                   <div class="node-detail-heading">
-                    <button id="node-detail-back" class="secondary node-detail-back" type="button"><span aria-hidden="true">←</span><span>节点</span></button>
+                    <button id="node-detail-back" class="secondary node-detail-back icon-button" type="button" title="返回节点列表" aria-label="返回节点列表"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#arrow-left"></use></svg></button>
                     <div class="node-detail-title-wrap">
                       <div class="node-detail-title-line"><h1 id="node-detail-title" tabindex="-1">节点详情</h1><span id="node-detail-status" class="status pending">--</span></div>
                       <p id="node-detail-meta" class="section-meta"></p>
                     </div>
                   </div>
-                  <button id="refresh-node-detail" class="secondary" type="button">刷新状态</button>
+                  <button id="refresh-node-detail" class="secondary icon-button" type="button" title="刷新节点状态" aria-label="刷新节点状态"><svg class="icon refresh-mark" aria-hidden="true"><use href="/lucide-icons.svg#refresh-cw"></use></svg></button>
                 </header>
                 <div id="node-detail-state" class="node-detail-state hidden" role="status" aria-live="polite"></div>
                 <div id="node-detail-missing" class="node-detail-missing hidden">
                   <h2>未找到节点</h2>
                   <p>节点可能已被删除，或当前链接已失效。</p>
-                  <button id="node-missing-back" class="secondary" type="button">返回节点列表</button>
+                  <button id="node-missing-back" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#arrow-left"></use></svg><span>返回节点</span></button>
                 </div>
                 <div id="node-detail-content" class="hidden">
                   <dl class="node-detail-summary">
@@ -322,7 +322,7 @@
                   </dl>
                   <div id="node-detail-error" class="node-detail-alert hidden" role="alert"></div>
 
-                  <section class="node-detail-section" aria-labelledby="node-cache-heading">
+                  <section id="node-cache-section" class="node-detail-section" aria-labelledby="node-cache-heading">
                     <div class="node-detail-section-heading">
                       <div><h2 id="node-cache-heading">缓存状态</h2><p id="node-cache-window" class="section-meta">最近 24 小时</p></div>
                       <span id="node-cache-total" class="node-cache-total">--</span>
@@ -342,13 +342,13 @@
                     <div id="node-cache-status-list" class="node-cache-status-list hidden"></div>
                   </section>
 
-                  <section class="node-detail-section" aria-labelledby="node-sites-heading">
+                  <section id="node-sites-section" class="node-detail-section" aria-labelledby="node-sites-heading">
                     <div class="node-detail-section-heading"><div><h2 id="node-sites-heading">分配站点</h2><p id="node-sites-meta" class="section-meta">0 个站点</p></div></div>
                     <div id="node-sites-empty" class="node-detail-empty hidden">当前没有站点分配到此节点。</div>
-                    <div id="node-sites-table-wrap" class="table-wrap"><table class="node-sites-table"><thead><tr><th scope="col">站点</th><th scope="col">域名</th><th scope="col">发布状态</th><th scope="col">缓存</th></tr></thead><tbody id="node-sites-table"></tbody></table></div>
+                    <div id="node-sites-table-wrap" class="table-wrap"><table class="node-sites-table responsive-table" data-table="node-sites"><thead><tr><th scope="col">站点</th><th scope="col">域名</th><th scope="col">发布状态</th><th scope="col">缓存</th></tr></thead><tbody id="node-sites-table"></tbody></table></div>
                   </section>
 
-                  <section class="node-detail-section node-operations" aria-labelledby="node-operations-heading">
+                  <section id="node-operations-section" class="node-detail-section node-operations" aria-labelledby="node-operations-heading">
                     <div class="node-detail-section-heading"><div><h2 id="node-operations-heading">节点操作</h2><p class="section-meta">部署、调度与生命周期</p></div></div>
                     <div class="node-operation-list">
                       <div class="node-operation">
@@ -376,7 +376,7 @@
           <dialog id="node-upgrade-dialog" aria-labelledby="node-upgrade-title">
             <div class="dialog-header">
               <div><h2 id="node-upgrade-title">在线升级</h2><p id="node-upgrade-meta" class="section-meta"></p></div>
-              <button id="close-node-upgrade" type="button" class="secondary" aria-label="关闭">关闭</button>
+              <button id="close-node-upgrade" type="button" class="secondary icon-button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
             </div>
             <dl class="upgrade-facts">
               <div><dt>当前制品</dt><dd><code id="node-upgrade-current">--</code></dd></div>
@@ -385,14 +385,14 @@
             <div id="node-upgrade-state" class="uninstall-state" role="status" aria-live="polite"></div>
             <p id="node-upgrade-error" class="dialog-error hidden" role="alert"></p>
             <div class="dialog-actions">
-              <button id="start-node-upgrade" type="button" class="hidden">开始升级</button>
+              <button id="start-node-upgrade" type="button" class="hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#upload"></use></svg><span>开始升级</span></button>
             </div>
           </dialog>
 
           <dialog id="node-uninstall-dialog" aria-labelledby="node-uninstall-title">
             <div class="dialog-header">
               <div><h2 id="node-uninstall-title">卸载节点</h2><p id="node-uninstall-meta" class="section-meta"></p></div>
-              <button id="close-node-uninstall" type="button" class="secondary" aria-label="关闭">关闭</button>
+              <button id="close-node-uninstall" type="button" class="secondary icon-button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
             </div>
             <div id="node-uninstall-state" class="uninstall-state"></div>
             <div id="node-uninstall-scope" class="uninstall-scope hidden"><strong>远端清理范围</strong><span>边缘代理、平台配置、数据、日志、缓存及平台 Nginx 配置；保留 Nginx 本身和其他配置。</span></div>
@@ -405,12 +405,12 @@
               <input id="node-uninstall-confirm" autocomplete="off">
             </label>
             <div class="dialog-actions">
-              <button id="pause-node-for-uninstall" type="button" class="secondary hidden">暂停调度</button>
-              <button id="prepare-node-uninstall" type="button" class="danger hidden">开始卸载准备</button>
-              <button id="generate-node-uninstall-command" type="button" class="danger hidden">生成卸载命令</button>
-              <button id="cancel-node-uninstall" type="button" class="secondary hidden">取消卸载</button>
-              <button id="force-node-uninstall" type="button" class="danger hidden">强制完成（不清理远端）</button>
-              <button id="delete-node-record" type="button" class="danger hidden">删除记录</button>
+              <button id="pause-node-for-uninstall" type="button" class="secondary hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#pause"></use></svg><span>暂停调度</span></button>
+              <button id="prepare-node-uninstall" type="button" class="danger hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#package-x"></use></svg><span>准备卸载</span></button>
+              <button id="generate-node-uninstall-command" type="button" class="danger hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#terminal"></use></svg><span>生成命令</span></button>
+              <button id="cancel-node-uninstall" type="button" class="secondary hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg><span>取消卸载</span></button>
+              <button id="force-node-uninstall" type="button" class="danger hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#package-x"></use></svg><span>强制完成</span></button>
+              <button id="delete-node-record" type="button" class="danger hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#trash-2"></use></svg><span>删除记录</span></button>
             </div>
           </dialog>
             </section>
@@ -419,7 +419,7 @@
               <div id="site-list-page">
                 <div class="section-heading site-heading">
                   <div class="heading-copy"><h1>站点</h1><p id="site-list-meta" class="section-meta">0 个站点</p></div>
-                  <button id="show-site-form" type="button">添加站点</button>
+                  <button id="show-site-form" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#plus"></use></svg><span>添加站点</span></button>
                 </div>
                 <div id="site-table" class="site-list" aria-live="polite"></div>
               </div>
@@ -427,19 +427,19 @@
               <div id="site-detail-page" class="site-detail-page hidden">
                 <header class="site-detail-header">
                   <div class="site-detail-heading">
-                    <button id="site-detail-back" class="site-detail-back secondary" type="button" aria-label="返回站点列表"><span aria-hidden="true">←</span><span>站点</span></button>
+                    <button id="site-detail-back" class="site-detail-back secondary icon-button" type="button" title="返回站点列表" aria-label="返回站点列表"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#arrow-left"></use></svg></button>
                     <div class="site-detail-title-wrap">
                       <div class="site-detail-title-line"><h1 id="site-detail-title" tabindex="-1">添加站点</h1><span id="site-detail-state"></span></div>
                       <p id="site-detail-meta" class="section-meta">创建新的站点配置</p>
                     </div>
                   </div>
-                  <button id="site-detail-publish" class="publish hidden" type="button">发布</button>
+                  <button id="site-detail-publish" class="publish hidden" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rocket"></use></svg><span>发布</span></button>
                 </header>
 
                 <div id="site-detail-missing" class="site-detail-missing hidden" role="status">
                   <h2>未找到站点</h2>
                   <p>该站点可能已被删除，或链接中的站点 ID 无效。</p>
-                  <button id="site-missing-back" class="secondary" type="button">返回站点列表</button>
+                  <button id="site-missing-back" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#arrow-left"></use></svg><span>返回站点</span></button>
                 </div>
 
                 <div id="site-detail-editor">
@@ -514,7 +514,7 @@
 					<section class="site-form-section" aria-labelledby="site-tcp-title">
 					  <div class="site-form-section-heading tcp-section-heading">
 						<h2 id="site-tcp-title">TCP 转发</h2>
-						<button id="add-tcp-forward" class="small secondary" type="button"><span aria-hidden="true">+</span><span>添加端口</span></button>
+						<button id="add-tcp-forward" class="small secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#plus"></use></svg><span>添加端口</span></button>
 					  </div>
 					  <div id="site-tcp-forward-list" class="tcp-forward-list"></div>
 					</section>
@@ -524,7 +524,7 @@
                       <fieldset class="node-assignment"><legend>已分配节点</legend><div id="site-node-selector"></div></fieldset>
                     </section>
 
-                    <div class="site-form-actions"><button id="site-submit" type="submit">创建站点</button><button id="site-cancel" type="button" class="secondary">取消</button></div>
+                    <div class="site-form-actions"><button id="site-submit" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#save"></use></svg><span>创建站点</span></button><button id="site-cancel" type="button" class="secondary"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg><span>取消</span></button></div>
                   </form>
 
                   <section id="site-operations" class="site-detail-section site-operations hidden" aria-labelledby="site-operations-title">
@@ -532,19 +532,19 @@
                     <div class="site-operation-list">
 					  <div id="site-tls-operation" class="site-operation">
                         <div><h3>TLS 证书</h3><div id="site-operation-tls" class="site-operation-state">--</div></div>
-                        <button id="site-detail-certificate" class="small secondary certificate" type="button">申请 TLS</button>
+                        <button id="site-detail-certificate" class="small secondary certificate" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#file-key"></use></svg><span>申请 TLS</span></button>
                       </div>
                       <div id="site-cache-operation" class="site-operation">
                         <div><h3>边缘缓存</h3><div id="site-operation-cache" class="site-operation-state">--</div></div>
-                        <button id="site-detail-invalidate" class="small secondary invalidate" type="button">刷新缓存</button>
+                        <button id="site-detail-invalidate" class="small secondary invalidate" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#database-zap"></use></svg><span>刷新缓存</span></button>
                       </div>
                       <div class="site-operation site-operation-allowlist">
                         <div><h3>源站 CIDR</h3><div class="site-operation-state">边缘节点 IPv4 白名单</div></div>
-                        <button id="site-detail-allowlist" class="small secondary allowlist" type="button" aria-expanded="false">查看 CIDR</button>
+                        <button id="site-detail-allowlist" class="small secondary allowlist" type="button" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#cloud"></use></svg><span>源站 CIDR</span></button>
                       </div>
                       <div class="site-operation site-operation-danger">
                         <div><h3>删除站点</h3><div id="site-operation-delete" class="site-operation-state">撤销托管 DNS，并从边缘节点移除配置和证书</div></div>
-                        <button id="site-detail-delete" class="small danger" type="button">删除站点</button>
+                        <button id="site-detail-delete" class="small danger" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#trash-2"></use></svg><span>删除站点</span></button>
                       </div>
                     </div>
                     <pre id="site-allowlist" class="secret hidden"></pre>
@@ -555,7 +555,7 @@
               <dialog id="site-delete-dialog" aria-labelledby="site-delete-title">
                 <div class="dialog-header">
                   <div><h2 id="site-delete-title">删除站点</h2><p id="site-delete-meta" class="section-meta"></p></div>
-                  <button id="close-site-delete" type="button" class="secondary" aria-label="关闭">关闭</button>
+                  <button id="close-site-delete" type="button" class="secondary icon-button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
                 </div>
                 <div id="site-delete-state" class="uninstall-state"></div>
                 <div class="uninstall-scope"><strong>清理范围</strong><span>托管 DNS、边缘 Nginx 配置与站点证书、控制面 Certbot lineage 和站点元数据。</span></div>
@@ -566,7 +566,7 @@
                   <input id="site-delete-confirm" autocomplete="off">
                 </label>
                 <div class="dialog-actions">
-                  <button id="confirm-site-delete" type="button" class="danger">开始安全删除</button>
+                  <button id="confirm-site-delete" type="button" class="danger"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#trash-2"></use></svg><span>开始安全删除</span></button>
                 </div>
               </dialog>
             </section>
@@ -575,10 +575,10 @@
               <div class="section-heading security-heading">
                 <div class="heading-copy"><h1 id="security-title" tabindex="-1">安全</h1><p id="security-meta" class="section-meta">访问策略与边缘封禁</p></div>
                 <div class="security-heading-actions">
-                  <button id="refresh-security" class="secondary" type="button">刷新</button>
-                  <button id="deploy-security" class="secondary" type="button">部署策略</button>
-                  <button id="add-rate-limit-policy" class="secondary" type="button">新增限速策略</button>
-                  <button id="add-security-policy" type="button">新增访问策略</button>
+                  <button id="refresh-security" class="secondary icon-button" type="button" title="刷新安全状态" aria-label="刷新安全状态"><svg class="icon refresh-mark" aria-hidden="true"><use href="/lucide-icons.svg#refresh-cw"></use></svg></button>
+                  <button id="deploy-security" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rocket"></use></svg><span>部署</span></button>
+                  <button id="add-rate-limit-policy" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#gauge"></use></svg><span>限速策略</span></button>
+                  <button id="add-security-policy" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#shield-plus"></use></svg><span>访问策略</span></button>
                 </div>
               </div>
 
@@ -594,27 +594,27 @@
 
                 <section class="security-section" aria-labelledby="security-node-heading">
                   <div class="section-heading"><div><h2 id="security-node-heading">节点部署</h2><p class="section-meta">能力与策略应用版本</p></div></div>
-                  <div class="table-wrap"><table class="security-table"><thead><tr><th>节点</th><th>状态</th><th>安全能力</th><th>期望版本</th><th>已应用版本</th><th>结果</th></tr></thead><tbody id="security-node-table"></tbody></table></div>
+                  <div class="table-wrap"><table class="security-table responsive-table" data-table="security-nodes"><thead><tr><th>节点</th><th>状态</th><th>安全能力</th><th>期望版本</th><th>已应用版本</th><th>结果</th></tr></thead><tbody id="security-node-table"></tbody></table></div>
                 </section>
 
                 <section class="security-section" aria-labelledby="security-policy-heading">
                   <div class="section-heading"><div><h2 id="security-policy-heading">通用访问策略</h2><p class="section-meta">按优先级匹配规范化请求路径</p></div></div>
-                  <div class="table-wrap"><table class="security-table"><thead><tr><th>策略</th><th>匹配表达式</th><th>动作</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead><tbody id="security-policy-table"></tbody></table></div>
+                  <div class="table-wrap"><table class="security-table responsive-table" data-table="security-policies"><thead><tr><th>策略</th><th>匹配表达式</th><th>动作</th><th>优先级</th><th>状态</th><th>操作</th></tr></thead><tbody id="security-policy-table"></tbody></table></div>
                 </section>
 
                 <section class="security-section" aria-labelledby="rate-limit-policy-heading">
                   <div class="section-heading"><div><h2 id="rate-limit-policy-heading">通用速率限制</h2><p class="section-meta">边缘节点按客户端 IP 执行每秒请求限制</p></div></div>
-                  <div class="table-wrap"><table class="security-table"><thead><tr><th>策略</th><th>计数 Key</th><th>阈值</th><th>响应计数条件</th><th>状态</th><th>操作</th></tr></thead><tbody id="rate-limit-policy-table"></tbody></table></div>
+                  <div class="table-wrap"><table class="security-table responsive-table" data-table="rate-limit-policies"><thead><tr><th>策略</th><th>计数 Key</th><th>阈值</th><th>响应计数条件</th><th>状态</th><th>操作</th></tr></thead><tbody id="rate-limit-policy-table"></tbody></table></div>
                 </section>
 
                 <section class="security-section" aria-labelledby="security-ban-heading">
                   <div class="section-heading"><div><h2 id="security-ban-heading">活动封禁</h2><p class="section-meta">由边缘节点执行，自动到期</p></div></div>
-                  <div class="table-wrap"><table class="security-table"><thead><tr><th>IP</th><th>触发策略</th><th>节点</th><th>请求</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="security-ban-table"></tbody></table></div>
+                  <div class="table-wrap"><table class="security-table responsive-table" data-table="security-bans"><thead><tr><th>IP</th><th>触发策略</th><th>节点</th><th>请求</th><th>到期时间</th><th>操作</th></tr></thead><tbody id="security-ban-table"></tbody></table></div>
                 </section>
 
                 <section class="security-section" aria-labelledby="security-event-heading">
                   <div class="section-heading"><div><h2 id="security-event-heading">最近命中</h2><p class="section-meta">保留 7 天，显示最近 100 条</p></div></div>
-                  <div class="table-wrap"><table class="security-table"><thead><tr><th>时间</th><th>IP</th><th>策略</th><th>节点</th><th>请求</th><th>动作</th></tr></thead><tbody id="security-event-table"></tbody></table></div>
+                  <div class="table-wrap"><table class="security-table responsive-table" data-table="security-events"><thead><tr><th>时间</th><th>IP</th><th>策略</th><th>节点</th><th>请求</th><th>动作</th></tr></thead><tbody id="security-event-table"></tbody></table></div>
                 </section>
               </div>
 
@@ -622,7 +622,7 @@
                 <form id="security-policy-form">
                   <div class="dialog-header">
                     <div><h2 id="security-policy-dialog-title">新增访问策略</h2><p class="section-meta">PCRE 兼容安全子集</p></div>
-                    <button id="close-security-policy" type="button" class="secondary" aria-label="关闭">关闭</button>
+                    <button id="close-security-policy" type="button" class="secondary icon-button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
                   </div>
                   <input id="security-policy-id" type="hidden">
                   <div class="form-grid security-policy-fields">
@@ -638,7 +638,7 @@
                     <label class="security-pattern-field">路径正则 <textarea id="security-policy-pattern" required maxlength="2048" rows="7" spellcheck="false"></textarea></label>
                   </div>
                   <p id="security-policy-error" class="dialog-error hidden" role="alert"></p>
-                  <div class="dialog-actions"><button id="save-security-policy" type="submit">保存并部署</button></div>
+                  <div class="dialog-actions"><button id="save-security-policy" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rocket"></use></svg><span>保存并部署</span></button></div>
                 </form>
               </dialog>
 
@@ -646,7 +646,7 @@
                 <form id="rate-limit-policy-form">
                   <div class="dialog-header">
                     <div><h2 id="rate-limit-policy-dialog-title">新增限速策略</h2><p class="section-meta">边缘本地一秒窗口</p></div>
-                    <button id="close-rate-limit-policy" type="button" class="secondary" aria-label="关闭">关闭</button>
+                    <button id="close-rate-limit-policy" type="button" class="secondary icon-button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
                   </div>
                   <input id="rate-limit-policy-id" type="hidden">
                   <div class="form-grid security-policy-fields">
@@ -666,7 +666,7 @@
                     </fieldset>
                   </div>
                   <p id="rate-limit-policy-error" class="dialog-error hidden" role="alert"></p>
-                  <div class="dialog-actions"><button id="save-rate-limit-policy" type="submit">保存并部署</button></div>
+                  <div class="dialog-actions"><button id="save-rate-limit-policy" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rocket"></use></svg><span>保存并部署</span></button></div>
                 </form>
               </dialog>
             </section>
@@ -677,7 +677,8 @@
                   <div><h1 id="settings-title" tabindex="-1">设置</h1><p class="section-meta">控制面运行参数与外部集成</p></div>
                 </div>
 
-                <form id="dns-settings-form" class="settings-section">
+                <div class="settings-grid">
+                <form id="dns-settings-form" class="settings-section settings-dns-section">
                   <div class="settings-section-heading">
                     <div><h2>DNS</h2><span id="dns-settings-state" class="settings-source">--</span></div>
                   </div>
@@ -686,10 +687,10 @@
                       <input id="settings-dns-ttl" type="number" min="60" max="300" step="1" value="60" inputmode="numeric" required>
                     </label>
                   </div>
-                  <div class="settings-actions"><button id="save-dns-settings" type="submit">保存 DNS 设置</button></div>
+                  <div class="settings-actions"><button id="save-dns-settings" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#save"></use></svg><span>保存 DNS</span></button></div>
                 </form>
 
-                <form id="cloudflare-settings-form" class="settings-section">
+                <form id="cloudflare-settings-form" class="settings-section settings-cloudflare-section">
                   <div class="settings-section-heading">
                     <div><h2>Cloudflare</h2><span id="cloudflare-settings-source" class="settings-source">--</span></div>
                   </div>
@@ -699,13 +700,13 @@
                     </label>
                   </div>
                   <div class="settings-actions">
-                    <button id="save-cloudflare-settings" type="submit">验证并保存</button>
-                    <button id="test-cloudflare-settings" class="secondary" type="button">验证当前配置</button>
-                    <button id="reset-cloudflare-settings" class="secondary" type="button">恢复环境变量</button>
+                    <button id="save-cloudflare-settings" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#save"></use></svg><span>验证并保存</span></button>
+                    <button id="test-cloudflare-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#shield-check"></use></svg><span>验证配置</span></button>
+                    <button id="reset-cloudflare-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rotate-ccw"></use></svg><span>恢复环境变量</span></button>
                   </div>
                 </form>
 
-                <form id="smtp-settings-form" class="settings-section">
+                <form id="smtp-settings-form" class="settings-section settings-smtp-section">
                   <div class="settings-section-heading">
                     <div><h2>SMTP</h2><span id="smtp-settings-source" class="settings-source">--</span></div>
                     <label class="checkbox-label"><input id="settings-smtp-enabled" type="checkbox"> 启用发信</label>
@@ -725,11 +726,12 @@
                     <label class="settings-field-wide">收件人 <input id="settings-smtp-recipients" type="text" autocomplete="off" placeholder="ops@example.com, admin@example.com"></label>
                   </div>
                   <div class="settings-actions">
-                    <button id="save-smtp-settings" type="submit">保存 SMTP 设置</button>
-                    <button id="test-smtp-settings" class="secondary" type="button">发送测试邮件</button>
-                    <button id="reset-smtp-settings" class="secondary" type="button">恢复环境变量</button>
+                    <button id="save-smtp-settings" type="submit"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#save"></use></svg><span>保存 SMTP</span></button>
+                    <button id="test-smtp-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#send"></use></svg><span>发送测试邮件</span></button>
+                    <button id="reset-smtp-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rotate-ccw"></use></svg><span>恢复环境变量</span></button>
                   </div>
                 </form>
+                </div>
               </div>
             </section>
           </div>

@@ -81,11 +81,15 @@ const overviewSiteNameCollator = new Intl.Collator('zh-CN', { numeric: true, sen
 const overviewSiteSortKeys = new Set(['name', 'requests', 'bytes']);
 const consoleViews = new Set(['overview', 'logs', 'security', 'nodes', 'sites', 'settings']);
 const viewLabels = { overview: '概览', logs: '日志', security: '安全', nodes: '节点', sites: '站点', settings: '设置' };
-const mobileSidebarQuery = window.matchMedia('(max-width: 800px)');
+const mobileSidebarQuery = window.matchMedia('(max-width: 1280px)');
 const overviewStatusColors = ['#3274d9', '#168a7a', '#6d5bc5', '#d29224', '#c44f4f', '#2b8fa3', '#8b99a2'];
 
 const byId = (id) => document.getElementById(id);
 const split = (value) => value.split(',').map((item) => item.trim()).filter(Boolean);
+const icon = (name, className = '') => `<svg class="icon${className ? ` ${escapeHTML(className)}` : ''}" aria-hidden="true"><use href="/lucide-icons.svg#${escapeHTML(name)}"></use></svg>`;
+function buttonContent(button, iconName, label) {
+  button.innerHTML = `${icon(iconName)}<span>${escapeHTML(label)}</span>`;
+}
 const certificateTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const publishTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
 const deletionTaskActive = (task) => task && ['queued', 'dispatching', 'applying'].includes(task.status);
@@ -322,7 +326,7 @@ function renderSecurity() {
     <td>${escapeHTML(securityActionLabel(policy.action))}${policy.action === 'ban' ? `<br><span class="muted">${escapeHTML(securityDurationLabel(policy.ban_duration_seconds))}</span>` : ''}</td>
     <td>${numberFormatter.format(policy.priority)}</td>
     <td><span class="status ${policy.enabled ? 'succeeded' : 'pending'}">${policy.enabled ? '已启用' : '已停用'}</span></td>
-    <td class="actions"><button class="small secondary edit-security-policy" data-id="${escapeHTML(policy.id)}">编辑</button>${policy.builtin ? '' : `<button class="small danger delete-security-policy" data-id="${escapeHTML(policy.id)}">删除</button>`}</td>
+    <td class="actions"><button class="small secondary icon-button edit-security-policy" data-id="${escapeHTML(policy.id)}" title="编辑策略" aria-label="编辑策略">${icon('pencil')}</button>${policy.builtin ? '' : `<button class="small danger icon-button delete-security-policy" data-id="${escapeHTML(policy.id)}" title="删除策略" aria-label="删除策略">${icon('trash-2')}</button>`}</td>
   </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无访问策略</td></tr>';
 
   byId('rate-limit-policy-table').innerHTML = rateLimitPolicies.length ? rateLimitPolicies.map((policy) => `<tr>
@@ -331,13 +335,13 @@ function renderSecurity() {
     <td><strong>${numberFormatter.format(Number(policy.requests_per_second || 0))}</strong> 请求/秒</td>
     <td><span class="rate-limit-condition">${escapeHTML(rateLimitResponseConditionLabel(policy))}</span></td>
     <td><span class="status ${policy.enabled ? 'succeeded' : 'pending'}">${policy.enabled ? '已启用' : '已停用'}</span></td>
-    <td class="actions"><button class="small secondary edit-rate-limit-policy" data-id="${escapeHTML(policy.id)}">编辑</button><button class="small danger delete-rate-limit-policy" data-id="${escapeHTML(policy.id)}">删除</button></td>
+    <td class="actions"><button class="small secondary icon-button edit-rate-limit-policy" data-id="${escapeHTML(policy.id)}" title="编辑策略" aria-label="编辑策略">${icon('pencil')}</button><button class="small danger icon-button delete-rate-limit-policy" data-id="${escapeHTML(policy.id)}" title="删除策略" aria-label="删除策略">${icon('trash-2')}</button></td>
   </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无限速策略</td></tr>';
 
   byId('security-ban-table').innerHTML = bans.length ? bans.map((ban) => `<tr>
     <td><code>${escapeHTML(ban.ip)}</code></td><td>${escapeHTML(ban.policy_name || '--')}</td><td>${escapeHTML(securityNodeName(ban.trigger_node_id))}</td>
     <td>${securityRequestCell(ban)}</td><td>${formatDateTime(ban.expires_at)}</td>
-    <td><button class="small danger unban-security-ip" data-ip="${escapeHTML(ban.ip)}">解除封禁</button></td>
+    <td class="actions"><button class="small danger icon-button unban-security-ip" data-ip="${escapeHTML(ban.ip)}" title="解除封禁" aria-label="解除封禁 ${escapeHTML(ban.ip)}">${icon('lock-open')}</button></td>
   </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无活动封禁</td></tr>';
 
   byId('security-event-table').innerHTML = events.length ? events.map((event) => `<tr>
@@ -503,7 +507,7 @@ function renderNodeRow(node) {
     <td>${renderAgentVersion(node)}</td>
     <td>${node.last_heartbeat_at ? formatDateTime(node.last_heartbeat_at) : '从未上报'}</td>
     <td>${numberFormatter.format(siteCount)} 个</td>
-    <td class="actions"><button class="small secondary manage-node" data-id="${escapeHTML(node.id)}">管理</button></td>
+    <td class="actions"><button class="small secondary icon-button manage-node" data-id="${escapeHTML(node.id)}" title="管理节点" aria-label="管理节点 ${escapeHTML(node.name)}">${icon('settings-2')}</button></td>
   </tr>`;
 }
 
@@ -531,43 +535,43 @@ function renderAgentVersion(node) {
 function renderNodeDetailOperations(node) {
   const deployment = [];
   if (['pending', 'active', 'draining'].includes(node.status)) {
-    deployment.push(`<button class="small enroll" data-id="${node.id}">获取部署/升级命令</button>`);
+    deployment.push(`<button class="small enroll" data-id="${node.id}">${icon('terminal')}<span>部署命令</span></button>`);
   }
   const upgradeActive = node.upgrade_task && ['queued', 'applying'].includes(node.upgrade_task.status);
   const upgradeFailed = node.upgrade_task?.status === 'failed' && !node.upgrade_up_to_date;
   const upgradeVisible = node.upgrade_capable && !node.upgrade_up_to_date;
   if (['active', 'draining'].includes(node.status) && (upgradeVisible || upgradeActive || upgradeFailed)) {
-    deployment.push(`<button class="small ${upgradeActive ? '' : 'secondary'} node-upgrade" data-id="${node.id}">${node.can_upgrade && !upgradeFailed ? '升级' : '查看升级'}</button>`);
+    deployment.push(`<button class="small ${upgradeActive ? '' : 'secondary'} node-upgrade" data-id="${node.id}">${icon('upload')}<span>${node.can_upgrade && !upgradeFailed ? '升级' : '查看升级'}</span></button>`);
   }
   byId('node-deployment-actions').innerHTML = deployment.join(' ');
   byId('node-deployment-state').textContent = `${nodeUpgradeLabel(node)} · 当前制品 ${shortDigest(node.agent_sha256)}`;
 
   const scheduling = [];
   if (node.status === 'active') {
-    scheduling.push(`<button class="small secondary node-status" data-id="${node.id}" data-status="draining">暂停调度</button>`);
+    scheduling.push(`<button class="small secondary node-status" data-id="${node.id}" data-status="draining">${icon('pause')}<span>暂停调度</span></button>`);
   }
   if (node.status === 'draining') {
-    scheduling.push(`<button class="small node-status" data-id="${node.id}" data-status="active">启用调度</button>`);
+    scheduling.push(`<button class="small node-status" data-id="${node.id}" data-status="active">${icon('play')}<span>启用调度</span></button>`);
   }
   byId('node-scheduling-actions').innerHTML = scheduling.join(' ');
   byId('node-scheduling-state').textContent = node.status === 'active' ? '节点参与站点调度和托管 DNS' : (node.status === 'draining' ? '节点已暂停接收新流量' : '当前状态不可调整流量调度');
 
   const authorization = [];
   if (node.status === 'revoked') {
-    authorization.push(`<button class="small node-status" data-id="${node.id}" data-status="active">恢复并启用调度</button>`);
+    authorization.push(`<button class="small node-status" data-id="${node.id}" data-status="active">${icon('key-round')}<span>恢复授权</span></button>`);
   }
   if (['pending', 'active', 'draining'].includes(node.status)) {
-    authorization.push(`<button class="small danger node-status" data-id="${node.id}" data-status="revoked">撤销授权</button>`);
+    authorization.push(`<button class="small danger node-status" data-id="${node.id}" data-status="revoked">${icon('key-round')}<span>撤销授权</span></button>`);
   }
   byId('node-authorization-actions').innerHTML = authorization.join(' ');
   byId('node-authorization-state').textContent = node.status === 'revoked' ? '边缘证书已被拒绝访问主控' : (node.status === 'uninstalled' ? '节点已完成卸载' : '节点可使用当前证书访问主控');
 
   const removal = [];
   if (['active', 'draining', 'revoked', 'uninstalling'].includes(node.status)) {
-    removal.push(`<button class="small secondary node-uninstall" data-id="${node.id}">${node.status === 'uninstalling' ? '查看卸载' : '卸载节点'}</button>`);
+    removal.push(`<button class="small secondary node-uninstall" data-id="${node.id}">${icon('package-x')}<span>${node.status === 'uninstalling' ? '查看卸载' : '卸载节点'}</span></button>`);
   }
   if (node.status === 'pending' || node.status === 'uninstalled') {
-    removal.push(`<button class="small ${node.status === 'uninstalled' ? 'danger' : 'secondary'} node-delete" data-id="${node.id}">删除记录</button>`);
+    removal.push(`<button class="small ${node.status === 'uninstalled' ? 'danger' : 'secondary'} node-delete" data-id="${node.id}">${icon('trash-2')}<span>删除记录</span></button>`);
   }
   byId('node-removal-actions').innerHTML = removal.join(' ');
   byId('node-removal-state').textContent = node.status === 'uninstalled' ? '远端卸载已完成，可删除主控记录' : (node.status === 'pending' ? '节点尚未注册，可直接删除记录' : '卸载会先检查调度、DNS 和站点迁移状态');
@@ -772,8 +776,8 @@ function renderSites() {
 		<div><dt>发布</dt><dd>${site.deleting ? deletionStatusMarkup(deletionStatus) : publishStatusMarkup(publishStatus)}</dd></div>
       </dl>
       <div class="site-actions">
-        ${site.deleting ? `<button class="small danger open-site-delete" data-id="${site.id}">查看删除</button>` : `<button class="small publish" data-id="${site.id}" ${publishTaskActive(publishStatus?.task) ? 'disabled' : ''}>${site.published ? (publishStatus?.task?.status === 'failed' || publishStatus?.task?.status === 'partial' ? '重新发布' : '发布') : '发布'}</button>`}
-        <button class="small secondary manage-site" data-id="${site.id}">管理</button>
+        ${site.deleting ? `<button class="small danger open-site-delete" data-id="${site.id}">${icon('trash-2')}<span>查看删除</span></button>` : `<button class="small publish" data-id="${site.id}" ${publishTaskActive(publishStatus?.task) ? 'disabled' : ''}>${icon('rocket')}<span>${site.published ? (publishStatus?.task?.status === 'failed' || publishStatus?.task?.status === 'partial' ? '重新发布' : '发布') : '发布'}</span></button>`}
+        <button class="small secondary icon-button manage-site" data-id="${site.id}" title="管理站点" aria-label="管理站点 ${escapeHTML(site.name)}">${icon('settings-2')}</button>
       </div>
       ${publishDetailMarkup(publishStatus)}
     </article>`;
@@ -900,7 +904,7 @@ function addTCPForwardRow(forward = {}) {
 		<label class="checkbox-label"><input class="tcp-forward-upstream-tls" type="checkbox"> 上游 TLS</label>
 		<label class="tcp-forward-upstream-sni-wrap site-field-wide">上游 TLS SNI <input class="tcp-forward-upstream-sni" placeholder="mail.example.com" autocomplete="off"></label>
 	  </div>
-	  <button class="remove-tcp-forward secondary" type="button" title="删除此端口" aria-label="删除此 TCP 转发"><span aria-hidden="true">&times;</span></button>`;
+		  <button class="remove-tcp-forward secondary icon-button" type="button" title="删除此端口" aria-label="删除此 TCP 转发">${icon('trash-2')}</button>`;
 	row.querySelector('.tcp-forward-name').value = forward.name || '';
 	row.querySelector('.tcp-forward-listen-port').value = forward.listen_port || '';
 	row.querySelector('.tcp-forward-listen-tls').checked = forward.listen_tls ?? true;
@@ -997,12 +1001,12 @@ function renderSiteDetailStatus() {
 
   [publishButton, certificateButton, byId('site-detail-invalidate'), byId('site-detail-allowlist'), deleteButton].forEach((button) => { button.dataset.id = site.id; });
   publishButton.disabled = site.deleting || publishTaskActive(publishStatus?.task);
-  publishButton.textContent = site.published && ['failed', 'partial'].includes(publishStatus?.task?.status) ? '重新发布' : '发布';
+  buttonContent(publishButton, 'rocket', site.published && ['failed', 'partial'].includes(publishStatus?.task?.status) ? '重新发布' : '发布');
   certificateButton.disabled = site.deleting || certificateTaskActive(certificateTask);
   certificateButton.title = certificateTaskActive(certificateTask) ? 'TLS 证书签发正在进行中' : '';
   byId('site-detail-invalidate').disabled = site.deleting;
   byId('site-detail-allowlist').disabled = site.deleting;
-  deleteButton.textContent = site.deleting ? '查看删除' : '删除站点';
+  buttonContent(deleteButton, 'trash-2', site.deleting ? '查看删除' : '删除站点');
   deleteButton.disabled = !site.deleting && (certificateTaskActive(certificateTask) || publishTaskActive(publishStatus?.task));
   deleteButton.title = deleteButton.disabled ? '请等待当前 TLS 或发布任务完成' : '';
   updateSiteFormPreview(site);
@@ -1223,7 +1227,7 @@ function renderNodeUpgrade(status) {
   byId('node-upgrade-state').textContent = nodeUpgradeStateText(status);
   setUpgradeError(status.upgrade_task?.status === 'failed' && !status.upgrade_up_to_date ? (status.upgrade_task.detail || status.upgrade_blocker || '升级失败') : '');
   if (status.can_upgrade) {
-    byId('start-node-upgrade').textContent = status.upgrade_task?.status === 'failed' ? '重试升级' : '开始升级';
+    buttonContent(byId('start-node-upgrade'), 'upload', status.upgrade_task?.status === 'failed' ? '重试升级' : '开始升级');
     show('start-node-upgrade');
   } else {
     hide('start-node-upgrade');
@@ -1787,7 +1791,7 @@ function renderOverviewSiteSortControls() {
     const directionLabel = nextDirection === 'asc' ? '升序' : '降序';
     button.closest('th').setAttribute('aria-sort', active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
     button.classList.toggle('is-active', active);
-    button.querySelector('.overview-sort-indicator').textContent = active ? (direction === 'asc' ? '↑' : '↓') : '↕';
+    button.querySelector('.overview-sort-indicator').innerHTML = icon(active ? (direction === 'asc' ? 'arrow-up' : 'arrow-down') : 'arrow-up-down');
     button.setAttribute('aria-label', `按${button.dataset.sortLabel}${directionLabel}排序`);
     button.title = `按${button.dataset.sortLabel}${directionLabel}排序`;
   });
@@ -2865,7 +2869,7 @@ function prepareNewSiteForm() {
   syncSiteDNSTTLControl();
 	byId('site-enabled').checked = true;
 	syncSiteTrafficMode();
-  byId('site-submit').textContent = '创建站点';
+  buttonContent(byId('site-submit'), 'save', '创建站点');
   renderNodeSelector();
   siteFormReady = true;
   markSiteFormClean();
@@ -2895,7 +2899,7 @@ function populateSiteForm(site) {
   syncSiteDNSTTLControl();
 	byId('site-enabled').checked = site.enabled;
 	syncSiteTrafficMode();
-  byId('site-submit').textContent = '保存更改';
+  buttonContent(byId('site-submit'), 'save', '保存更改');
   renderNodeSelector(site.node_ids);
   siteFormReady = true;
   markSiteFormClean();

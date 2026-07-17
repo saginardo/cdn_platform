@@ -40,10 +40,14 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 	for _, expected := range []string{
 		`<html lang="zh-CN">`,
 		`<span class="brand">CDN Platform</span>`,
-		`>概览</button>`,
-		`>日志</button>`,
-		`>节点</button>`,
-		`>站点</button>`,
+		`data-view="overview"`,
+		`<span>概览</span>`,
+		`data-view="logs"`,
+		`<span>日志</span>`,
+		`data-view="nodes"`,
+		`<span>节点</span>`,
+		`data-view="sites"`,
+		`<span>站点</span>`,
 		`最近 24 小时`,
 		`HTTP 4xx / 5xx`,
 		`站点请求趋势`,
@@ -58,10 +62,10 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		`id="node-uninstall-dialog"`,
 		`id="node-upgrade-dialog"`,
 		`id="start-node-upgrade"`,
-		`>开始卸载准备</button>`,
-		`>生成卸载命令</button>`,
-		`强制完成（不清理远端）`,
-		`>删除记录</button>`,
+		`<span>准备卸载</span>`,
+		`<span>生成命令</span>`,
+		`<span>强制完成</span>`,
+		`<span>删除记录</span>`,
 	} {
 		if !strings.Contains(page, expected) {
 			t.Fatalf("index.html does not contain %q", expected)
@@ -451,7 +455,8 @@ func TestEmbeddedConsoleUsesDedicatedLogSearchRoute(t *testing.T) {
 	}
 	page := string(pageContents)
 	for _, expected := range []string{
-		`<button class="nav" data-view="logs">日志</button>`,
+		`class="nav" data-view="logs"`,
+		`<span>日志</span>`,
 		`<section id="logs" class="view hidden"`,
 		`<h1 id="logs-title" tabindex="-1">日志</h1>`,
 		`id="log-search-form"`,
@@ -512,14 +517,14 @@ func TestEmbeddedConsoleLocalizesStatusLabelsWithoutChangingStatusValues(t *test
 		"draining: '暂停中'",
 		"uninstalling: '卸载中'",
 		"uninstalled: '已卸载'",
-		">启用调度</button>",
-		">暂停调度</button>",
-		">撤销授权</button>",
+		"<span>启用调度</span>",
+		"<span>暂停调度</span>",
+		"<span>撤销授权</span>",
 		"'卸载节点'",
 		"succeeded: '成功'",
 		"rolled_back: '已回滚'",
 		`data-status="draining"`,
-		`data-status="active">启用调度</button>`,
+		`data-status="active"`,
 		`/uninstall/command`,
 		`/uninstall/force-complete`,
 		`can_generate_command`,
@@ -642,7 +647,7 @@ func TestEmbeddedConsoleUsesDedicatedSiteEditorRoutes(t *testing.T) {
 		"markSettingsFormClean();",
 		"renderSiteDetailStatus();",
 		"classList.toggle('hidden', !siteCacheable(site))",
-		`class="small secondary manage-site"`,
+		`class="small secondary icon-button manage-site"`,
 		"function renderSiteDeleteDialog(status = null)",
 		"function setSiteEditorLocked(locked)",
 		"/delete-status",
@@ -713,10 +718,10 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	}
 	styles := string(styleContents)
 	for _, expected := range []string{
-		"grid-template-columns: 208px minmax(0, 1fr)",
+		"grid-template-columns: var(--sidebar-width) minmax(0, 1fr)",
 		"body.sidebar-open .sidebar",
-		"@media (max-width: 800px)",
-		".page { width: 100%",
+		"@media (max-width: 1280px)",
+		".page { width: min(100%, var(--page-max-width))",
 	} {
 		if !strings.Contains(styles, expected) {
 			t.Fatalf("styles.css does not contain %q", expected)
@@ -730,6 +735,7 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	script := string(scriptContents)
 	for _, expected := range []string{
 		"const viewLabels = { overview: '概览', logs: '日志', security: '安全', nodes: '节点', sites: '站点', settings: '设置' }",
+		"window.matchMedia('(max-width: 1280px)')",
 		"function setSidebarOpen(open, restoreFocus = false)",
 		"setAttribute('aria-expanded', String(open))",
 		"event.key === 'Escape'",
@@ -737,6 +743,77 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	} {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+}
+
+func TestEmbeddedConsoleUsesSelfHostedIconsAndAdaptiveDataLayouts(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spriteContents, err := embeddedWeb.ReadFile("web/lucide-icons.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, styles, script, sprite := string(pageContents), string(styleContents), string(scriptContents), string(spriteContents)
+
+	for _, expected := range []string{
+		`/lucide-icons.svg#layout-dashboard`, `icon-button`, `class="overview-site-table responsive-table" data-table="overview-sites"`,
+		`class="log-table responsive-table" data-table="logs"`, `class="node-list-table responsive-table" data-table="nodes"`,
+		`data-table="security-policies"`, `data-table="rate-limit-policies"`, `class="settings-grid"`,
+		`id="node-cache-section"`, `id="node-sites-section"`, `id="node-operations-section"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain adaptive UI marker %q", expected)
+		}
+	}
+	for _, expected := range []string{
+		"--page-max-width: 1920px", "@media (max-width: 1280px)", "@media (max-width: 1100px)",
+		".responsive-table tbody td::before", `[data-table="logs"] td:nth-child(8)::before`,
+		".settings-grid { grid-template-columns:", "#node-detail-content:not(.hidden)",
+		".site-list { grid-template-columns: repeat(2, minmax(0, 1fr))",
+	} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain adaptive layout rule %q", expected)
+		}
+	}
+	for _, retired := range []string{
+		".overview-site-detail-page { width: min(100%, 1240px)",
+		".node-detail-page { width: min(100%, 1240px)",
+		".site-detail-page { width: min(100%, 1240px)",
+		".settings-page { width: min(100%, 960px)",
+	} {
+		if strings.Contains(styles, retired) {
+			t.Fatalf("styles.css still contains narrow desktop cap %q", retired)
+		}
+	}
+	if !strings.Contains(sprite, "@license Lucide 1.16.0") || len(spriteContents) > 20_000 {
+		t.Fatalf("Lucide sprite is missing its license marker or is not a focused subset: %d bytes", len(spriteContents))
+	}
+	symbols := make(map[string]bool)
+	for _, match := range regexp.MustCompile(`<symbol id="([^"]+)"`).FindAllStringSubmatch(sprite, -1) {
+		symbols[match[1]] = true
+	}
+	for _, source := range []struct {
+		contents string
+		pattern  *regexp.Regexp
+	}{
+		{page, regexp.MustCompile(`/lucide-icons\.svg#([a-z0-9-]+)`)},
+		{script, regexp.MustCompile(`icon\('([a-z0-9-]+)'`)},
+	} {
+		for _, match := range source.pattern.FindAllStringSubmatch(source.contents, -1) {
+			if !symbols[match[1]] {
+				t.Fatalf("console references missing Lucide symbol %q", match[1])
+			}
 		}
 	}
 }
@@ -793,7 +870,8 @@ func TestEmbeddedConsoleIncludesRuntimeSettingsForms(t *testing.T) {
 	}
 	page := string(pageContents)
 	for _, expected := range []string{
-		`class="nav" data-view="settings">设置`,
+		`class="nav" data-view="settings"`,
+		`<span>设置</span>`,
 		`id="settings" class="view hidden"`,
 		`id="settings-dns-ttl" type="number" min="60" max="300"`,
 		`id="settings-cloudflare-token" type="password"`,

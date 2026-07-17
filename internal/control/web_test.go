@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/xml"
 	"regexp"
 	"strings"
 	"testing"
@@ -718,7 +719,10 @@ func TestEmbeddedConsoleUsesResponsiveSidebarWorkspace(t *testing.T) {
 	}
 	styles := string(styleContents)
 	for _, expected := range []string{
+		"--sidebar-width: clamp(204px, 12vw, 216px)",
 		"grid-template-columns: var(--sidebar-width) minmax(0, 1fr)",
+		"width: min(260px, 86vw)",
+		"justify-content: flex-start",
 		"body.sidebar-open .sidebar",
 		"@media (max-width: 1280px)",
 		".page { width: min(100%, var(--page-max-width))",
@@ -765,6 +769,12 @@ func TestEmbeddedConsoleUsesSelfHostedIconsAndAdaptiveDataLayouts(t *testing.T) 
 		t.Fatal(err)
 	}
 	page, styles, script, sprite := string(pageContents), string(styleContents), string(scriptContents), string(spriteContents)
+	var spriteDocument struct {
+		XMLName xml.Name
+	}
+	if err := xml.Unmarshal(spriteContents, &spriteDocument); err != nil || spriteDocument.XMLName.Local != "svg" {
+		t.Fatalf("Lucide sprite is invalid XML: root=%q, err=%v", spriteDocument.XMLName.Local, err)
+	}
 
 	for _, expected := range []string{
 		`/lucide-icons.svg#layout-dashboard`, `icon-button`, `class="overview-site-table responsive-table" data-table="overview-sites"`,
@@ -814,6 +824,47 @@ func TestEmbeddedConsoleUsesSelfHostedIconsAndAdaptiveDataLayouts(t *testing.T) 
 			if !symbols[match[1]] {
 				t.Fatalf("console references missing Lucide symbol %q", match[1])
 			}
+		}
+	}
+}
+
+func TestEmbeddedConsoleIncludesNodeMachineStatus(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, styles, script := string(pageContents), string(styleContents), string(scriptContents)
+	for _, expected := range []string{
+		`id="node-machine-section"`, `id="node-machine-os"`, `id="node-machine-uptime"`,
+		`id="node-machine-load"`, `id="node-machine-cpu"`, `id="node-machine-memory"`,
+		`id="node-machine-disk"`, `id="node-machine-rx"`, `id="node-machine-tx"`,
+		`/lucide-icons.svg#cpu`, `/lucide-icons.svg#memory-stick`, `/lucide-icons.svg#hard-drive`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain machine status marker %q", expected)
+		}
+	}
+	for _, expected := range []string{
+		".node-machine-grid", ".node-machine-metric", ".node-machine-progress", "#node-machine-section { grid-column: 1 / -1",
+	} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain machine status rule %q", expected)
+		}
+	}
+	for _, expected := range []string{
+		"machine_status_v1: '机器状态上报'", "function renderNodeMachine(machine = {})", "function formatUptime(seconds)",
+		"report.network_rx_bytes_per_second", "report.network_tx_bytes_per_second", "renderNodeMachine(detail.machine || {})",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain machine status behavior %q", expected)
 		}
 	}
 }

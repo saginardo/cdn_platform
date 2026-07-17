@@ -1147,9 +1147,10 @@ type heartbeatRequest struct {
 	AgentSHA256     string                    `json:"agent_sha256,omitempty"`
 	ActiveUpgradeID string                    `json:"active_upgrade_task_id,omitempty"`
 	CacheStorage    *domain.CacheStorageUsage `json:"cache_storage,omitempty"`
+	MachineStatus   *domain.MachineStatus     `json:"machine_status,omitempty"`
 }
 
-const maxCacheStorageClockSkew = 5 * time.Minute
+const maxEdgeReportClockSkew = 5 * time.Minute
 
 func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) {
 	var input heartbeatRequest
@@ -1173,8 +1174,18 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 	}
 	if input.CacheStorage != nil {
 		input.CacheStorage.CollectedAt = input.CacheStorage.CollectedAt.UTC()
-		if input.CacheStorage.CollectedAt.After(time.Now().UTC().Add(maxCacheStorageClockSkew)) {
+		if input.CacheStorage.CollectedAt.After(time.Now().UTC().Add(maxEdgeReportClockSkew)) {
 			input.CacheStorage = nil
+		}
+	}
+	if input.MachineStatus != nil && !domain.ValidMachineStatus(*input.MachineStatus) {
+		writeError(response, http.StatusBadRequest, errors.New("machine_status is invalid"))
+		return
+	}
+	if input.MachineStatus != nil {
+		input.MachineStatus.CollectedAt = input.MachineStatus.CollectedAt.UTC()
+		if input.MachineStatus.CollectedAt.After(time.Now().UTC().Add(maxEdgeReportClockSkew)) {
+			input.MachineStatus = nil
 		}
 	}
 	if err := s.Store.SetNodeCapabilities(nodeID, input.Capabilities); err != nil {
@@ -1187,6 +1198,12 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 	}
 	if input.CacheStorage != nil {
 		if err := s.Store.RecordNodeCacheStorage(nodeID, *input.CacheStorage); err != nil {
+			writeStoreError(response, err)
+			return
+		}
+	}
+	if input.MachineStatus != nil {
+		if err := s.Store.RecordNodeMachineStatus(nodeID, *input.MachineStatus); err != nil {
 			writeStoreError(response, err)
 			return
 		}

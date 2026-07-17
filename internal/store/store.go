@@ -245,6 +245,12 @@ CREATE TABLE IF NOT EXISTS node_cache_storage (
   collected_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS node_machine_status (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  status_json TEXT NOT NULL,
+  collected_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS site_node_health (
   site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

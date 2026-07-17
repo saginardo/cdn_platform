@@ -322,6 +322,23 @@
                   </dl>
                   <div id="node-detail-error" class="node-detail-alert hidden" role="alert"></div>
 
+                  <section id="node-machine-section" class="node-detail-section" aria-labelledby="node-machine-heading">
+                    <div class="node-detail-section-heading">
+                      <div><h2 id="node-machine-heading">机器状态</h2><p id="node-machine-meta" class="section-meta">等待边缘节点上报</p></div>
+                    </div>
+                    <div id="node-machine-state" class="node-machine-state" role="status" aria-live="polite">正在读取机器状态…</div>
+                    <dl id="node-machine-grid" class="node-machine-grid hidden">
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#server"></use></svg><span>系统</span></dt><dd><strong id="node-machine-os">--</strong><small>发行版本</small></dd></div>
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#activity"></use></svg><span>运行时长</span></dt><dd><strong id="node-machine-uptime">--</strong><small>系统 uptime</small></dd></div>
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#gauge"></use></svg><span>系统负载</span></dt><dd><strong id="node-machine-load">--</strong><small>1 / 5 / 15 分钟</small></dd></div>
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#cpu"></use></svg><span>CPU</span></dt><dd><strong id="node-machine-cpu">--</strong><small id="node-machine-cpu-meta">--</small><progress id="node-machine-cpu-track" class="node-machine-progress is-unavailable" max="100" value="0" aria-label="CPU 使用率尚未采样"></progress></dd></div>
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#memory-stick"></use></svg><span>内存</span></dt><dd><strong id="node-machine-memory">-- / --</strong><small id="node-machine-memory-meta">--</small><progress id="node-machine-memory-track" class="node-machine-progress is-unavailable" max="100" value="0" aria-label="内存使用率尚未上报"></progress></dd></div>
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#hard-drive"></use></svg><span>根磁盘</span></dt><dd><strong id="node-machine-disk">-- / --</strong><small id="node-machine-disk-meta">--</small><progress id="node-machine-disk-track" class="node-machine-progress is-unavailable" max="100" value="0" aria-label="磁盘使用率尚未上报"></progress></dd></div>
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#arrow-down"></use></svg><span>网络接收</span></dt><dd><strong id="node-machine-rx">--</strong><small id="node-machine-rx-meta">RX</small></dd></div>
+                      <div class="node-machine-metric"><dt><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#arrow-up"></use></svg><span>网络发送</span></dt><dd><strong id="node-machine-tx">--</strong><small id="node-machine-tx-meta">TX</small></dd></div>
+                    </dl>
+                  </section>
+
                   <section id="node-cache-section" class="node-detail-section" aria-labelledby="node-cache-heading">
                     <div class="node-detail-section-heading">
                       <div><h2 id="node-cache-heading">缓存状态</h2><p id="node-cache-window" class="section-meta">最近 24 小时</p></div>

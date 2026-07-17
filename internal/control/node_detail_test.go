@@ -112,6 +112,123 @@ func TestEdgeHeartbeatRecordsCacheStorageIndependentlyOfLogStats(t *testing.T) {
 	}
 }
 
+func TestEdgeHeartbeatRecordsMachineStatusForNodeDetail(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("machine-reporting-edge", "203.0.113.81")
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := controlTestMachineStatus(time.Now().UTC().Add(-time.Minute).Truncate(time.Second))
+	payload, err := json.Marshal(heartbeatRequest{
+		Capabilities: []string{domain.EdgeCapabilityMachineStatus}, MachineStatus: &report,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	heartbeat := httptest.NewRequest(http.MethodPost, "/api/edge/v1/heartbeat", bytes.NewReader(payload))
+	heartbeat = heartbeat.WithContext(context.WithValue(heartbeat.Context(), edgeContextKey{}, node.ID))
+	heartbeatResponse := httptest.NewRecorder()
+	server.heartbeat(heartbeatResponse, heartbeat)
+	if heartbeatResponse.Code != http.StatusOK {
+		t.Fatalf("heartbeat status = %d, body=%s", heartbeatResponse.Code, heartbeatResponse.Body.String())
+	}
+
+	detailRequest := httptest.NewRequest(http.MethodGet, "/api/nodes/"+node.ID, nil)
+	detailRequest.SetPathValue("id", node.ID)
+	detailResponse := httptest.NewRecorder()
+	server.nodeDetail(detailResponse, detailRequest)
+	if detailResponse.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, body=%s", detailResponse.Code, detailResponse.Body.String())
+	}
+	var detail nodeDetailResponse
+	if err := json.Unmarshal(detailResponse.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if !detail.Machine.Available || detail.Machine.Stale || detail.Machine.Report == nil || detail.Machine.Report.Version != "13.5" || detail.Machine.Report.NetworkRXBytesPerSec != 2000 {
+		t.Fatalf("machine detail = %#v", detail.Machine)
+	}
+
+	futureReport := controlTestMachineStatus(time.Now().UTC().Add(time.Hour))
+	futureReport.Version = "future"
+	futurePayload, err := json.Marshal(heartbeatRequest{MachineStatus: &futureReport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := httptest.NewRequest(http.MethodPost, "/api/edge/v1/heartbeat", bytes.NewReader(futurePayload))
+	future = future.WithContext(context.WithValue(future.Context(), edgeContextKey{}, node.ID))
+	futureResponse := httptest.NewRecorder()
+	server.heartbeat(futureResponse, future)
+	if futureResponse.Code != http.StatusOK {
+		t.Fatalf("future heartbeat status = %d, body=%s", futureResponse.Code, futureResponse.Body.String())
+	}
+	stored, err := database.GetNodeMachineStatus(node.ID)
+	if err != nil || stored.Version != "13.5" {
+		t.Fatalf("future report replaced machine status: %#v, err=%v", stored, err)
+	}
+
+	invalidReport := controlTestMachineStatus(time.Now().UTC())
+	invalidReport.DiskUsedBytes = invalidReport.DiskTotalBytes + 1
+	invalidPayload, err := json.Marshal(heartbeatRequest{MachineStatus: &invalidReport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := httptest.NewRequest(http.MethodPost, "/api/edge/v1/heartbeat", bytes.NewReader(invalidPayload))
+	invalid = invalid.WithContext(context.WithValue(invalid.Context(), edgeContextKey{}, node.ID))
+	invalidResponse := httptest.NewRecorder()
+	server.heartbeat(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid heartbeat status = %d, body=%s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+}
+
+func TestNodeDetailExplainsUnavailableMachineStatus(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	legacy, err := database.CreateNode("legacy-machine-edge", "203.0.113.82")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capable, err := database.CreateNode("capable-machine-edge", "203.0.113.83")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeCapabilities(capable.ID, []string{domain.EdgeCapabilityMachineStatus}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	legacyStatus := server.nodeMachineStatus(legacy, time.Now().UTC())
+	if legacyStatus.Available || legacyStatus.UnavailableReason != "升级边缘代理后可查看机器状态" {
+		t.Fatalf("legacy machine status = %#v", legacyStatus)
+	}
+	capable, err = database.GetNode(capable.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capableStatus := server.nodeMachineStatus(capable, time.Now().UTC())
+	if capableStatus.Available || capableStatus.UnavailableReason != "等待边缘节点首次上报机器状态" {
+		t.Fatalf("capable machine status = %#v", capableStatus)
+	}
+}
+
+func controlTestMachineStatus(collectedAt time.Time) domain.MachineStatus {
+	return domain.MachineStatus{
+		Distribution: "Debian GNU/Linux", Version: "13.5", UptimeSeconds: 86400,
+		Load1: 0.1, Load5: 0.2, Load15: 0.3, CPUUsagePercent: 25, CPULogicalCores: 4,
+		MemoryUsedBytes: 2 << 30, MemoryTotalBytes: 4 << 30,
+		DiskUsedBytes: 20 << 30, DiskTotalBytes: 100 << 30,
+		NetworkInterface: "eth0", NetworkRXBytesPerSec: 2000, NetworkTXBytesPerSec: 1000,
+		SampleSeconds: 30, CollectedAt: collectedAt,
+	}
+}
+
 func TestNodeDetailReturnsManagementContextAndIndependentCacheStatus(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

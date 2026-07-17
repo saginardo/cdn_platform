@@ -75,6 +75,7 @@ const (
 	EdgeCapabilityTCPStream     = "tcp_stream_v1"
 	EdgeCapabilityOnlineUpgrade = "online_upgrade_v1"
 	EdgeCapabilityCacheUsage    = "cache_usage_v1"
+	EdgeCapabilityMachineStatus = "machine_status_v1"
 )
 
 type TCPForward struct {

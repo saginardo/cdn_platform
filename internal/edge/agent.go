@@ -56,6 +56,7 @@ type Agent struct {
 	logs             *LogForwarder
 	security         *SecurityManager
 	cacheUsage       *cacheUsageCollector
+	machineStatus    machineStatusReporter
 	lastApplyReport  *domain.ApplyReport
 	lastUpgradeError string
 }
@@ -117,6 +118,7 @@ func New(config Config) (*Agent, error) {
 	config.AgentSHA256 = strings.ToLower(strings.TrimSpace(config.AgentSHA256))
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityOnlineUpgrade)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityCacheUsage)
+	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityMachineStatus)
 	config.SecurityFirewall = defaultSecurityFirewall(config.SecurityFirewall)
 	if config.SecurityFirewall != nil {
 		config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilitySecurity)
@@ -129,7 +131,8 @@ func New(config Config) (*Agent, error) {
 	}
 	agent := &Agent{
 		Config: config, logs: NewLogForwarder(config.StateDir, config.AccessLogPath),
-		cacheUsage: newCacheUsageCollector(nginx.DefaultCachePath, nginx.DefaultCacheMaxBytes, defaultCacheUsageInterval),
+		cacheUsage:    newCacheUsageCollector(nginx.DefaultCachePath, nginx.DefaultCacheMaxBytes, defaultCacheUsageInterval),
+		machineStatus: newMachineStatusCollector(),
 	}
 	if config.SecurityFirewall != nil {
 		agent.security = NewSecurityManager(config.StateDir, config.SecurityLogPath, config.SecurityPollInterval, config.SecurityFirewall)
@@ -305,11 +308,16 @@ func (a *Agent) Sync(ctx context.Context) error {
 }
 
 func (a *Agent) Heartbeat(ctx context.Context, appliedVersion int64, lastError string, report *domain.ApplyReport) error {
+	var machineStatus *domain.MachineStatus
+	if a.machineStatus != nil {
+		machineStatus, _ = a.machineStatus.Collect()
+	}
 	payload, err := json.Marshal(map[string]any{
 		"last_error": lastError, "applied_version": appliedVersion, "apply_report": report,
 		"capabilities": append([]string(nil), a.Config.Capabilities...),
 		"agent_sha256": a.Config.AgentSHA256, "active_upgrade_task_id": a.activeUpgradeID(),
-		"cache_storage": a.cacheUsage.Snapshot(),
+		"cache_storage":  a.cacheUsage.Snapshot(),
+		"machine_status": machineStatus,
 	})
 	if err != nil {
 		return err

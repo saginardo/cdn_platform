@@ -16,6 +16,7 @@ import (
 const (
 	nodeCacheWindow           = 24 * time.Hour
 	nodeCacheStorageFreshness = 15 * time.Minute
+	nodeMachineFreshness      = 10 * time.Minute
 )
 
 type nodeCacheStatusBucket struct {
@@ -61,8 +62,16 @@ type nodeSiteSummary struct {
 }
 
 type nodeDetailResponse struct {
-	Node  nodeUpgradeStatusResponse `json:"node"`
-	Sites []nodeSiteSummary         `json:"sites"`
+	Node    nodeUpgradeStatusResponse `json:"node"`
+	Machine nodeMachineStatusResponse `json:"machine"`
+	Sites   []nodeSiteSummary         `json:"sites"`
+}
+
+type nodeMachineStatusResponse struct {
+	Available         bool                  `json:"available"`
+	UnavailableReason string                `json:"unavailable_reason,omitempty"`
+	Stale             bool                  `json:"stale"`
+	Report            *domain.MachineStatus `json:"report,omitempty"`
 }
 
 func (s *Server) nodeDetail(response http.ResponseWriter, request *http.Request) {
@@ -96,7 +105,31 @@ func (s *Server) nodeDetail(response http.ResponseWriter, request *http.Request)
 		})
 	}
 
-	writeJSON(response, http.StatusOK, nodeDetailResponse{Node: status, Sites: sites})
+	writeJSON(response, http.StatusOK, nodeDetailResponse{
+		Node: status, Machine: s.nodeMachineStatus(node, time.Now().UTC()), Sites: sites,
+	})
+}
+
+func (s *Server) nodeMachineStatus(node domain.Node, at time.Time) nodeMachineStatusResponse {
+	report, err := s.Store.GetNodeMachineStatus(node.ID)
+	if err == nil {
+		report.CollectedAt = report.CollectedAt.UTC()
+		return nodeMachineStatusResponse{
+			Available: true, Stale: report.CollectedAt.Before(at.Add(-nodeMachineFreshness)), Report: &report,
+		}
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		if s.Logger != nil {
+			s.Logger.Warn("node machine status unavailable", "node_id", node.ID, "error", err)
+		}
+		return nodeMachineStatusResponse{UnavailableReason: "机器状态暂不可用"}
+	}
+	for _, capability := range node.Capabilities {
+		if capability == domain.EdgeCapabilityMachineStatus {
+			return nodeMachineStatusResponse{UnavailableReason: "等待边缘节点首次上报机器状态"}
+		}
+	}
+	return nodeMachineStatusResponse{UnavailableReason: "升级边缘代理后可查看机器状态"}
 }
 
 func (s *Server) nodeCacheStatus(response http.ResponseWriter, request *http.Request) {

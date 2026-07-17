@@ -578,7 +578,7 @@ function renderNodeDetailOperations(node) {
 }
 
 function nodeCapabilityLabel(capability) {
-  const labels = { tcp_stream_v1: 'TCP 转发', online_upgrade_v1: '在线升级', edge_security_v1: '访问安全', edge_rate_limit_v1: '请求限速', cache_usage_v1: '缓存用量上报' };
+  const labels = { tcp_stream_v1: 'TCP 转发', online_upgrade_v1: '在线升级', edge_security_v1: '访问安全', edge_rate_limit_v1: '请求限速', cache_usage_v1: '缓存用量上报', machine_status_v1: '机器状态上报' };
   return labels[capability] || capability;
 }
 
@@ -659,6 +659,70 @@ function renderNodeSites(assignedSites = []) {
   byId('node-sites-table-wrap').classList.toggle('hidden', assignedSites.length === 0);
 }
 
+function formatUptime(seconds) {
+  seconds = Math.max(0, Math.floor(Number(seconds) || 0));
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `${numberFormatter.format(days)}天 ${numberFormatter.format(hours)}小时`;
+  if (hours) return `${numberFormatter.format(hours)}小时 ${numberFormatter.format(minutes)}分钟`;
+  if (minutes) return `${numberFormatter.format(minutes)}分钟`;
+  return `${numberFormatter.format(seconds)}秒`;
+}
+
+function formatUsagePercent(value) {
+  return `${Math.max(0, Math.min(100, Number(value) || 0)).toLocaleString('zh-CN', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}%`;
+}
+
+function setMachineProgress(id, ratio, label, available = true) {
+  const progress = byId(id);
+  ratio = Math.max(0, Math.min(1, Number(ratio) || 0));
+  progress.value = available ? ratio * 100 : 0;
+  progress.className = `node-machine-progress${!available ? ' is-unavailable' : (ratio >= .9 ? ' is-critical' : (ratio >= .75 ? ' is-warning' : ''))}`;
+  progress.setAttribute('aria-label', label);
+}
+
+function renderNodeMachine(machine = {}) {
+  const report = machine.report;
+  const available = Boolean(machine.available && report);
+  byId('node-machine-state').classList.toggle('hidden', available);
+  byId('node-machine-grid').classList.toggle('hidden', !available);
+  if (!available) {
+    const reason = machine.unavailable_reason || '机器状态尚未上报';
+    byId('node-machine-meta').textContent = reason;
+    byId('node-machine-state').textContent = reason;
+    return;
+  }
+
+  const sampled = Number(report.sample_seconds || 0) > 0;
+  const memoryTotal = Number(report.memory_total_bytes || 0);
+  const memoryUsed = Number(report.memory_used_bytes || 0);
+  const diskTotal = Number(report.disk_total_bytes || 0);
+  const diskUsed = Number(report.disk_used_bytes || 0);
+  const memoryRatio = memoryTotal > 0 ? memoryUsed / memoryTotal : 0;
+  const diskRatio = diskTotal > 0 ? diskUsed / diskTotal : 0;
+  const cpuRatio = Number(report.cpu_usage_percent || 0) / 100;
+  const interfaceName = report.network_interface || '默认网卡';
+
+  byId('node-machine-meta').textContent = `${machine.stale ? '数据已过期 · ' : ''}上报于 ${formatDateTime(report.collected_at)}`;
+  byId('node-machine-os').textContent = `${report.distribution || 'Linux'} ${report.version || ''}`.trim();
+  byId('node-machine-uptime').textContent = formatUptime(report.uptime_seconds);
+  byId('node-machine-load').textContent = [report.load_1, report.load_5, report.load_15].map((value) => Number(value || 0).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })).join(' / ');
+  byId('node-machine-cpu').textContent = sampled ? formatUsagePercent(report.cpu_usage_percent) : '采样中';
+  byId('node-machine-cpu-meta').textContent = `${numberFormatter.format(Number(report.cpu_logical_cores || 0))} 个逻辑核心`;
+  setMachineProgress('node-machine-cpu-track', cpuRatio, sampled ? `CPU 使用率 ${formatUsagePercent(report.cpu_usage_percent)}` : 'CPU 使用率正在采样', sampled);
+  byId('node-machine-memory').textContent = `${formatBytes(memoryUsed)} / ${formatBytes(memoryTotal)}`;
+  byId('node-machine-memory-meta').textContent = `已用 ${formatPercent(memoryRatio)}`;
+  setMachineProgress('node-machine-memory-track', memoryRatio, `内存已用 ${formatPercent(memoryRatio)}`, memoryTotal > 0);
+  byId('node-machine-disk').textContent = `${formatBytes(diskUsed)} / ${formatBytes(diskTotal)}`;
+  byId('node-machine-disk-meta').textContent = `已用 ${formatPercent(diskRatio)}`;
+  setMachineProgress('node-machine-disk-track', diskRatio, `根磁盘已用 ${formatPercent(diskRatio)}`, diskTotal > 0);
+  byId('node-machine-rx').textContent = sampled ? `${formatBytes(Number(report.network_rx_bytes_per_second || 0))}/s` : '采样中';
+  byId('node-machine-rx-meta').textContent = `${interfaceName} · RX`;
+  byId('node-machine-tx').textContent = sampled ? `${formatBytes(Number(report.network_tx_bytes_per_second || 0))}/s` : '采样中';
+  byId('node-machine-tx-meta').textContent = `${interfaceName} · TX`;
+}
+
 function renderNodeDetail(detail) {
   const node = detail.node;
   nodeDetailData = detail;
@@ -677,6 +741,7 @@ function renderNodeDetail(detail) {
   byId('node-detail-capabilities').textContent = (node.capabilities || []).length ? node.capabilities.map(nodeCapabilityLabel).join('、') : '尚未上报';
   byId('node-detail-error').textContent = node.last_error ? `最近错误：${node.last_error}` : '';
   byId('node-detail-error').classList.toggle('hidden', !node.last_error);
+  renderNodeMachine(detail.machine || {});
   renderNodeSites(detail.sites || []);
   renderNodeDetailOperations(node);
   hide('node-detail-state');

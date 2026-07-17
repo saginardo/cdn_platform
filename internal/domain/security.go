@@ -12,7 +12,10 @@ const (
 	EdgeCapabilitySecurity = "edge_security_v1"
 
 	DefaultSecurityPolicyID      = "00000000-0000-4000-8000-000000000001"
-	DefaultSecurityPolicyPattern = `(?i)^/+(?:\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|(?:[^/]+/)*\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|\.git(?:/|$|-)|\.aws(?:/|$)|\.docker/(?:config\.json|)|\.svn(?:/|$)|\.hg(?:/|$)|\.ht(?:access|passwd)|\.DS_Store$)`
+	DefaultSecurityPolicyPattern = `(?i)^/+(?:[^/]+/)*(?:\.env(?:[._~-][A-Za-z0-9][A-Za-z0-9._~-]*)?|\.git(?:config|-credentials)?(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.(?:aws|azure|docker|svn|hg|ssh|kube|gnupg|terraform)|\.ht(?:access|passwd)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.DS_Store|\.(?:npmrc|pypirc|netrc)|\.(?:bash|zsh|mysql|psql|rediscli|python)_history|id_(?:rsa|dsa|ecdsa|ed25519)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|terraform\.tfstate(?:\.backup)?|wp-config\.php(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?)(?:/|$)`
+
+	DefaultPHPSecurityPolicyID      = "00000000-0000-4000-8000-000000000002"
+	DefaultPHPSecurityPolicyPattern = `(?i)^/+(?:[^/]+/)*(?:php[-_]?info|phpversion|phptest|pinfo|webshell|shell|cmd|c99|r57|wso|b374k|alfa|xleet|backdoor|leftdao|queryversion)\.(?:php(?:[0-9]+)?|phtml|phar)(?:[._~-](?:old|bak|backup|save|txt|new|swp|jpg|jpeg|png|gif|zip|gz|tgz|tar|7z|rar))?(?:/|$)`
 )
 
 type SecurityPolicyAction string
@@ -89,6 +92,19 @@ func ValidSecurityBanDuration(seconds int) bool {
 	return false
 }
 
+func IsBuiltinSecurityPolicyID(id string) bool {
+	switch id {
+	case DefaultSecurityPolicyID, DefaultPHPSecurityPolicyID:
+		return true
+	default:
+		return false
+	}
+}
+
+func isBuiltinSecurityPolicyPattern(pattern string) bool {
+	return pattern == DefaultSecurityPolicyPattern || pattern == DefaultPHPSecurityPolicyPattern
+}
+
 func NormalizeSecurityPolicy(policy SecurityPolicy) (SecurityPolicy, error) {
 	policy.Name = strings.TrimSpace(policy.Name)
 	policy.Pattern = strings.TrimSpace(policy.Pattern)
@@ -104,7 +120,7 @@ func NormalizeSecurityPolicy(policy SecurityPolicy) (SecurityPolicy, error) {
 	if _, err := CompileSecurityPattern(policy.Pattern); err != nil {
 		return SecurityPolicy{}, errors.New("security policy pattern is not in the supported regular expression subset")
 	}
-	if policy.Pattern != DefaultSecurityPolicyPattern {
+	if !isBuiltinSecurityPolicyPattern(policy.Pattern) {
 		parsed, err := syntax.Parse(strings.ReplaceAll(policy.Pattern, "(?:", "("), syntax.Perl)
 		if err != nil || hasUnsafeSecurityRepetition(parsed) || securityBacktrackingChoices(parsed) > 16 {
 			return SecurityPolicy{}, errors.New("security policy pattern exceeds the safe backtracking subset")

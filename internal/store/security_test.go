@@ -16,10 +16,22 @@ func TestSecurityPolicyAndBanLifecycle(t *testing.T) {
 	}
 	defer database.Close()
 	policies, err := database.ListSecurityPolicies()
-	if err != nil || len(policies) != 1 || !policies[0].Builtin || policies[0].ID != domain.DefaultSecurityPolicyID {
+	if err != nil || len(policies) != 2 {
 		t.Fatalf("seeded policies = %#v, err=%v", policies, err)
 	}
-	policy := policies[0]
+	for _, seeded := range policies {
+		if !seeded.Builtin {
+			t.Fatalf("seeded policy is not built-in: %#v", seeded)
+		}
+	}
+	policy, err := database.SecurityPolicy(domain.DefaultSecurityPolicyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	phpPolicy, err := database.SecurityPolicy(domain.DefaultPHPSecurityPolicyID)
+	if err != nil || phpPolicy.Action != domain.SecurityActionBlock || phpPolicy.BanDurationSeconds != 0 || phpPolicy.Priority != 200 {
+		t.Fatalf("seeded PHP policy = %#v, err=%v", phpPolicy, err)
+	}
 	policy.BanDurationSeconds = 3600
 	updated, err := database.UpdateSecurityPolicy(policy.ID, policy)
 	if err != nil || updated.BanDurationSeconds != 3600 || !updated.Builtin {
@@ -27,6 +39,9 @@ func TestSecurityPolicyAndBanLifecycle(t *testing.T) {
 	}
 	if err := database.DeleteSecurityPolicy(policy.ID); err == nil {
 		t.Fatal("built-in policy was deleted")
+	}
+	if err := database.DeleteSecurityPolicy(phpPolicy.ID); err == nil {
+		t.Fatal("built-in PHP policy was deleted")
 	}
 	node, err := database.CreateNode("security-edge", "203.0.113.77")
 	if err != nil {
@@ -77,6 +92,71 @@ func TestSecurityPolicyAndBanLifecycle(t *testing.T) {
 	}
 	if bans, err := database.ListActiveSecurityBans(); err != nil || len(bans) != 0 {
 		t.Fatalf("stale event created a fresh ban: %#v, err=%v", bans, err)
+	}
+	phpEvent := domain.SecurityEvent{
+		ID: "66666666-6666-4666-8666-666666666666", PolicyID: phpPolicy.ID,
+		ClientIP: "8.8.4.4", Host: "cdn.example.test", Path: "/nested/shell.php",
+		Method: "GET", Action: domain.SecurityActionBlock, ObservedAt: time.Now().UTC(),
+	}
+	if accepted, err := database.RecordSecurityEvents(node.ID, []domain.SecurityEvent{phpEvent}); err != nil || accepted != 1 {
+		t.Fatalf("PHP block event accepted=%d, err=%v", accepted, err)
+	}
+	if bans, err := database.ListActiveSecurityBans(); err != nil || len(bans) != 0 {
+		t.Fatalf("PHP block event created a ban: %#v, err=%v", bans, err)
+	}
+}
+
+func TestBuiltinSecurityPolicyMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	database, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`UPDATE security_policies SET enabled = 0, pattern = ?, action = ?,
+		ban_duration_seconds = 0, priority = 321 WHERE id = ?`, legacyDefaultSecurityPolicyPattern,
+		domain.SecurityActionBlock, domain.DefaultSecurityPolicyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DELETE FROM security_policies WHERE id = ?`, domain.DefaultPHPSecurityPolicyID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sensitive, err := database.SecurityPolicy(domain.DefaultSecurityPolicyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sensitive.Pattern != domain.DefaultSecurityPolicyPattern || sensitive.Enabled ||
+		sensitive.Action != domain.SecurityActionBlock || sensitive.BanDurationSeconds != 0 || sensitive.Priority != 321 {
+		t.Fatalf("migrated sensitive policy = %#v", sensitive)
+	}
+	phpPolicy, err := database.SecurityPolicy(domain.DefaultPHPSecurityPolicyID)
+	if err != nil || !phpPolicy.Builtin || !phpPolicy.Enabled || phpPolicy.Action != domain.SecurityActionBlock {
+		t.Fatalf("migrated PHP policy = %#v, err=%v", phpPolicy, err)
+	}
+
+	customPattern := `(?i)^/+private-config(?:/|$)`
+	if _, err := database.db.Exec(`UPDATE security_policies SET pattern = ? WHERE id = ?`,
+		customPattern, domain.DefaultSecurityPolicyID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	database, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sensitive, err = database.SecurityPolicy(domain.DefaultSecurityPolicyID)
+	if err != nil || sensitive.Pattern != customPattern {
+		t.Fatalf("customized sensitive policy was overwritten: %#v, err=%v", sensitive, err)
 	}
 }
 

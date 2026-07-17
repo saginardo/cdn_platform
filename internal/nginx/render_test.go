@@ -1,6 +1,7 @@
 package nginx
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "listen 443 ssl default_server;", "ssl_reject_handshake on;", "client_max_body_size 128m;", "keepalive_timeout 300s;", "keepalive_requests 1000;", "keepalive 30;", "proxy_connect_timeout 10s;", "recursive_error_pages on;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Upgrade \"\";", "proxy_set_header Connection \"\";", "location @cdn_http_site-1", "location @cdn_stream_site-1", "location @cdn_backup_site-1", "location @cdn_stream_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health", `return 200 "site=site-1\n";`} {
+	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "listen 443 ssl default_server;", "ssl_reject_handshake on;", "client_max_body_size 128m;", "keepalive_timeout 300s;", "keepalive_requests 1000;", "keepalive 30;", "proxy_connect_timeout 10s;", "recursive_error_pages on;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "map $uri $cdn_is_static_asset", `map "$cdn_is_static_asset:$cdn_has_cookie" $cdn_cookie_cache_bypass`, `map "$cdn_is_static_asset:$cdn_has_auth" $cdn_upstream_cookie`, "proxy_cache_bypass $cdn_has_auth $cdn_cookie_cache_bypass", "proxy_no_cache $cdn_has_auth $cdn_cookie_cache_bypass $upstream_http_set_cookie", "proxy_set_header Cookie $cdn_upstream_cookie", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Upgrade \"\";", "proxy_set_header Connection \"\";", "location @cdn_http_site-1", "location @cdn_stream_site-1", "location @cdn_backup_site-1", "location @cdn_stream_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health", `return 200 "site=site-1\n";`} {
 		if !strings.Contains(configuration, expected) {
 			t.Fatalf("missing %q from config:\n%s", expected, configuration)
 		}
@@ -26,6 +27,17 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	}
 	if got := strings.Count(configuration, "proxy_set_header Upgrade \"\";"); got != 2 {
 		t.Fatalf("expected Upgrade header to be cleared in both regular proxy locations, got %d:\n%s", got, configuration)
+	}
+	if got := strings.Count(configuration, "proxy_set_header Cookie $cdn_upstream_cookie;"); got != 2 {
+		t.Fatalf("expected static-cookie stripping in regular primary/backup locations, got %d:\n%s", got, configuration)
+	}
+	for _, retired := range []string{
+		"proxy_cache_bypass $cdn_has_auth $cdn_has_cookie;",
+		"proxy_no_cache $cdn_has_auth $cdn_has_cookie $upstream_http_set_cookie;",
+	} {
+		if strings.Contains(configuration, retired) {
+			t.Fatalf("configuration still contains retired cookie-wide bypass %q:\n%s", retired, configuration)
+		}
 	}
 	if got := strings.Count(configuration, "keepalive 30;"); got != 2 {
 		t.Fatalf("expected one 30-connection pool for each upstream, got %d:\n%s", got, configuration)
@@ -40,6 +52,28 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	}
 	if strings.Contains(configuration, "max_size=50g") {
 		t.Fatalf("configuration still uses the retired 50g default:\n%s", configuration)
+	}
+}
+
+func TestStaticAssetPathPattern(t *testing.T) {
+	matcher := regexp.MustCompile(`(?i)` + strings.ReplaceAll(staticAssetPathPattern, "(?:", "("))
+	for _, path := range []string{
+		"/assets/app.css", "/assets/app.JS", "/assets/module.mjs", "/assets/app.js.map",
+		"/fonts/inter.woff", "/fonts/inter.woff2", "/fonts/inter.ttf", "/fonts/inter.otf",
+		"/images/photo.jpg", "/images/photo.jpeg", "/images/photo.png", "/images/photo.webp",
+		"/images/photo.avif", "/images/logo.svg", "/favicon.ico", "/app.webmanifest", "/module.wasm",
+	} {
+		if !matcher.MatchString(path) {
+			t.Errorf("static asset pattern did not match %q", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/data", "/api/report.json", "/download/image.png.exe", "/assets/app.js/extra",
+		"/images/avatar", "/assets/javascript", "/documents/report.pdf",
+	} {
+		if matcher.MatchString(path) {
+			t.Errorf("static asset pattern unexpectedly matched %q", path)
+		}
 	}
 }
 
@@ -116,7 +150,7 @@ func TestRenderEmptyNodeConfigurationDoesNotReferenceSiteVariables(t *testing.T)
 	if !strings.Contains(configuration, "location = /__cdn_health") {
 		t.Fatalf("empty node configuration lost the health endpoint:\n%s", configuration)
 	}
-	for _, unexpected := range []string{"$cdn_site_id", "proxy_cache_path", "log_format cdn_json", "client_max_body_size", "keepalive_timeout", "keepalive_requests"} {
+	for _, unexpected := range []string{"$cdn_site_id", "$cdn_is_static_asset", "proxy_cache_path", "log_format cdn_json", "client_max_body_size", "keepalive_timeout", "keepalive_requests"} {
 		if strings.Contains(configuration, unexpected) {
 			t.Fatalf("empty node configuration contains %q:\n%s", unexpected, configuration)
 		}
@@ -275,6 +309,29 @@ func TestRenderAutomaticallyRoutesWebSocketAndSSEWithoutPaths(t *testing.T) {
 			t.Fatalf("automatic streaming config contains retired directive %q:\n%s", retired, configuration)
 		}
 	}
+	httpLocation := renderedLocationBlock(t, configuration, "@cdn_http_site-1")
+	if !strings.Contains(httpLocation, "proxy_set_header Cookie $cdn_upstream_cookie;") {
+		t.Fatalf("regular cached location does not normalize static cookies:\n%s", httpLocation)
+	}
+	streamLocation := renderedLocationBlock(t, configuration, "@cdn_stream_site-1")
+	if strings.Contains(streamLocation, "proxy_set_header Cookie $cdn_upstream_cookie;") {
+		t.Fatalf("stream location unexpectedly strips cookies:\n%s", streamLocation)
+	}
+}
+
+func renderedLocationBlock(t *testing.T, configuration, name string) string {
+	t.Helper()
+	marker := "location " + name + " {"
+	start := strings.Index(configuration, marker)
+	if start < 0 {
+		t.Fatalf("configuration lacks %s", marker)
+	}
+	remainder := configuration[start:]
+	end := strings.Index(remainder, "\n\t}")
+	if end < 0 {
+		t.Fatalf("configuration has unterminated %s", marker)
+	}
+	return remainder[:end]
 }
 
 func TestRenderPassthroughDisablesCacheAndForwardsRanges(t *testing.T) {
@@ -309,6 +366,9 @@ func TestRenderPassthroughDisablesCacheAndForwardsRanges(t *testing.T) {
 	if strings.Contains(configuration, "proxy_cache cdn_cache;") || strings.Contains(configuration, "proxy_cache_key \"site-1:") {
 		t.Fatalf("passthrough site inherited cache configuration:\n%s", configuration)
 	}
+	if strings.Contains(configuration, "proxy_set_header Cookie $cdn_upstream_cookie;") {
+		t.Fatalf("passthrough site unexpectedly strips cookies from static-looking paths:\n%s", configuration)
+	}
 	if got := strings.Count(configuration, "proxy_cache off;"); got != 4 {
 		t.Fatalf("expected cache to be disabled in normal/stream primary/backup locations, got %d:\n%s", got, configuration)
 	}
@@ -327,6 +387,9 @@ func TestRenderWebSocketOriginRemainsFullyUnbuffered(t *testing.T) {
 	}
 	if strings.Contains(configuration, "proxy_cache cdn_cache;") {
 		t.Fatalf("WebSocket origin inherited HTTP cache configuration:\n%s", configuration)
+	}
+	if strings.Contains(configuration, "proxy_set_header Cookie $cdn_upstream_cookie;") {
+		t.Fatalf("WebSocket site unexpectedly strips cookies from static-looking paths:\n%s", configuration)
 	}
 	for _, expected := range []string{"proxy_pass https://origin_ws-site", "proxy_cache off;", "proxy_buffering off;", "proxy_request_buffering off;", "proxy_read_timeout 360s;"} {
 		if !strings.Contains(configuration, expected) {

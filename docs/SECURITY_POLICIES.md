@@ -2,7 +2,7 @@
 
 The **Security** workspace manages global HTTP access policies and active edge bans. Policies are ordered by ascending priority and match Nginx's normalized `$uri` value before a request is redirected or proxied. The supported expression language is the RE2-compatible subset of PCRE plus non-capturing groups. Additional validation rejects Nginx variable interpolation, high-backtracking repeated groups, and overly complex expressions before a policy can reach an edge.
 
-The built-in policy detects common sensitive-file probes such as `.env`, `.git`, `.aws`, `.docker`, `.htaccess`, and `.DS_Store`. It is enabled by default, uses the **IP ban** action, and defaults to six hours. The built-in policy can be edited or disabled but not deleted. Additional policies can either reject only the matching request or reject it and ban the source IPv4 for 1, 6, 12, or 24 hours.
+Two built-in policies are enabled by default. **Sensitive file scanning** detects segment-bounded probes for environment files, repository metadata, cloud and developer credentials, shell history, private keys, Terraform state, and `wp-config.php`; it uses the **IP ban** action for six hours. **PHP malicious file probing** blocks high-risk diagnostic and web-shell file names such as `phpinfo`, `shell`, `webshell`, `cmd`, `c99`, `r57`, and `wso`, while deliberately excluding normal entry points such as `index.php`, `api.php`, `admin.php`, and `config.php`. The PHP policy defaults to request-only blocking. Built-in policies can be edited or disabled but not deleted. Additional policies can either reject only the matching request or reject it and ban the source IPv4 for 1, 6, 12, or 24 hours.
 
 ## Request and ban flow
 

@@ -10,22 +10,32 @@ import (
 	"cdn-platform/internal/domain"
 )
 
+func defaultSecurityPoliciesForTest() []domain.SecurityPolicy {
+	return []domain.SecurityPolicy{
+		{
+			ID: domain.DefaultSecurityPolicyID, Name: "sensitive", Enabled: true,
+			Pattern: domain.DefaultSecurityPolicyPattern, Action: domain.SecurityActionBan,
+			BanDurationSeconds: 21600, Priority: 100,
+		},
+		{
+			ID: domain.DefaultPHPSecurityPolicyID, Name: "PHP probes", Enabled: true,
+			Pattern: domain.DefaultPHPSecurityPolicyPattern, Action: domain.SecurityActionBlock, Priority: 200,
+		},
+	}
+}
+
 func TestRenderWithSecurityPolicies(t *testing.T) {
 	site := domain.Site{
 		ID: "site-a", Name: "site-a", Domains: []string{"cdn.example.test"},
 		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
 	}
-	configuration, err := RenderWithSecurity([]domain.Site{site}, []domain.SecurityPolicy{{
-		ID: domain.DefaultSecurityPolicyID, Name: "sensitive", Enabled: true,
-		Pattern: domain.DefaultSecurityPolicyPattern, Action: domain.SecurityActionBan,
-		BanDurationSeconds: 21600, Priority: 100,
-	}})
+	configuration, err := RenderWithSecurity([]domain.Site{site}, defaultSecurityPoliciesForTest())
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, wanted := range []string{
 		"# CDN security revision:", "map $uri $cdn_security_policy_id", "log_format cdn_security_json", "security.json cdn_security_json",
-		"if ($cdn_security_policy_id) { return 444; }", `"ban"`, "21600", `\\.env`,
+		"if ($cdn_security_policy_id) { return 444; }", `"ban"`, `"block"`, "21600", `\\.env`, "php[-_]?info",
 	} {
 		if !strings.Contains(configuration, wanted) {
 			t.Errorf("security configuration lacks %q:\n%s", wanted, configuration)
@@ -59,11 +69,7 @@ func TestRenderedSecurityConfigurationPassesNginxSyntaxCheck(t *testing.T) {
 	if err != nil {
 		t.Skip("nginx is not installed")
 	}
-	configuration, err := RenderWithSecurity(nil, []domain.SecurityPolicy{{
-		ID: domain.DefaultSecurityPolicyID, Name: "sensitive", Enabled: true,
-		Pattern: domain.DefaultSecurityPolicyPattern, Action: domain.SecurityActionBan,
-		BanDurationSeconds: 21600, Priority: 100,
-	}})
+	configuration, err := RenderWithSecurity(nil, defaultSecurityPoliciesForTest())
 	if err != nil {
 		t.Fatal(err)
 	}

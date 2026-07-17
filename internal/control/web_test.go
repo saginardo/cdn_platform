@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"cdn-platform/internal/domain"
 )
 
 func TestEmbeddedConsoleDOMIDsMatchScriptReferences(t *testing.T) {
@@ -45,7 +47,7 @@ func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 		`最近 24 小时`,
 		`HTTP 4xx / 5xx`,
 		`站点请求趋势`,
-		`<th scope="col">传输量</th>`,
+		`data-overview-sort="bytes" data-sort-label="传输量"`,
 		`Cloudflare 区域 ID`,
 		`id="site-client-max-body-size"`,
 		`<option value="1024">1024 MiB</option>`,
@@ -309,6 +311,61 @@ func TestEmbeddedConsoleRendersOverviewChartsAndManualRefresh(t *testing.T) {
 		".site-sparkline",
 		"@media (max-width: 1200px)",
 	} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
+		}
+	}
+}
+
+func TestEmbeddedConsoleSortsOverviewSiteTrendColumns(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`id="overview-site-sort-head"`,
+		`data-overview-sort="name"`,
+		`data-overview-sort="requests"`,
+		`data-overview-sort="bytes"`,
+		`aria-sort="descending"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+	if count := len(regexp.MustCompile(`data-overview-sort="[^"]+"`).FindAllString(page, -1)); count != 3 {
+		t.Fatalf("overview trend table exposes %d sortable columns, want 3", count)
+	}
+	if !regexp.MustCompile(`<th scope="col" aria-sort="descending"><button[^>]+data-overview-sort="requests"`).MatchString(page) {
+		t.Fatal("request total must be the default descending sort column")
+	}
+
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"let overviewSiteSort = { key: 'requests', direction: 'desc' }",
+		"function overviewSiteSortDefaultDirection(key)",
+		"function sortOverviewSites(overviewSites)",
+		"return [...overviewSites].sort",
+		"function renderOverviewSiteSortControls()",
+		"byId('overview-site-sort-head').addEventListener('click'",
+		"overviewSiteSort.key === key",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+
+	stylesContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(stylesContents)
+	for _, expected := range []string{".overview-sort-button", ".overview-sort-indicator", ".overview-sort-button.is-active"} {
 		if !strings.Contains(styles, expected) {
 			t.Fatalf("styles.css does not contain %q", expected)
 		}
@@ -708,6 +765,10 @@ func TestEmbeddedConsoleIncludesSecurityWorkspace(t *testing.T) {
 		if !strings.Contains(script, expected) {
 			t.Fatalf("app.js does not contain %q", expected)
 		}
+	}
+	expectedDefaultPattern := "const defaultSecurityPolicyPattern = String.raw`" + domain.DefaultSecurityPolicyPattern + "`;"
+	if !strings.Contains(script, expectedDefaultPattern) {
+		t.Fatal("app.js default security pattern differs from the domain default")
 	}
 	styleContents, err := embeddedWeb.ReadFile("web/styles.css")
 	if err != nil {

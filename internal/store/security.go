@@ -109,7 +109,7 @@ func (s *Store) UpdateSecurityPolicy(id string, policy domain.SecurityPolicy) (d
 }
 
 func (s *Store) DeleteSecurityPolicy(id string) error {
-	if id == domain.DefaultSecurityPolicyID {
+	if domain.IsBuiltinSecurityPolicyID(id) {
 		return errors.New("the built-in security policy cannot be deleted; disable it instead")
 	}
 	result, err := s.db.Exec(`DELETE FROM security_policies WHERE id = ?`, id)
@@ -343,7 +343,7 @@ func scanSecurityPolicy(row scanner) (domain.SecurityPolicy, error) {
 		return domain.SecurityPolicy{}, err
 	}
 	policy.Enabled = enabled != 0
-	policy.Builtin = policy.ID == domain.DefaultSecurityPolicyID
+	policy.Builtin = domain.IsBuiltinSecurityPolicyID(policy.ID)
 	if policy.CreatedAt, err = parseTime(createdAt); err != nil {
 		return domain.SecurityPolicy{}, err
 	}

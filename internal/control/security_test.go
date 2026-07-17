@@ -131,7 +131,7 @@ func TestSecurityOverviewReportsCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(overview.Policies) != 1 || len(overview.Nodes) != 1 || !overview.Nodes[0].Capable || overview.Nodes[0].Configured {
+	if len(overview.Policies) != 2 || len(overview.Nodes) != 1 || !overview.Nodes[0].Capable || overview.Nodes[0].Configured {
 		t.Fatalf("security overview = %#v", overview)
 	}
 }

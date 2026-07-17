@@ -28,6 +28,7 @@ let overviewLoading = false;
 let overviewLoaded = false;
 let overviewData = null;
 let overviewSiteMetric = 'requests';
+let overviewSiteSort = { key: 'requests', direction: 'desc' };
 let logLoading = false;
 let logLoaded = false;
 let logSearchInitialized = false;
@@ -73,9 +74,11 @@ const defaultReadWriteTimeoutSeconds = 360;
 const defaultTCPConnectTimeoutSeconds = 10;
 const defaultTCPIdleTimeoutSeconds = 300;
 const defaultDNSTTLSeconds = 60;
-const defaultSecurityPolicyPattern = String.raw`(?i)^/+(?:\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|(?:[^/]+/)*\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|\.git(?:/|$|-)|\.aws(?:/|$)|\.docker/(?:config\.json|)|\.svn(?:/|$)|\.hg(?:/|$)|\.ht(?:access|passwd)|\.DS_Store$)`;
+const defaultSecurityPolicyPattern = String.raw`(?i)^/+(?:[^/]+/)*(?:\.env(?:[._~-][A-Za-z0-9][A-Za-z0-9._~-]*)?|\.git(?:config|-credentials)?(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.(?:aws|azure|docker|svn|hg|ssh|kube|gnupg|terraform)|\.ht(?:access|passwd)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.DS_Store|\.(?:npmrc|pypirc|netrc)|\.(?:bash|zsh|mysql|psql|rediscli|python)_history|id_(?:rsa|dsa|ecdsa|ed25519)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|terraform\.tfstate(?:\.backup)?|wp-config\.php(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?)(?:/|$)`;
 const numberFormatter = new Intl.NumberFormat('zh-CN');
 const compactNumberFormatter = new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 2 });
+const overviewSiteNameCollator = new Intl.Collator('zh-CN', { numeric: true, sensitivity: 'base' });
+const overviewSiteSortKeys = new Set(['name', 'requests', 'bytes']);
 const consoleViews = new Set(['overview', 'logs', 'security', 'nodes', 'sites', 'settings']);
 const viewLabels = { overview: '概览', logs: '日志', security: '安全', nodes: '节点', sites: '站点', settings: '设置' };
 const mobileSidebarQuery = window.matchMedia('(max-width: 800px)');
@@ -1649,9 +1652,49 @@ function renderStatusCodes(statusCodes, totalRequests) {
   byId('overview-status-legend').innerHTML = displayed.length ? displayed.map((item, index) => `<li><span class="legend-swatch swatch-${index}" aria-hidden="true"></span><span class="legend-code">${escapeHTML(item.code)}</span><span class="legend-count">${formatCompactNumber(item.requests)}</span></li>`).join('') : '<li class="legend-empty">暂无状态码数据</li>';
 }
 
+function overviewSiteSortDefaultDirection(key) {
+  return key === 'name' ? 'asc' : 'desc';
+}
+
+function overviewSiteName(site) {
+  return String(site.name || site.id || '未命名站点');
+}
+
+function sortOverviewSites(overviewSites) {
+  const { key, direction } = overviewSiteSort;
+  return [...overviewSites].sort((left, right) => {
+    const comparison = key === 'name'
+      ? overviewSiteNameCollator.compare(overviewSiteName(left), overviewSiteName(right))
+      : (Number(left[key]) || 0) - (Number(right[key]) || 0);
+    if (comparison) return direction === 'desc' ? -comparison : comparison;
+    const nameComparison = overviewSiteNameCollator.compare(overviewSiteName(left), overviewSiteName(right));
+    if (nameComparison) return nameComparison;
+    return overviewSiteNameCollator.compare(String(left.id || ''), String(right.id || ''));
+  });
+}
+
+function renderOverviewSiteSortControls() {
+  document.querySelectorAll('#overview-site-sort-head .overview-sort-button').forEach((button) => {
+    const key = button.dataset.overviewSort;
+    const active = key === overviewSiteSort.key;
+    const direction = active ? overviewSiteSort.direction : '';
+    const nextDirection = active
+      ? (direction === 'asc' ? 'desc' : 'asc')
+      : overviewSiteSortDefaultDirection(key);
+    const directionLabel = nextDirection === 'asc' ? '升序' : '降序';
+    button.closest('th').setAttribute('aria-sort', active ? (direction === 'asc' ? 'ascending' : 'descending') : 'none');
+    button.classList.toggle('is-active', active);
+    button.querySelector('.overview-sort-indicator').textContent = active ? (direction === 'asc' ? '↑' : '↓') : '↕';
+    button.setAttribute('aria-label', `按${button.dataset.sortLabel}${directionLabel}排序`);
+    button.title = `按${button.dataset.sortLabel}${directionLabel}排序`;
+  });
+}
+
 function renderOverviewSites(overviewSites) {
+  const sortedSites = sortOverviewSites(overviewSites);
+  renderOverviewSiteSortControls();
   byId('overview-site-count').textContent = `${numberFormatter.format(overviewSites.length)} 个站点`;
-  byId('overview-site-table').innerHTML = overviewSites.map((site) => {
+  byId('overview-site-table').innerHTML = sortedSites.map((site) => {
     const name = site.name || site.id || '未命名站点';
     const domains = Array.isArray(site.domains) ? site.domains.filter(Boolean) : [];
     const domain = domains.length ? `${domains[0]}${domains.length > 1 ? ` 等 ${domains.length} 个域名` : ''}` : '未配置域名';
@@ -2318,6 +2361,19 @@ byId('log-next').addEventListener('click', () => {
 });
 byId('overview-site-back').addEventListener('click', () => navigateTo('#/overview'));
 byId('overview-site-manage').addEventListener('click', () => navigateTo(`#/sites/${encodeURIComponent(byId('overview-site-manage').dataset.id)}`));
+byId('overview-site-sort-head').addEventListener('click', (event) => {
+  const button = event.target.closest('.overview-sort-button');
+  const key = button?.dataset.overviewSort;
+  if (!overviewSiteSortKeys.has(key)) return;
+  overviewSiteSort = {
+    key,
+    direction: overviewSiteSort.key === key
+      ? (overviewSiteSort.direction === 'asc' ? 'desc' : 'asc')
+      : overviewSiteSortDefaultDirection(key),
+  };
+  if (overviewData) renderOverviewSites(Array.isArray(overviewData.sites) ? overviewData.sites : []);
+  else renderOverviewSiteSortControls();
+});
 byId('overview-site-table').addEventListener('click', (event) => {
   const row = event.target.closest('.overview-site-row');
   if (row) navigateTo(`#/overview/sites/${encodeURIComponent(row.dataset.id)}`);

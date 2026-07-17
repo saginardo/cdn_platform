@@ -131,7 +131,14 @@
                   </div>
                   <div class="table-wrap overview-site-table-wrap">
                     <table class="overview-site-table">
-                      <thead><tr><th scope="col">站点</th><th scope="col">请求总量</th><th scope="col">传输量</th><th scope="col">24 小时请求趋势</th></tr></thead>
+                      <thead id="overview-site-sort-head">
+                        <tr>
+                          <th scope="col" aria-sort="none"><button class="overview-sort-button" type="button" data-overview-sort="name" data-sort-label="站点" aria-label="按站点升序排序"><span>站点</span><span class="overview-sort-indicator" aria-hidden="true">↕</span></button></th>
+                          <th scope="col" aria-sort="descending"><button class="overview-sort-button is-active" type="button" data-overview-sort="requests" data-sort-label="请求总量" aria-label="按请求总量升序排序"><span>请求总量</span><span class="overview-sort-indicator" aria-hidden="true">↓</span></button></th>
+                          <th scope="col" aria-sort="none"><button class="overview-sort-button" type="button" data-overview-sort="bytes" data-sort-label="传输量" aria-label="按传输量降序排序"><span>传输量</span><span class="overview-sort-indicator" aria-hidden="true">↕</span></button></th>
+                          <th scope="col">24 小时请求趋势</th>
+                        </tr>
+                      </thead>
                       <tbody id="overview-site-table"><tr><td colspan="4" class="muted">正在加载站点数据…</td></tr></tbody>
                     </table>
                   </div>

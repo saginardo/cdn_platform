@@ -2,20 +2,71 @@ package domain
 
 import "testing"
 
-func TestDefaultSecurityPolicyPatternAndDurations(t *testing.T) {
-	matcher, err := CompileSecurityPattern(DefaultSecurityPolicyPattern)
-	if err != nil {
-		t.Fatal(err)
+func TestDefaultSecurityPolicyPatterns(t *testing.T) {
+	tests := []struct {
+		name     string
+		pattern  string
+		matches  []string
+		excludes []string
+	}{
+		{
+			name: "sensitive files", pattern: DefaultSecurityPolicyPattern,
+			matches: []string{
+				"/.env", "/app/.env.production", "/app/.env.local.php", "/.git/config",
+				"/nested/repo/.git/HEAD", "/.gitconfig", "/.git-credentials.bak",
+				"/home/.AWS/credentials", "/nested/.docker/config.json", "/home/.ssh/id_rsa",
+				"/nested/.htpasswd.old", "/assets/.DS_Store", "/home/.npmrc",
+				"/home/.bash_history", "/keys/id_ed25519", "/state/terraform.tfstate.backup",
+				"/blog/wp-config.php.orig",
+			},
+			excludes: []string{
+				"/", "/assets/app.js", "/environment", "/.environment", "/.envato/logo",
+				"/.github/workflows/build.yml", "/.gitignore", "/.dockerignore", "/api/.awsome",
+				"/assets/.DS_Store.css", "/users/id_rsa_public", "/wp-config.php.css",
+			},
+		},
+		{
+			name: "PHP probes", pattern: DefaultPHPSecurityPolicyPattern,
+			matches: []string{
+				"/phpinfo.php", "/PHP-INFO.PHP", "/admin/shell.php", "/nested/webshell.phtml",
+				"/cmd.php.bak", "/wso.php.jpg", "/queryVersion.php", "/leftDao.phar",
+				"/backdoor.php7/path",
+			},
+			excludes: []string{
+				"/index.php", "/api.php", "/admin.php", "/config.php", "/status.php",
+				"/mail.php", "/test.php", "/debug.php", "/probe.php", "/i.php",
+				"/assets/shell.php.js", "/shell.js", "/cmd.php.css",
+			},
+		},
 	}
-	for _, path := range []string{"/.env", "/app/.env.production", "/.git/config", "/.AWS/credentials", "/.htpasswd"} {
-		if !matcher.MatchString(path) {
-			t.Errorf("default policy did not match %q", path)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			matcher, err := CompileSecurityPattern(test.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range test.matches {
+				if !matcher.MatchString(path) {
+					t.Errorf("default policy did not match %q", path)
+				}
+			}
+			for _, path := range test.excludes {
+				if matcher.MatchString(path) {
+					t.Errorf("default policy unexpectedly matched %q", path)
+				}
+			}
+		})
+	}
+}
+
+func TestDefaultSecurityPolicyIDsAndDurations(t *testing.T) {
+	for _, id := range []string{DefaultSecurityPolicyID, DefaultPHPSecurityPolicyID} {
+		if !IsBuiltinSecurityPolicyID(id) {
+			t.Errorf("default policy ID %q was not recognized", id)
 		}
 	}
-	for _, path := range []string{"/", "/assets/app.js", "/environment", "/git/config"} {
-		if matcher.MatchString(path) {
-			t.Errorf("default policy unexpectedly matched %q", path)
-		}
+	if IsBuiltinSecurityPolicyID("11111111-1111-4111-8111-111111111111") {
+		t.Fatal("custom policy ID was recognized as built-in")
 	}
 	for _, seconds := range []int{3600, 21600, 43200, 86400} {
 		if !ValidSecurityBanDuration(seconds) {
@@ -34,6 +85,12 @@ func TestNormalizeSecurityPolicy(t *testing.T) {
 	})
 	if err != nil || policy.Name != "sensitive files" {
 		t.Fatalf("normalized policy = %#v, err=%v", policy, err)
+	}
+	if _, err := NormalizeSecurityPolicy(SecurityPolicy{
+		Name: "PHP probes", Enabled: true, Pattern: DefaultPHPSecurityPolicyPattern,
+		Action: SecurityActionBlock, Priority: 200,
+	}); err != nil {
+		t.Fatalf("default PHP policy was rejected: %v", err)
 	}
 	if _, err := NormalizeSecurityPolicy(SecurityPolicy{Name: "bad", Pattern: `(?=lookahead)`, Action: SecurityActionBlock, Priority: 1}); err == nil {
 		t.Fatal("unsupported regular expression was accepted")

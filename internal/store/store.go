@@ -35,6 +35,8 @@ type Store struct {
 	db *sql.DB
 }
 
+const legacyDefaultSecurityPolicyPattern = `(?i)^/+(?:\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|(?:[^/]+/)*\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|\.git(?:/|$|-)|\.aws(?:/|$)|\.docker/(?:config\.json|)|\.svn(?:/|$)|\.hg(?:/|$)|\.ht(?:access|passwd)|\.DS_Store$)`
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
@@ -391,17 +393,58 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 		WHERE status IN ('queued', 'applying')`); err != nil {
 		return fmt.Errorf("create active node upgrade index: %w", err)
 	}
-	seededAt := stamp(now())
-	if _, err := s.db.Exec(`INSERT OR IGNORE INTO security_policies(
-		id, name, enabled, pattern, action, ban_duration_seconds, priority, created_at, updated_at)
-		VALUES (?, ?, 1, ?, ?, 21600, 100, ?, ?)`, domain.DefaultSecurityPolicyID,
-		"敏感文件扫描", domain.DefaultSecurityPolicyPattern, domain.SecurityActionBan, seededAt, seededAt); err != nil {
-		return fmt.Errorf("seed default security policy: %w", err)
+	if err := s.seedBuiltinSecurityPolicies(); err != nil {
+		return err
 	}
 	if err := s.backfillSitePublications(); err != nil {
 		return err
 	}
 	return s.backfillSiteDomains()
+}
+
+func (s *Store) seedBuiltinSecurityPolicies() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin built-in security policy migration: %w", err)
+	}
+	defer tx.Rollback()
+	seededAt := stamp(now())
+	if _, err := tx.Exec(`UPDATE security_policies SET pattern = ?, updated_at = ?
+		WHERE id = ? AND pattern = ?`, domain.DefaultSecurityPolicyPattern, seededAt,
+		domain.DefaultSecurityPolicyID, legacyDefaultSecurityPolicyPattern); err != nil {
+		return fmt.Errorf("upgrade built-in sensitive-file security policy: %w", err)
+	}
+	policies := []struct {
+		id         string
+		name       string
+		pattern    string
+		action     domain.SecurityPolicyAction
+		banSeconds int
+		priority   int
+	}{
+		{
+			id: domain.DefaultSecurityPolicyID, name: "敏感文件扫描",
+			pattern: domain.DefaultSecurityPolicyPattern, action: domain.SecurityActionBan,
+			banSeconds: 21600, priority: 100,
+		},
+		{
+			id: domain.DefaultPHPSecurityPolicyID, name: "PHP 恶意文件探测",
+			pattern: domain.DefaultPHPSecurityPolicyPattern, action: domain.SecurityActionBlock,
+			priority: 200,
+		},
+	}
+	for _, policy := range policies {
+		if _, err := tx.Exec(`INSERT INTO security_policies(
+			id, name, enabled, pattern, action, ban_duration_seconds, priority, created_at, updated_at)
+			VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`, policy.id,
+			policy.name, policy.pattern, policy.action, policy.banSeconds, policy.priority, seededAt, seededAt); err != nil {
+			return fmt.Errorf("seed built-in security policy %q: %w", policy.name, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit built-in security policy migration: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) backfillSiteDomains() error {

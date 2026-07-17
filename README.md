@@ -4,7 +4,7 @@ A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-
 
 ## What is implemented
 
-- Go control plane with SQLite metadata, Argon2id password login, TOTP, one-time recovery codes, CSRF protection, audit records, and a compact management UI with confirmation-protected site deletion.
+- Go control plane with SQLite metadata, Argon2id password login, TOTP, one-time recovery codes, CSRF protection, audit records, and a compact management UI with dedicated node/site detail pages, per-node 24-hour cache outcomes, and confirmation-protected deletion workflows.
 - Node-first enrollment: create a pending node, copy a 15-minute one-time bootstrap command, then bind all later edge calls to an internally issued mTLS client certificate.
 - Per-node online edge upgrades from the management UI, with mTLS task delivery, SHA-256 verification for every artifact, a detached systemd updater, new-agent heartbeat readiness, and transactional rollback.
 - Global malicious-path access policies with pre-origin Nginx rejection, durable edge events, native nftables IPv4 bans, fleet reconciliation, automatic expiry, and manual unban from the management UI.

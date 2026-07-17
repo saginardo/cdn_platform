@@ -135,6 +135,36 @@ func TestOverviewDecodesHourlyStatusRows(t *testing.T) {
 	}
 }
 
+func TestNodeCacheAggregatesStatusRowsForRequestedWindow(t *testing.T) {
+	from := time.Date(2026, 7, 16, 2, 3, 4, 5000000, time.UTC)
+	to := from.Add(24 * time.Hour)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query().Get("query")
+		for _, expected := range []string{
+			"upper(cache_status)", "node_id = {node_id:String}", "GROUP BY cache_status",
+			"timestamp >= {from:DateTime64(3)}", "timestamp < {to:DateTime64(3)}",
+		} {
+			if !strings.Contains(query, expected) {
+				t.Fatalf("query does not contain %q: %s", expected, query)
+			}
+		}
+		parameters := request.URL.Query()
+		if parameters.Get("param_node_id") != "node-1" || parameters.Get("param_from") != "2026-07-16 02:03:04.005" || parameters.Get("param_to") != "2026-07-17 02:03:04.005" {
+			t.Fatalf("unexpected parameters: %s", request.URL.RawQuery)
+		}
+		_, _ = io.WriteString(response, "{\"cache_status\":\"HIT\",\"requests\":\"12\",\"bytes\":\"1200\",\"last_seen_at\":\"2026-07-17 01:02:03.456\"}\n")
+	}))
+	defer server.Close()
+
+	buckets, err := (ClickHouse{Endpoint: server.URL}).NodeCache(context.Background(), "node-1", from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0].Status != "HIT" || buckets[0].Requests != 12 || buckets[0].Bytes != 1200 || buckets[0].LastSeenAt.Nanosecond() != 456000000 {
+		t.Fatalf("unexpected node cache buckets: %#v", buckets)
+	}
+}
+
 func TestClickHouseTimeDecodesNativeDateTimeFormat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		_, _ = io.WriteString(response, "{\"timestamp\":\"2026-01-02 03:04:05.123\",\"node_id\":\"node\",\"site_id\":\"site\",\"client_ip\":\"203.0.113.5\",\"method\":\"GET\",\"path\":\"/a\",\"status\":200,\"bytes\":10,\"duration_ms\":2,\"upstream\":\"origin\",\"cache_status\":\"HIT\"}\n")

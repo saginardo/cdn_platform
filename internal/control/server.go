@@ -92,6 +92,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/security/bans/{ip}", s.requireAdmin(s.deleteSecurityBan))
 	mux.HandleFunc("GET /api/nodes", s.requireAdmin(s.listNodes))
 	mux.HandleFunc("POST /api/nodes", s.requireAdmin(s.createNode))
+	mux.HandleFunc("GET /api/nodes/{id}", s.requireAdmin(s.nodeDetail))
+	mux.HandleFunc("GET /api/nodes/{id}/cache-status", s.requireAdmin(s.nodeCacheStatus))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/nodes/{id}/status", s.requireAdmin(s.setNodeStatus))
 	mux.HandleFunc("GET /api/nodes/{id}/upgrade", s.requireAdmin(s.nodeUpgradeStatus))

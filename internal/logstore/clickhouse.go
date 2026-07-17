@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,7 +22,10 @@ type Store interface {
 	Search(ctx context.Context, query LogQuery) (LogPage, error)
 	Metrics(ctx context.Context, siteID string, since time.Time) ([]MinuteMetric, error)
 	Overview(ctx context.Context, from, to time.Time) ([]OverviewBucket, error)
+	NodeCache(ctx context.Context, nodeID string, from, to time.Time) ([]NodeCacheBucket, error)
 }
+
+var ErrUnavailable = errors.New("log store unavailable")
 
 type LogQuery struct {
 	From        time.Time
@@ -57,6 +61,13 @@ type OverviewBucket struct {
 	Status   uint16    `json:"status"`
 	Requests uint64    `json:"requests"`
 	Bytes    int64     `json:"bytes"`
+}
+
+type NodeCacheBucket struct {
+	Status     string    `json:"status"`
+	Requests   uint64    `json:"requests"`
+	Bytes      int64     `json:"bytes"`
+	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
 type ClickHouse struct {
@@ -278,6 +289,37 @@ func (c ClickHouse) Overview(ctx context.Context, from, to time.Time) ([]Overvie
 	return buckets, nil
 }
 
+func (c ClickHouse) NodeCache(ctx context.Context, nodeID string, from, to time.Time) ([]NodeCacheBucket, error) {
+	query := `SELECT upper(cache_status) AS cache_status, count() AS requests, sum(bytes) AS bytes,
+		max(timestamp) AS last_seen_at FROM ` + identifier(c.database()) + `.cdn_access_logs
+		PREWHERE timestamp >= {from:DateTime64(3)} AND timestamp < {to:DateTime64(3)}
+		WHERE node_id = {node_id:String}
+		GROUP BY cache_status ORDER BY requests DESC, cache_status FORMAT JSONEachRow`
+	parameters := url.Values{
+		"param_node_id": {nodeID},
+		"param_from":    {from.UTC().Format("2006-01-02 15:04:05.000")},
+		"param_to":      {to.UTC().Format("2006-01-02 15:04:05.000")},
+	}
+	response, err := c.request(ctx, c.database(), query, nil, parameters)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	buckets := make([]NodeCacheBucket, 0)
+	decoder := json.NewDecoder(response.Body)
+	for {
+		var bucket NodeCacheBucket
+		if err := decoder.Decode(&bucket); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+		buckets = append(buckets, bucket)
+	}
+	return buckets, nil
+}
+
 func (c ClickHouse) query(ctx context.Context, query string, body *bytes.Buffer) error {
 	return c.queryInDatabase(ctx, c.database(), query, body)
 }
@@ -373,6 +415,9 @@ func (Noop) Metrics(context.Context, string, time.Time) ([]MinuteMetric, error) 
 func (Noop) Overview(context.Context, time.Time, time.Time) ([]OverviewBucket, error) {
 	return []OverviewBucket{}, nil
 }
+func (Noop) NodeCache(context.Context, string, time.Time, time.Time) ([]NodeCacheBucket, error) {
+	return nil, ErrUnavailable
+}
 
 type accessLogRow struct {
 	Timestamp   string `json:"timestamp"`
@@ -453,6 +498,32 @@ func (b *OverviewBucket) UnmarshalJSON(contents []byte) error {
 		return fmt.Errorf("decode overview bytes: %w", err)
 	}
 	*b = OverviewBucket{Hour: hour, SiteID: row.SiteID, Status: row.Status, Requests: requests, Bytes: bytes}
+	return nil
+}
+
+func (b *NodeCacheBucket) UnmarshalJSON(contents []byte) error {
+	var row struct {
+		Status     string          `json:"cache_status"`
+		Requests   json.RawMessage `json:"requests"`
+		Bytes      json.RawMessage `json:"bytes"`
+		LastSeenAt string          `json:"last_seen_at"`
+	}
+	if err := json.Unmarshal(contents, &row); err != nil {
+		return err
+	}
+	requests, err := parseJSONUint64(row.Requests)
+	if err != nil {
+		return fmt.Errorf("decode node cache requests: %w", err)
+	}
+	bytes, err := parseJSONInt64(row.Bytes)
+	if err != nil {
+		return fmt.Errorf("decode node cache bytes: %w", err)
+	}
+	lastSeenAt, err := parseClickHouseTime(row.LastSeenAt)
+	if err != nil {
+		return fmt.Errorf("decode node cache timestamp: %w", err)
+	}
+	*b = NodeCacheBucket{Status: row.Status, Requests: requests, Bytes: bytes, LastSeenAt: lastSeenAt}
 	return nil
 }
 

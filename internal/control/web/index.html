@@ -274,14 +274,92 @@
             </section>
 
             <section id="nodes" class="view hidden">
-          <div class="section-heading"><h1>节点</h1><button id="show-node-form">添加节点</button></div>
-          <form id="node-form" class="form-grid hidden">
-            <label>名称 <input id="node-name" required placeholder="sg-edge-01"></label>
-            <label>公网 IPv4 <input id="node-ip" required placeholder="203.0.113.10"></label>
-            <div><button type="submit">创建节点</button><button type="button" class="secondary cancel">取消</button></div>
-          </form>
-          <div id="node-command" class="secret hidden"></div>
-          <div class="table-wrap"><table><thead><tr><th>名称</th><th>节点 ID</th><th>IPv4</th><th>状态</th><th>代理版本</th><th>心跳</th><th>操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
+              <div id="node-list-page">
+                <div class="section-heading node-heading">
+                  <div class="heading-copy"><h1>节点</h1><p id="node-list-meta" class="section-meta">0 个节点</p></div>
+                  <button id="show-node-form" type="button">添加节点</button>
+                </div>
+                <form id="node-form" class="form-grid hidden">
+                  <label>名称 <input id="node-name" required placeholder="sg-edge-01"></label>
+                  <label>公网 IPv4 <input id="node-ip" required placeholder="203.0.113.10"></label>
+                  <div><button type="submit">创建节点</button><button type="button" class="secondary cancel">取消</button></div>
+                </form>
+                <div class="table-wrap node-table-wrap"><table class="node-list-table"><thead><tr><th scope="col">名称</th><th scope="col">IPv4</th><th scope="col">状态</th><th scope="col">代理版本</th><th scope="col">最近心跳</th><th scope="col">站点</th><th scope="col">操作</th></tr></thead><tbody id="node-table"></tbody></table></div>
+              </div>
+
+              <div id="node-detail-page" class="node-detail-page hidden">
+                <header class="node-detail-header">
+                  <div class="node-detail-heading">
+                    <button id="node-detail-back" class="secondary node-detail-back" type="button"><span aria-hidden="true">←</span><span>节点</span></button>
+                    <div class="node-detail-title-wrap">
+                      <div class="node-detail-title-line"><h1 id="node-detail-title" tabindex="-1">节点详情</h1><span id="node-detail-status" class="status pending">--</span></div>
+                      <p id="node-detail-meta" class="section-meta"></p>
+                    </div>
+                  </div>
+                  <button id="refresh-node-detail" class="secondary" type="button">刷新状态</button>
+                </header>
+                <div id="node-detail-state" class="node-detail-state hidden" role="status" aria-live="polite"></div>
+                <div id="node-detail-missing" class="node-detail-missing hidden">
+                  <h2>未找到节点</h2>
+                  <p>节点可能已被删除，或当前链接已失效。</p>
+                  <button id="node-missing-back" class="secondary" type="button">返回节点列表</button>
+                </div>
+                <div id="node-detail-content" class="hidden">
+                  <dl class="node-detail-summary">
+                    <div><dt>公网 IPv4</dt><dd><code id="node-detail-ip">--</code></dd></div>
+                    <div><dt>节点 ID</dt><dd><code id="node-detail-id">--</code></dd></div>
+                    <div><dt>最近心跳</dt><dd id="node-detail-heartbeat">--</dd></div>
+                    <div><dt>应用版本</dt><dd id="node-detail-version">--</dd></div>
+                    <div><dt>代理制品</dt><dd><code id="node-detail-agent">--</code></dd></div>
+                    <div><dt>节点能力</dt><dd id="node-detail-capabilities">--</dd></div>
+                  </dl>
+                  <div id="node-detail-error" class="node-detail-alert hidden" role="alert"></div>
+
+                  <section class="node-detail-section" aria-labelledby="node-cache-heading">
+                    <div class="node-detail-section-heading">
+                      <div><h2 id="node-cache-heading">缓存状态</h2><p id="node-cache-window" class="section-meta">最近 24 小时</p></div>
+                      <span id="node-cache-total" class="node-cache-total">--</span>
+                    </div>
+                    <dl class="node-cache-summary">
+                      <div><dt title="缓存命中响应占全部缓存查找的比例">命中率</dt><dd id="node-cache-hit-rate">--</dd></div>
+                      <div><dt>缓存查找</dt><dd id="node-cache-lookups">--</dd></div>
+                      <div><dt>缓存命中</dt><dd id="node-cache-hits">--</dd></div>
+                      <div><dt>绕过缓存</dt><dd id="node-cache-bypasses">--</dd></div>
+                    </dl>
+                    <div id="node-cache-state" class="node-cache-state" role="status" aria-live="polite"></div>
+                    <div id="node-cache-status-list" class="node-cache-status-list hidden"></div>
+                  </section>
+
+                  <section class="node-detail-section" aria-labelledby="node-sites-heading">
+                    <div class="node-detail-section-heading"><div><h2 id="node-sites-heading">分配站点</h2><p id="node-sites-meta" class="section-meta">0 个站点</p></div></div>
+                    <div id="node-sites-empty" class="node-detail-empty hidden">当前没有站点分配到此节点。</div>
+                    <div id="node-sites-table-wrap" class="table-wrap"><table class="node-sites-table"><thead><tr><th scope="col">站点</th><th scope="col">域名</th><th scope="col">发布状态</th><th scope="col">缓存</th></tr></thead><tbody id="node-sites-table"></tbody></table></div>
+                  </section>
+
+                  <section class="node-detail-section node-operations" aria-labelledby="node-operations-heading">
+                    <div class="node-detail-section-heading"><div><h2 id="node-operations-heading">节点操作</h2><p class="section-meta">部署、调度与生命周期</p></div></div>
+                    <div class="node-operation-list">
+                      <div class="node-operation">
+                        <div><h3>部署与版本</h3><div id="node-deployment-state" class="node-operation-state">--</div></div>
+                        <div id="node-deployment-actions" class="node-operation-actions"></div>
+                      </div>
+                      <pre id="node-command" class="secret hidden"></pre>
+                      <div class="node-operation">
+                        <div><h3>流量调度</h3><div id="node-scheduling-state" class="node-operation-state">--</div></div>
+                        <div id="node-scheduling-actions" class="node-operation-actions"></div>
+                      </div>
+                      <div class="node-operation">
+                        <div><h3>节点授权</h3><div id="node-authorization-state" class="node-operation-state">--</div></div>
+                        <div id="node-authorization-actions" class="node-operation-actions"></div>
+                      </div>
+                      <div class="node-operation node-operation-danger">
+                        <div><h3>卸载与记录</h3><div id="node-removal-state" class="node-operation-state">--</div></div>
+                        <div id="node-removal-actions" class="node-operation-actions"></div>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              </div>
 
           <dialog id="node-upgrade-dialog" aria-labelledby="node-upgrade-title">
             <div class="dialog-header">

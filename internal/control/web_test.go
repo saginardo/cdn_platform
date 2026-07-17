@@ -1,9 +1,33 @@
 package control
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
+
+func TestEmbeddedConsoleDOMIDsMatchScriptReferences(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]bool)
+	for _, match := range regexp.MustCompile(`\bid="([^"]+)"`).FindAllStringSubmatch(string(pageContents), -1) {
+		if ids[match[1]] {
+			t.Fatalf("index.html contains duplicate id %q", match[1])
+		}
+		ids[match[1]] = true
+	}
+	for _, match := range regexp.MustCompile(`byId\('([^']+)'\)`).FindAllStringSubmatch(string(scriptContents), -1) {
+		if !ids[match[1]] {
+			t.Fatalf("app.js references missing element id %q", match[1])
+		}
+	}
+}
 
 func TestEmbeddedConsoleUsesSimplifiedChinese(t *testing.T) {
 	contents, err := embeddedWeb.ReadFile("web/index.html")
@@ -54,7 +78,7 @@ func TestEmbeddedConsoleSupportsSingleNodeOnlineUpgrade(t *testing.T) {
 		t.Fatal(err)
 	}
 	page := string(pageContents)
-	for _, expected := range []string{`<th>代理版本</th>`, `id="node-upgrade-current"`, `id="node-upgrade-target"`, `id="node-upgrade-state"`} {
+	for _, expected := range []string{`<th scope="col">代理版本</th>`, `id="node-upgrade-current"`, `id="node-upgrade-target"`, `id="node-upgrade-state"`} {
 		if !strings.Contains(page, expected) {
 			t.Fatalf("index.html does not contain %q", expected)
 		}
@@ -98,6 +122,85 @@ func TestEmbeddedConsoleSupportsSingleNodeOnlineUpgrade(t *testing.T) {
 	}
 	if styles := string(stylesContents); !strings.Contains(styles, ".agent-version") || !strings.Contains(styles, ".upgrade-facts") {
 		t.Fatal("online upgrade styles are missing")
+	}
+}
+
+func TestEmbeddedConsoleUsesNodeManagementDetailAndCacheStatus(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{
+		`id="node-list-page"`, `id="node-detail-page"`, `id="node-detail-back"`,
+		`id="node-cache-hit-rate"`, `id="node-cache-status-list"`, `id="node-sites-table"`,
+		`id="node-deployment-actions"`, `id="node-scheduling-actions"`,
+		`id="node-authorization-actions"`, `id="node-removal-actions"`, `id="node-command"`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("index.html does not contain %q", expected)
+		}
+	}
+
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"function renderNodeRoute(route", "function renderNodeDetail(detail)",
+		"function renderNodeCacheStatus(cache)", "function renderNodeDetailOperations(node)",
+		"request(`/api/nodes/${nodeID}`)", "request(`/api/nodes/${nodeID}/cache-status`)",
+		"navigateTo(`#/nodes/${encodeURIComponent(button.dataset.id)}`)",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("app.js does not contain %q", expected)
+		}
+	}
+	rowStart := strings.Index(script, "function renderNodeRow(node)")
+	if rowStart < 0 {
+		t.Fatal("node list row renderer is missing")
+	}
+	rowEnd := strings.Index(script[rowStart:], "function shortDigest")
+	if rowEnd < 0 {
+		t.Fatal("node list row renderer boundary is missing")
+	}
+	rowRenderer := script[rowStart : rowStart+rowEnd]
+	if !strings.Contains(rowRenderer, "manage-node") {
+		t.Fatal("node list does not expose the management entry")
+	}
+	for _, operation := range []string{"enroll", "node-status", "node-upgrade", "node-uninstall", "node-delete"} {
+		if strings.Contains(rowRenderer, operation) {
+			t.Fatalf("node list still exposes detail operation %q", operation)
+		}
+	}
+	operationsStart := strings.Index(script, "function renderNodeDetailOperations(node)")
+	if operationsStart < 0 {
+		t.Fatal("node detail operation renderer is missing")
+	}
+	operationsEnd := strings.Index(script[operationsStart:], "function nodeCapabilityLabel")
+	if operationsEnd < 0 {
+		t.Fatal("node detail operation renderer boundary is missing")
+	}
+	operationsRenderer := script[operationsStart : operationsStart+operationsEnd]
+	for _, operation := range []string{"enroll", "node-upgrade", "node-status", `data-status="draining"`, `data-status="active"`, `data-status="revoked"`, "node-uninstall", "node-delete"} {
+		if !strings.Contains(operationsRenderer, operation) {
+			t.Fatalf("node detail is missing operation %q", operation)
+		}
+	}
+	if !strings.Contains(script, `<progress class="node-cache-status-track"`) || strings.Contains(script, `style="width:`) {
+		t.Fatal("node cache ratios must use CSP-compatible progress elements")
+	}
+
+	stylesContents, err := embeddedWeb.ReadFile("web/styles.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := string(stylesContents)
+	for _, expected := range []string{".node-detail-page", ".node-cache-summary", ".node-cache-status-row", ".node-operation-list"} {
+		if !strings.Contains(styles, expected) {
+			t.Fatalf("styles.css does not contain %q", expected)
+		}
 	}
 }
 

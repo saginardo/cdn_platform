@@ -120,6 +120,9 @@ func TestBuiltinSecurityPolicyMigration(t *testing.T) {
 	if _, err := database.db.Exec(`DELETE FROM security_policies WHERE id = ?`, domain.DefaultPHPSecurityPolicyID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version >= 3`); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}

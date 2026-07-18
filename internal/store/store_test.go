@@ -34,6 +34,37 @@ func TestEnrollmentTokenSingleUse(t *testing.T) {
 	}
 }
 
+func TestNodeStateNginxFragmentsRoundTrip(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-fragments", "203.0.113.60")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{
+		Version: 3, NginxConfig: "legacy HTTP", NginxStreamConfig: "legacy stream",
+		NginxFragments: &domain.NginxConfigFragments{
+			HTTPBase: "HTTP base", HTTPSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "HTTP site"}},
+			StreamBase: "stream base", StreamSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "stream site"}},
+		},
+		PublicPorts: []int{80, 443},
+	}
+	if err := database.SaveNodeState(node.ID, state, nil); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.NginxFragments == nil || loaded.NginxFragments.HTTPBase != "HTTP base" ||
+		len(loaded.NginxFragments.HTTPSites) != 1 || loaded.NginxFragments.StreamSites[0].Content != "stream site" {
+		t.Fatalf("stored Nginx fragments = %#v", loaded.NginxFragments)
+	}
+}
+
 func TestHealthHysteresis(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
@@ -401,6 +432,10 @@ func TestOpenClearsRetiredStreamPathsFromExistingDatabase(t *testing.T) {
 		_ = legacy.Close()
 		t.Fatal(err)
 	}
+	if _, err := legacy.Exec(`DELETE FROM schema_migrations`); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -655,6 +690,10 @@ func TestOpenBackfillsPublishedSiteSnapshots(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := legacy.Exec(`DROP TABLE site_publications`); err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`DELETE FROM schema_migrations`); err != nil {
 		_ = legacy.Close()
 		t.Fatal(err)
 	}

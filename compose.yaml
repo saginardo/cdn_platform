@@ -24,6 +24,7 @@ services:
       - ./data/clickhouse:/var/lib/clickhouse
       - ./logs/clickhouse:/var/log/clickhouse-server
       - ./backup/staging/clickhouse:/var/lib/clickhouse/backups
+      - ./backup/online-restore:/var/lib/clickhouse/backups/online-restore:ro
       - ${CDN_SOURCE_DIR:-.}/deploy/compose/clickhouse.xml:/etc/clickhouse-server/config.d/cdn-platform.xml:ro
       - ${CDN_SOURCE_DIR:-.}/deploy/clickhouse/cdn-platform-users.xml:/etc/clickhouse-server/users.d/cdn-platform.xml:ro
     healthcheck:
@@ -47,6 +48,7 @@ services:
     volumes:
       - ./data/control:/var/lib/cdn-platform:ro
       - ./data/control-tls:/var/lib/cdn-control-tls
+      - ./backup/online-restore:/var/lib/cdn-platform-restore
       - ./logs/certbot-control:/var/log/cdn-control-tls
     tmpfs:
       - /tmp:mode=0700,uid=10001,gid=10001
@@ -61,6 +63,9 @@ services:
     env_file:
       - ./config/control.env
       - ./config/backup.env
+    environment:
+      TZ: Asia/Shanghai
+      BACKUP_STATUS_FILE: /var/lib/cdn-platform-operations/backup.json
     restart: unless-stopped
     network_mode: host
     depends_on:
@@ -69,13 +74,17 @@ services:
       control-cert-bootstrap:
         condition: service_completed_successfully
     read_only: true
+    group_add:
+      - "101"
     tmpfs:
       - /tmp:mode=0700,uid=10001,gid=10001
     volumes:
       - ./data/control:/var/lib/cdn-platform
-      - ./data/control-tls:/var/lib/cdn-control-tls:ro
+      - ./data/control-tls:/var/lib/cdn-control-tls
       - ./logs/certbot-sites:/var/log/cdn-platform/certbot
       - ./config/restic-password:/deployment/config/restic-password:ro
+      - ./backup/status:/var/lib/cdn-platform-operations:ro
+      - ./backup/online-restore:/var/lib/cdn-platform-restore
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "--insecure", "https://127.0.0.1:8443/healthz"]
       interval: 15s
@@ -103,6 +112,7 @@ services:
       - ./data/control:/var/lib/cdn-platform:ro
       - ./data/control-tls:/var/lib/cdn-control-tls
       - ./logs/certbot-control:/var/log/cdn-control-tls
+      - ./backup/online-restore:/var/lib/cdn-platform-restore
     tmpfs:
       - /tmp:mode=0700,uid=10001,gid=10001
     restart: unless-stopped
@@ -122,12 +132,15 @@ services:
       - ./config/backup.env
     environment:
       TZ: Asia/Shanghai
+      BACKUP_STATUS_FILE: /var/lib/cdn-platform-operations/backup.json
     tmpfs:
       - /tmp:mode=0700
     volumes:
       - ./data/control:/var/lib/cdn-platform:ro
       - ./data/control-tls:/var/lib/cdn-control-tls:ro
       - ./backup/staging:/backup/staging
+      - ./backup/status:/var/lib/cdn-platform-operations
+      - ./backup/online-restore:/var/lib/cdn-platform-restore
       - ./config:/deployment/config:ro
       - ./compose.yaml:/deployment/compose.yaml:ro
       - ${CDN_SOURCE_DIR:-.}/Dockerfile:/deployment/Dockerfile:ro

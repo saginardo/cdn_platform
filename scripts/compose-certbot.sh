@@ -10,8 +10,29 @@ logs_dir=/var/log/cdn-control-tls
 credentials="${CERTBOT_CREDENTIALS_PATH:-/tmp/cloudflare.ini}"
 live_dir="$config_dir/live/$CONTROL_TLS_DOMAIN"
 mode="${1:-issue}"
+restore_root="${ONLINE_RESTORE_ROOT:-/var/lib/cdn-platform-restore}"
 
 mkdir -p "$config_dir" "$logs_dir" /tmp/certbot-work "$(dirname "$credentials")"
+
+run_certificate_operation() {
+  mkdir -p "$restore_root"
+  operation_lock="$restore_root/operations.lock"
+  touch "$operation_lock"
+  chmod 0660 "$operation_lock"
+  exec 9<>"$operation_lock"
+  flock --shared 9
+  if [[ -e "$restore_root/maintenance.lock" ]]; then
+    echo "certificate operation skipped while an online restore cutover is pending"
+    flock --unlock 9
+    exec 9>&-
+    return 0
+  fi
+  status=0
+  "$@" || status=$?
+  flock --unlock 9
+  exec 9>&-
+  return "$status"
+}
 
 write_credentials() {
   cdn-control cloudflare-credentials "$credentials"
@@ -37,16 +58,16 @@ renew() {
 
 case "$mode" in
   issue)
-    issue
+    run_certificate_operation issue
     ;;
   renew)
-    issue
-    renew
+    run_certificate_operation issue
+    run_certificate_operation renew
     ;;
   loop)
-    issue
+    run_certificate_operation issue
     while true; do
-      renew
+      run_certificate_operation renew
       sleep 12h & wait $!
     done
     ;;

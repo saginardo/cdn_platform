@@ -9,8 +9,16 @@ Edge nodes use the Debian Nginx package and a host systemd service. Docker is no
   config/
     edge.env
     certs/
-    nginx/cdn-platform.conf
-	nginx/cdn-platform-stream.conf
+    nginx/
+      cdn-platform.conf          # generated HTTP fragment index
+      cdn-platform-stream.conf   # generated stream fragment index
+      fragments/
+        http-v<version>-<hash>/
+          00-base.conf
+          site-<site-id>.conf
+        stream-v<version>-<hash>/
+          00-base.conf
+          site-<site-id>.conf
   data/
     edge-client.key
     edge-client.crt
@@ -39,7 +47,7 @@ Two system integration links remain outside this root because systemd and the De
 /etc/nginx/modules-enabled/99-cdn-platform-stream.conf
 ```
 
-The second Nginx integration file owns a top-level `stream { include ...; }` block; HTTP virtual hosts remain in `conf.d`. The installer adds Debian's `libnginx-mod-stream`, `libnginx-mod-http-lua`, and `nftables` packages. The Lua module supplies the cross-worker shared dictionary and request/response phases used by rate policies; no external rate-limit service is required. Nginx itself, its global configuration, system error log, and the agent journal remain managed by Debian. The agent runs as root because it atomically writes site certificates and both generated configurations, validates and reloads Nginx, and manages the isolated `inet cdn_platform` firewall table. Nginx cache files are owned by `www-data`.
+The second Nginx integration file owns a top-level `stream { include ...; }` block; HTTP virtual hosts remain in `conf.d`. Each stable index includes every `*.conf` file from one content-addressed version directory. `00-base.conf` owns shared maps, cache, log formats, resolvers, and default listeners; each site file owns only that site's upstreams and HTTP or stream servers. The Agent stages both directories before changing either index, validates the combined configuration, and restores the prior indexes, fragments, and TLS files on failure. Old version directories are cleaned only after a successful apply. The installer adds Debian's `libnginx-mod-stream`, `libnginx-mod-http-lua`, and `nftables` packages. The Lua module supplies the cross-worker shared dictionary and request/response phases used by rate policies; no external rate-limit service is required. Nginx itself, its global configuration, system error log, and the agent journal remain managed by Debian. The agent runs as root because it atomically writes site certificates and generated configuration, validates and reloads Nginx, and manages the isolated `inet cdn_platform` firewall table. Nginx cache files are owned by `www-data`.
 
 ## Fresh installation and upgrades
 
@@ -51,7 +59,7 @@ The installer is idempotent and recognizes these states:
 - Legacy deployment: migrates `/usr/local/bin/cdn-edge-agent`, `/etc/cdn-platform`, `/var/lib/cdn-platform`, `/var/log/cdn-platform`, `/var/cache/cdn-platform`, the Nginx include, and the systemd unit.
 - Existing `/opt/cdn-edge`: replaces the checksum-verified binary and service definition, adds the stream integration when missing, and preserves configuration data, identity, logs, and cache.
 
-The installed environment advertises `tcp_stream_v1`, `edge_rate_limit_v1`, `online_upgrade_v1`, `cache_usage_v1`, `machine_status_v1`, and, when nftables is available, `edge_security_v1` in every authenticated heartbeat. The controller refuses to publish a TCP rule to a node until the stream capability is present, renders malicious-path policies only for nodes with the access-security capability, and renders Lua rate policies only for nodes with the rate-limit capability. Rerun the node's generated deployment/upgrade command before its first TCP, access-security, rate-limit, cache-usage, or machine-status publication.
+The installed environment advertises `tcp_stream_v1`, `edge_rate_limit_v1`, `online_upgrade_v1`, `nginx_fragments_v1`, `cache_usage_v1`, `machine_status_v1`, and, when nftables is available, `edge_security_v1` in every authenticated heartbeat. The controller refuses to publish a TCP rule to a node until the stream capability is present, renders malicious-path policies only for nodes with the access-security capability, and renders Lua rate policies only for nodes with the rate-limit capability. Desired state carries both the full generated configuration and its split representation: fragment-capable Agents apply the split files, while older Agents ignore the new field and keep using the full configuration. Rerun the node's generated deployment/upgrade command before its first TCP, access-security, rate-limit, fragment, cache-usage, or machine-status publication.
 
 For a node that already has a control-plane certificate fingerprint, the generated upgrade command contains no new enrollment token. The installer requires the complete local mTLS key/certificate/CA set instead. This preserves the node identity and avoids leaving an unused valid enrollment token after an upgrade.
 
@@ -59,7 +67,7 @@ A valid layout marker and the platform integration links determine ownership. If
 
 ## Online upgrades
 
-The node page enables **升级** when an active or paused node has reported `online_upgrade_v1` within ten minutes and its running binary SHA-256 differs from `EDGE_BINARY_SHA256`. Releases installed before this capability require one final manual deployment/upgrade command to install the updater unit. The generated command remains available for new-node enrollment and recovery.
+The node page enables **升级** when an active or paused node has reported `online_upgrade_v1` within ten minutes and its running binary SHA-256 differs from `EDGE_BINARY_SHA256`. The node list also provides **全部升级**: it evaluates the entire fleet in one request, queues one task for every eligible outdated node, reuses an existing active task, and returns a per-node result for current, stale, revoked, uninstalled, or otherwise blocked nodes. One ineligible node does not prevent eligible nodes from being queued. Releases installed before this capability require one final manual deployment/upgrade command to install the updater unit. The generated command remains available for new-node enrollment and recovery.
 
 An online upgrade performs these steps:
 

@@ -47,6 +47,13 @@ func main() {
 		writeBackupRuntime(os.Args[2])
 		return
 	}
+	if len(os.Args) >= 2 && os.Args[1] == "backup-status" {
+		if len(os.Args) != 7 && len(os.Args) != 8 {
+			fatal("usage: cdn-control backup-status <path> <state> <attempt> <max-attempts> <started-at> [detail]")
+		}
+		writeBackupStatus(os.Args[2:])
+		return
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	dataDir := env("CONTROL_DATA_DIR", "/var/lib/cdn-platform")
 	key := os.Getenv("CONTROL_ENCRYPTION_KEY")
@@ -56,6 +63,30 @@ func main() {
 	cipher, err := control.NewCipher(key)
 	if err != nil {
 		fatal(err.Error())
+	}
+	restoreRoot := env("ONLINE_RESTORE_ROOT", "/var/lib/cdn-platform-restore")
+	clickHouseAdmin := control.HTTPClickHouseRestoreAdmin{
+		Endpoint: env("CLICKHOUSE_URL", "http://127.0.0.1:8123"),
+		Username: os.Getenv("CLICKHOUSE_USER"),
+		Password: os.Getenv("CLICKHOUSE_PASSWORD"),
+	}
+	restoreReadyTimeout := durationEnvironment("ONLINE_RESTORE_READY_TIMEOUT", 2*time.Minute)
+	restoreApplyTimeout := durationEnvironment("ONLINE_RESTORE_APPLY_TIMEOUT", 30*time.Minute)
+	appliedRestore, err := control.ApplyPendingOnlineRestore(context.Background(), control.OnlineRestoreApplyConfig{
+		Root:             restoreRoot,
+		DataDir:          dataDir,
+		TLSDir:           env("CONTROL_TLS_DIR", "/var/lib/cdn-control-tls"),
+		ControlTLSDomain: os.Getenv("CONTROL_TLS_DOMAIN"),
+		Cipher:           cipher,
+		ClickHouse:       clickHouseAdmin,
+		ReadyTimeout:     restoreReadyTimeout,
+		ApplyTimeout:     restoreApplyTimeout,
+	})
+	if err != nil {
+		fatal("apply pending online restore: " + err.Error())
+	}
+	if appliedRestore {
+		logger.Info("online restore cutover completed")
 	}
 	database, err := store.Open(filepath.Join(dataDir, "control.db"))
 	if err != nil {
@@ -73,6 +104,31 @@ func main() {
 	settings, err := control.NewSettingsManager(database, cipher, environment)
 	if err != nil {
 		fatal("load settings: " + err.Error())
+	}
+	var onlineRestore *control.OnlineRestoreManager
+	if os.Getenv("CLICKHOUSE_DISABLED") != "1" {
+		clickHouseGroupID := 101
+		if value := strings.TrimSpace(os.Getenv("CLICKHOUSE_HOST_GID")); value != "" {
+			clickHouseGroupID, err = strconv.Atoi(value)
+			if err != nil || clickHouseGroupID < 0 {
+				fatal("CLICKHOUSE_HOST_GID must be a non-negative integer")
+			}
+		}
+		onlineRestore, err = control.NewOnlineRestoreManager(control.OnlineRestoreManagerConfig{
+			Root:                restoreRoot,
+			Settings:            settings,
+			Cipher:              cipher,
+			ClickHouse:          clickHouseAdmin,
+			ControlTLSDomain:    os.Getenv("CONTROL_TLS_DOMAIN"),
+			ClickHouseGroupID:   clickHouseGroupID,
+			RestoreTimeout:      durationEnvironment("ONLINE_RESTORE_PREPARE_TIMEOUT", 2*time.Hour),
+			SnapshotListTimeout: durationEnvironment("ONLINE_RESTORE_LIST_TIMEOUT", time.Minute),
+			QuiesceTimeout:      durationEnvironment("ONLINE_RESTORE_QUIESCE_TIMEOUT", 2*time.Minute),
+		})
+		if err != nil {
+			fatal("initialize online restore: " + err.Error())
+		}
+		defer onlineRestore.Stop()
 	}
 	dns := &integrations.CloudflareDNS{Token: settings.CloudflareToken}
 	issuer := integrations.CertbotDNSIssuer{Email: os.Getenv("ACME_EMAIL"), ConfigDir: filepath.Join(dataDir, "letsencrypt"), Token: settings.CloudflareToken}
@@ -109,10 +165,12 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Cloudflare: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Settings: settings, BackupValidator: control.ResticBackupRepositoryValidator{}, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
+	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Cloudflare: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Settings: settings, BackupValidator: control.ResticBackupRepositoryValidator{}, BackupStatusPath: env("BACKUP_STATUS_FILE", "/var/lib/cdn-platform-operations/backup.json"), OnlineRestore: onlineRestore, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	server.RestartControl = stop
 	healthManager := &control.HealthManager{Server: server}
+	server.HealthManager = healthManager
 	certificateManager.Start(ctx)
 	defer certificateManager.Stop()
 	go healthManager.Run(ctx)
@@ -283,6 +341,67 @@ func writeBackupRuntime(directory string) {
 	}
 }
 
+func writeBackupStatus(arguments []string) {
+	attempt, err := strconv.Atoi(arguments[2])
+	if err != nil {
+		fatal("backup attempt must be an integer")
+	}
+	maxAttempts, err := strconv.Atoi(arguments[3])
+	if err != nil {
+		fatal("backup max attempts must be an integer")
+	}
+	startedAt, err := time.Parse(time.RFC3339, arguments[4])
+	if err != nil {
+		fatal("backup start time must use RFC3339: " + err.Error())
+	}
+	detail := ""
+	if len(arguments) == 6 {
+		detail = arguments[5]
+	}
+	host, _ := os.Hostname()
+	status, err := control.NewBackupRunStatus(arguments[1], attempt, maxAttempts, host, startedAt, time.Now(), detail)
+	if err != nil {
+		fatal("build backup status: " + err.Error())
+	}
+	if err := control.WriteBackupRunStatus(arguments[0], status); err != nil {
+		fatal(err.Error())
+	}
+	if status.State == control.BackupRunFailed {
+		if err := notifyBackupFailure(status); err != nil {
+			fatal("send backup failure alert: " + err.Error())
+		}
+	}
+}
+
+func notifyBackupFailure(status control.BackupRunStatus) error {
+	dataDir := env("CONTROL_DATA_DIR", "/var/lib/cdn-platform")
+	database, err := store.OpenReadOnly(filepath.Join(dataDir, "control.db"))
+	if err != nil {
+		return fmt.Errorf("open settings database: %w", err)
+	}
+	defer database.Close()
+	key := os.Getenv("CONTROL_ENCRYPTION_KEY")
+	if key == "" {
+		return errors.New("CONTROL_ENCRYPTION_KEY is required")
+	}
+	cipher, err := control.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	environment, err := settingsFromEnv()
+	if err != nil {
+		return err
+	}
+	settings, err := control.NewSettingsManager(database, cipher, environment)
+	if err != nil {
+		return fmt.Errorf("load SMTP settings: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	body := fmt.Sprintf("Host: %s\nStarted: %s\nFailed: %s\nAttempt: %d/%d\nError: %s\n", status.Host, status.StartedAt.Format(time.RFC3339), status.UpdatedAt.Format(time.RFC3339), status.Attempt, status.MaxAttempts, status.Error)
+	return settings.Notify(ctx, "[CDN Platform] Backup failed", body)
+}
+
 func writePrivateRuntimeFile(directory, name, value string) error {
 	temporary, err := os.CreateTemp(directory, "."+name+"-*")
 	if err != nil {
@@ -384,6 +503,18 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func durationEnvironment(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		fatal(name + " must be a positive Go duration")
+	}
+	return duration
 }
 func split(value string) []string {
 	var result []string

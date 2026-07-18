@@ -132,6 +132,63 @@ func TestEmbeddedConsoleSupportsSingleNodeOnlineUpgrade(t *testing.T) {
 	}
 }
 
+func TestEmbeddedConsoleUsesMessageCenterWithoutTopNotice(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{`id="message-center"`, `id="message-center-toggle"`, `id="mobile-message-center-toggle"`, `id="message-list"`, `id="mark-all-messages-read"`} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("message center is missing %q", expected)
+		}
+	}
+	if strings.Contains(page, `id="notice"`) {
+		t.Fatal("console still renders the top notice line")
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{"function renderMessages()", "request('/api/messages?limit=80')", "function setMessageCenterOpen(open", "request('/api/messages/read-all'"} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("message center script is missing %q", expected)
+		}
+	}
+	if strings.Contains(script, "byId('notice')") {
+		t.Fatal("console script still writes task state into the removed top notice")
+	}
+}
+
+func TestEmbeddedConsoleSupportsBulkUpgradeAndOnlineRestore(t *testing.T) {
+	pageContents, err := embeddedWeb.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(pageContents)
+	for _, expected := range []string{`id="upgrade-all-nodes"`, `id="node-upgrade-all-dialog"`, `id="online-restore-section"`, `id="backup-snapshot-table"`, `id="online-restore-dialog"`} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("bulk upgrade or online restore UI is missing %q", expected)
+		}
+	}
+	scriptContents, err := embeddedWeb.ReadFile("web/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptContents)
+	for _, expected := range []string{
+		"request('/api/nodes/upgrade-all'", "request('/api/backups/snapshots')",
+		"request('/api/backups/restores'", "/commit`, { method: 'POST'",
+		"function renderBackupSnapshots()", "function startAllNodeUpgrades()",
+		"backupSnapshotsError", "当前部署未启用在线恢复",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("bulk upgrade or online restore script is missing %q", expected)
+		}
+	}
+}
+
 func TestEmbeddedConsoleUsesNodeManagementDetailAndCacheStatus(t *testing.T) {
 	pageContents, err := embeddedWeb.ReadFile("web/index.html")
 	if err != nil {

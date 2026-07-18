@@ -28,6 +28,22 @@ type nodeUpgradeStatusResponse struct {
 	UpgradeTask       *domain.NodeUpgradeTask `json:"upgrade_task,omitempty"`
 }
 
+type nodeUpgradeAllResult struct {
+	NodeID string                  `json:"node_id"`
+	Name   string                  `json:"name"`
+	State  string                  `json:"state"`
+	Detail string                  `json:"detail,omitempty"`
+	Task   *domain.NodeUpgradeTask `json:"task,omitempty"`
+}
+
+type nodeUpgradeAllResponse struct {
+	Created       int                    `json:"created"`
+	AlreadyActive int                    `json:"already_active"`
+	UpToDate      int                    `json:"up_to_date"`
+	Blocked       int                    `json:"blocked"`
+	Results       []nodeUpgradeAllResult `json:"results"`
+}
+
 func (s *Server) buildNodeUpgradeStatus(node domain.Node) (nodeUpgradeStatusResponse, error) {
 	result := nodeUpgradeStatusResponse{Node: node, TargetAgentSHA256: strings.ToLower(strings.TrimSpace(s.EdgeBinarySHA256))}
 	for _, capability := range node.Capabilities {
@@ -163,6 +179,59 @@ func (s *Server) startNodeUpgrade(response http.ResponseWriter, request *http.Re
 		return
 	}
 	writeJSON(response, http.StatusOK, status)
+}
+
+func (s *Server) startAllNodeUpgrades(response http.ResponseWriter, request *http.Request) {
+	if err := s.Store.ReconcileNodeUpgrades(); err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	nodes, err := s.Store.ListNodes()
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	result := nodeUpgradeAllResponse{Results: make([]nodeUpgradeAllResult, 0, len(nodes))}
+	instruction := s.nodeUpgradeInstruction()
+	for _, node := range nodes {
+		status, err := s.buildNodeUpgradeStatus(node)
+		if err != nil {
+			writeError(response, http.StatusInternalServerError, err)
+			return
+		}
+		item := nodeUpgradeAllResult{NodeID: node.ID, Name: node.Name}
+		switch {
+		case status.UpgradeTask != nil && (status.UpgradeTask.Status == domain.NodeUpgradeQueued || status.UpgradeTask.Status == domain.NodeUpgradeApplying):
+			item.State, item.Detail, item.Task = "already_active", status.UpgradeBlocker, status.UpgradeTask
+			result.AlreadyActive++
+		case status.UpgradeUpToDate:
+			item.State, item.Detail = "up_to_date", status.UpgradeBlocker
+			result.UpToDate++
+		case !status.CanUpgrade:
+			item.State, item.Detail = "blocked", status.UpgradeBlocker
+			result.Blocked++
+		default:
+			task, _, err := s.Store.CreateOrGetNodeUpgrade(node.ID, instruction, time.Now().UTC().Add(nodeUpgradeTimeout))
+			if err != nil {
+				if errors.Is(err, store.ErrNodeOperationActive) || errors.Is(err, store.ErrNodeUpgradeActive) || errors.Is(err, store.ErrUpgradeRetryNotReady) {
+					item.State, item.Detail = "blocked", err.Error()
+					result.Blocked++
+					break
+				}
+				writeStoreError(response, err)
+				return
+			}
+			item.State, item.Detail, item.Task = "created", "节点升级已排队", &task
+			result.Created++
+			s.audit(request, adminID(request.Context()), "start_upgrade", "node", node.ID, "bulk target sha256:"+task.TargetSHA256)
+		}
+		result.Results = append(result.Results, item)
+	}
+	statusCode := http.StatusOK
+	if result.Created != 0 {
+		statusCode = http.StatusAccepted
+	}
+	writeJSON(response, statusCode, result)
 }
 
 func (s *Server) edgeUpgradeInstruction(response http.ResponseWriter, request *http.Request) {

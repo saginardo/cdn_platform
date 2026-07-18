@@ -23,7 +23,10 @@ The installer creates one operational and backup boundary:
     certbot-sites/
     certbot-control/
     clickhouse/
-  backup/staging/clickhouse/   native ClickHouse backup disk
+  backup/
+    staging/clickhouse/        native ClickHouse backup disk
+    status/backup.json         atomic scheduler status for UI/messages
+    online-restore/            staged online restore jobs and locks
 ```
 
 The shared host-network Caddy installation stays outside this directory. It proxies `control.example.com` from public port 443 to `https://127.0.0.1:${CONTROL_MTLS_PORT}`. The control container terminates TLS itself so edge mTLS remains end-to-end.
@@ -85,10 +88,12 @@ Start the optional scheduler only after these values are complete:
 cd /opt/cdn-platform
 sudo docker compose --profile backup up -d backup
 sudo docker compose --profile backup run --rm --entrypoint \
-  /usr/local/lib/cdn-platform/compose-backup.sh backup
+  /usr/local/lib/cdn-platform/compose-backup-run.sh backup
 ```
 
-The default schedule is 03:25 Asia/Shanghai with up to 20 minutes of random delay. Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `cdn_platform` ClickHouse database, not recreatable `system` diagnostic tables. After an upgrade that changes the backup scripts or image, rebuild the image and recreate the optional scheduler with `docker compose --profile backup up -d --build backup`.
+The default schedule is 03:25 Asia/Shanghai with up to 20 minutes of random delay. A scheduled or manual wrapper run takes a backup-only lock, then makes up to `BACKUP_MAX_ATTEMPTS` attempts (default 3), using `BACKUP_RETRY_DELAYS_SECONDS` (default `30,120`) between failures. It atomically updates `backup/status/backup.json`; the Settings view and message center expose running, retrying, successful, skipped-during-restore, and final-failure states. A final failure also sends an SMTP alert through the effective database-or-environment SMTP profile. A restore-maintenance skip is not retried or alerted. The scheduler remains alive after a failed or skipped run and evaluates the next scheduled time.
+
+Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `cdn_platform` ClickHouse database, not recreatable `system` diagnostic tables. Backup and certificate containers take a shared operation lock, while a restore cutover takes the exclusive lock and publishes a maintenance marker so no new writer operation starts during the swap. After an upgrade that changes the backup scripts or image, rebuild the image and recreate the optional scheduler with `docker compose --profile backup up -d --build backup`.
 
 ## Restore
 
@@ -99,4 +104,21 @@ sudo CDN_PLATFORM_ROOT=/opt/cdn-platform \
   ./app/scripts/restore-control-compose.sh latest
 ```
 
-The restore script refuses to overwrite an existing SQLite database unless `ALLOW_NONEMPTY_RESTORE=1` is explicitly set. It restores control secrets and TLS state, starts an empty ClickHouse, restores its native backup, and then starts the control services. After restoration, verify the public health endpoint and confirm that edge heartbeats resume before making configuration changes.
+Before a cutover, run the same recovery as an isolated drill:
+
+```bash
+sudo CDN_PLATFORM_ROOT=/opt/cdn-platform \
+  ./app/scripts/restore-control-compose.sh --verify-only latest
+```
+
+Both modes download while the live controller remains online, reject unsafe archives, run SQLite `quick_check`, require migration history, restore the native ClickHouse backup into a uniquely named temporary `Atomic` database, verify required tables, and run `CHECK TABLE`. Download, ClickHouse readiness, and ClickHouse operations have bounded timeouts. `--verify-only` then drops the temporary database without changing live data.
+
+A real cutover still refuses to overwrite an existing SQLite database unless `ALLOW_NONEMPTY_RESTORE=1` is explicitly set. Only after every validation succeeds does it create the same exclusive maintenance marker used by online restore, wait up to the configured readiness timeout for backup and certificate operations to quiesce, and stop the controller, certificate renewer, and backup writer. It then renames the live ClickHouse database to a rollback name; promotes the temporary database; swaps SQLite, control secrets/TLS, and `control.env`; and waits for the restored controller health check. A failed cutover attempts the reverse swap and restarts the services that had been running only if every rollback step succeeds. An incomplete rollback fails closed with all writers stopped, retains the maintenance marker, and keeps the staged paths for inspection. A successful cutover deliberately retains the old ClickHouse database and timestamped filesystem paths for an operator-controlled rollback. Review and remove them only after edge heartbeats, DNS reconciliation, certificate jobs, and log ingestion are verified.
+
+## Online restore
+
+The authenticated **Settings > S3 online restore** workflow uses the currently effective S3/Restic profile and does not require Docker socket access. It lists only snapshots tagged `cdn-control-compose`. Starting a job requires the selected snapshot's 8-character short ID; the controller downloads it, validates SQLite integrity and schema compatibility, proves that encrypted settings can be opened by the current `CONTROL_ENCRYPTION_KEY`, checks the internal CA and control TLS pair, hashes the artifacts, and restores ClickHouse to a temporary database while the live control plane continues to serve.
+
+When the job reaches **Ready**, live data is still unchanged. Committing requires the exact text `RESTORE`. The controller waits for active backup and certificate operations, writes a maintenance marker, exits cleanly, and applies the verified hashes at the next startup before opening SQLite. It promotes the temporary ClickHouse database, swaps SQLite (including stale WAL/SHM handling), internal CA, site Certbot state, and control TLS, then retains the previous files and ClickHouse database under job-specific rollback names. The current deployment environment files remain authoritative and are not restored by the online path. The Compose restart policy brings the controller back; the UI reconnects and the message center records the terminal state.
+
+Only one restore job may be active. A downloading or validating job can be cancelled without touching live data; a ready job can also be cancelled and its temporary database is dropped. A committed job cannot be cancelled. If rollback is incomplete, the maintenance marker is retained and startup fails closed so an operator can inspect both versions rather than resume writers against a mixed state. Keep the offline script and credential record: online restore is a convenience for a healthy controller, not a replacement for bare-host disaster recovery.

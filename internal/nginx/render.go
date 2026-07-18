@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sort"
@@ -79,6 +80,7 @@ server {
 {{end}}
 
 {{range .Sites}}
+# CDN HTTP site fragment {{.ID}} begin
 {{if .BackupHostPort}}
 upstream origin_{{.ID}}_primary {
     server {{.PrimaryHostPort}} max_fails=2 fail_timeout=10s;
@@ -362,8 +364,9 @@ server {
 		{{end}}
 	}
 	{{end}}
-	{{end}}
+		{{end}}
 }
+# CDN HTTP site fragment {{.ID}} end
 {{end}}
 `
 
@@ -505,6 +508,74 @@ func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []doma
 	return out.String(), nil
 }
 
+func SplitHTTPConfig(configuration string) (string, []domain.NginxConfigFragment, error) {
+	const markerPrefix = "# CDN HTTP site fragment "
+	var base strings.Builder
+	fragments := make([]domain.NginxConfigFragment, 0)
+	cursor := 0
+	for {
+		relativeStart := strings.Index(configuration[cursor:], markerPrefix)
+		if relativeStart < 0 {
+			base.WriteString(configuration[cursor:])
+			break
+		}
+		start := cursor + relativeStart
+		lineEnd := strings.IndexByte(configuration[start:], '\n')
+		if lineEnd < 0 {
+			return "", nil, errors.New("HTTP site fragment marker is incomplete")
+		}
+		lineEnd += start
+		marker := strings.TrimSpace(configuration[start:lineEnd])
+		if !strings.HasSuffix(marker, " begin") {
+			return "", nil, fmt.Errorf("invalid HTTP site fragment marker %q", marker)
+		}
+		siteID := strings.TrimSuffix(strings.TrimPrefix(marker, markerPrefix), " begin")
+		if siteID == "" {
+			return "", nil, errors.New("HTTP site fragment marker is missing a site ID")
+		}
+		endMarker := markerPrefix + siteID + " end"
+		relativeEnd := strings.Index(configuration[lineEnd+1:], endMarker)
+		if relativeEnd < 0 {
+			return "", nil, fmt.Errorf("HTTP site fragment %s has no end marker", siteID)
+		}
+		end := lineEnd + 1 + relativeEnd + len(endMarker)
+		if end < len(configuration) && configuration[end] == '\n' {
+			end++
+		}
+		base.WriteString(configuration[cursor:start])
+		fragments = append(fragments, domain.NginxConfigFragment{Name: siteFragmentName(siteID), Content: configuration[start:end]})
+		cursor = end
+	}
+	return base.String(), fragments, nil
+}
+
+func SplitConfigFragments(httpConfiguration, streamConfiguration string) (*domain.NginxConfigFragments, error) {
+	httpBase, httpSites, err := SplitHTTPConfig(httpConfiguration)
+	if err != nil {
+		return nil, err
+	}
+	streamBase, streamSites, err := SplitStreamConfig(streamConfiguration)
+	if err != nil {
+		return nil, err
+	}
+	return &domain.NginxConfigFragments{
+		HTTPBase: httpBase, HTTPSites: httpSites, StreamBase: streamBase, StreamSites: streamSites,
+	}, nil
+}
+
+func siteFragmentName(siteID string) string {
+	var name strings.Builder
+	for _, character := range siteID {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
+			name.WriteRune(character)
+			continue
+		}
+		name.WriteByte('-')
+	}
+	return "site-" + name.String() + ".conf"
+}
+
 func normalizeRateLimitPolicies(policies []domain.RateLimitPolicy) ([]domain.RateLimitPolicy, error) {
 	result := make([]domain.RateLimitPolicy, 0, len(policies))
 	for _, policy := range policies {
@@ -557,7 +628,7 @@ func renderSecurityConfig(policies []domain.SecurityPolicy, httpEnabled bool) st
 	}
 	result.WriteString("map $uri $cdn_security_policy_id {\n    default \"\";\n")
 	for _, policy := range policies {
-		result.WriteString("    ~\"")
+		result.WriteString("    \"~")
 		result.WriteString(escapeNginxQuotedPattern(policy.Pattern))
 		result.WriteString("\" \"")
 		result.WriteString(policy.ID)

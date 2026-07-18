@@ -340,6 +340,34 @@ func TestComposeBackupCommandsResolveRuntimeSettings(t *testing.T) {
 	if strings.Count(compose, "- ./config/backup.env") < 2 || strings.Count(compose, "- ./config/control.env") < 3 || !strings.Contains(compose, "./config/restic-password:/deployment/config/restic-password:ro") {
 		t.Fatal("Compose does not provide backup fallbacks and decryption material to both services")
 	}
+	if !strings.Contains(compose, "./backup/status:/var/lib/cdn-platform-operations:ro") || !strings.Contains(compose, "./backup/status:/var/lib/cdn-platform-operations\n") {
+		t.Fatal("Compose does not share backup status with the controller")
+	}
+}
+
+func TestComposeRestoreStagesAndValidatesBeforeBoundedCutover(t *testing.T) {
+	contents, err := os.ReadFile(filepath.Join("..", "..", "scripts", "restore-control-compose.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, expected := range []string{
+		"--verify-only",
+		"PRAGMA quick_check;",
+		"RESTORE DATABASE cdn_platform AS $temporary_database",
+		"CHECK TABLE $temporary_database.$table",
+		"RESTORE_CLICKHOUSE_READY_TIMEOUT_SECONDS",
+		"RENAME DATABASE cdn_platform TO $rollback_database",
+		"rollback_cutover",
+		"live data was not changed",
+	} {
+		if !strings.Contains(script, expected) {
+			t.Fatalf("restore script is missing %q", expected)
+		}
+	}
+	if strings.Contains(script, "until docker compose exec -T clickhouse clickhouse-client --query 'SELECT 1' >/dev/null 2>&1; do sleep 2; done") {
+		t.Fatal("restore script still waits indefinitely for ClickHouse")
+	}
 }
 
 func TestComposeBackupRuntimeLoaderCanRefreshRepeatedly(t *testing.T) {

@@ -280,15 +280,19 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 		if err != nil {
 			return nil, nil, err
 		}
+		fragments, err := nginx.SplitConfigFragments(config, streamConfig)
+		if err != nil {
+			return nil, nil, fmt.Errorf("split Nginx configuration for node %s: %w", node.Name, err)
+		}
 		ports := requiredPublicPorts(nodeSites)
 		version := int64(1)
 		if stateErr == nil {
-			if p.nodeStateMatches(previous, previousCertificates, config, streamConfig, ports, certificates) {
+			if p.nodeStateMatches(previous, previousCertificates, config, streamConfig, fragments, ports, certificates) {
 				continue
 			}
 			version = previous.Version + 1
 		}
-		state := domain.DesiredState{Version: version, NginxConfig: config, NginxStreamConfig: streamConfig, PublicPorts: ports, Certificates: certificates}
+		state := domain.DesiredState{Version: version, NginxConfig: config, NginxStreamConfig: streamConfig, NginxFragments: fragments, PublicPorts: ports, Certificates: certificates}
 		serialized, err := json.Marshal(state.Certificates)
 		if err != nil {
 			return nil, nil, err
@@ -343,8 +347,9 @@ func (p Publisher) decryptPublicationMaterials(materials []publicationMaterial, 
 	return rendered, nil
 }
 
-func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCertificates []byte, config, streamConfig string, ports []int, certificates map[string]domain.TLSBundle) bool {
-	if previous.NginxConfig != config || previous.NginxStreamConfig != streamConfig || !slices.Equal(previous.PublicPorts, ports) {
+func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCertificates []byte, config, streamConfig string, fragments *domain.NginxConfigFragments, ports []int, certificates map[string]domain.TLSBundle) bool {
+	if previous.NginxConfig != config || previous.NginxStreamConfig != streamConfig ||
+		!nginxConfigFragmentsEqual(previous.NginxFragments, fragments) || !slices.Equal(previous.PublicPorts, ports) {
 		return false
 	}
 	previousBundles := make(map[string]domain.TLSBundle)
@@ -355,6 +360,14 @@ func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCerti
 		}
 	}
 	return maps.Equal(previousBundles, certificates)
+}
+
+func nginxConfigFragmentsEqual(left, right *domain.NginxConfigFragments) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.HTTPBase == right.HTTPBase && left.StreamBase == right.StreamBase &&
+		slices.Equal(left.HTTPSites, right.HTTPSites) && slices.Equal(left.StreamSites, right.StreamSites)
 }
 
 func siteTouchesNodes(site domain.Site, nodeIDs map[string]struct{}) bool {

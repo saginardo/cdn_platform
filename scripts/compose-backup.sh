@@ -2,6 +2,19 @@
 set -euo pipefail
 umask 077
 
+restore_root="${ONLINE_RESTORE_ROOT:-/var/lib/cdn-platform-restore}"
+mkdir -p "$restore_root"
+operation_lock="$restore_root/operations.lock"
+touch "$operation_lock"
+if [[ $EUID -eq 0 ]]; then chown 10001:10001 "$operation_lock"; fi
+chmod 0660 "$operation_lock"
+exec 9<>"$operation_lock"
+flock --shared 9
+if [[ -e "$restore_root/maintenance.lock" ]]; then
+  echo "backup skipped while an online restore cutover is pending" >&2
+  exit 75
+fi
+
 runtime_dir=$(mktemp -d /tmp/cdn-backup-runtime.XXXXXX)
 trap 'rm -rf "$runtime_dir"' EXIT
 # shellcheck source=/dev/null
@@ -44,7 +57,9 @@ if ((${#archive_inputs[@]})); then
 else
   tar --create --gzip --file "$control_staging/control-secrets.tar.gz" --files-from /dev/null
 fi
-tar --create --gzip --file "$control_staging/control-tls.tar.gz" --directory "$tls_dir" .
+tar --create --gzip --file "$control_staging/control-tls.tar.gz" \
+  --exclude='./before-restore-*' --exclude='./.online-restore-*' \
+  --directory "$tls_dir" .
 
 backup_query="BACKUP DATABASE ${clickhouse_database} TO Disk('backups', '${snapshot_name}')"
 curl --fail-with-body --silent --show-error --data-binary "$backup_query" "$clickhouse_url/"

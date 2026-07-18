@@ -370,3 +370,145 @@ func TestNewRejectsInsecureControlURL(t *testing.T) {
 		t.Fatal("expected HTTP control URL to be rejected")
 	}
 }
+
+func TestApplyWritesVersionedNginxFragmentDirectories(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	streamConfigPath := filepath.Join(directory, "nginx-stream.conf")
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath: configPath, NginxStreamConfigPath: streamConfigPath,
+		CertificateDir: filepath.Join(directory, "certs"), Runner: &fakeRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{
+		Version: 5, NginxConfig: "legacy HTTP config", NginxStreamConfig: "legacy stream config", PublicPorts: []int{},
+		NginxFragments: &domain.NginxConfigFragments{
+			HTTPBase: "# HTTP base\n", HTTPSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "# HTTP site A\n"}},
+			StreamBase: "# stream base\n", StreamSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "# stream site A\n"}},
+		},
+	}
+	if err := agent.apply(state); err != nil {
+		t.Fatal(err)
+	}
+	httpIndex, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamIndex, err := os.ReadFile(streamConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(httpIndex), "/fragments/http-v5-") || !strings.Contains(string(streamIndex), "/fragments/stream-v5-") ||
+		strings.Contains(string(httpIndex), state.NginxConfig) {
+		t.Fatalf("fragment indexes: HTTP=%q stream=%q", httpIndex, streamIndex)
+	}
+	for pattern, expected := range map[string]int{
+		filepath.Join(directory, "fragments", "http-v5-*", "*.conf"):   2,
+		filepath.Join(directory, "fragments", "stream-v5-*", "*.conf"): 2,
+	} {
+		paths, err := filepath.Glob(pattern)
+		if err != nil || len(paths) != expected {
+			t.Fatalf("fragment files %s = %#v, %v", pattern, paths, err)
+		}
+	}
+	if !slicesContain(agent.Config.Capabilities, domain.EdgeCapabilityNginxFragments) {
+		t.Fatalf("agent capabilities = %#v", agent.Config.Capabilities)
+	}
+}
+
+func TestFragmentApplyFailureRestoresIndexesAndRemovesStagedVersion(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	streamConfigPath := filepath.Join(directory, "nginx-stream.conf")
+	if err := os.WriteFile(configPath, []byte("old HTTP"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(streamConfigPath, []byte("old stream"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath: configPath, NginxStreamConfigPath: streamConfigPath,
+		CertificateDir: filepath.Join(directory, "certs"), Runner: &fakeRunner{testErr: errors.New("invalid fragments")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{Version: 6, NginxConfig: "legacy", PublicPorts: []int{}, NginxFragments: &domain.NginxConfigFragments{HTTPBase: "# base\n", StreamBase: "# stream\n"}}
+	if err := agent.apply(state); err == nil {
+		t.Fatal("invalid fragmented configuration was accepted")
+	}
+	for path, want := range map[string]string{configPath: "old HTTP", streamConfigPath: "old stream"} {
+		contents, err := os.ReadFile(path)
+		if err != nil || string(contents) != want {
+			t.Fatalf("restored index %s = %q, %v", path, contents, err)
+		}
+	}
+	paths, err := filepath.Glob(filepath.Join(directory, "fragments", "*-v6-*"))
+	if err != nil || len(paths) != 0 {
+		t.Fatalf("failed fragment version remains: %#v, %v", paths, err)
+	}
+}
+
+func TestFragmentUpgradeFailureRestoresPreviousFragmentGeneration(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "nginx.conf")
+	streamConfigPath := filepath.Join(directory, "nginx-stream.conf")
+	runner := &fakeRunner{}
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath: configPath, NginxStreamConfigPath: streamConfigPath,
+		CertificateDir: filepath.Join(directory, "certs"), Runner: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{Version: 5, PublicPorts: []int{}, NginxFragments: &domain.NginxConfigFragments{
+		HTTPBase: "# old HTTP base\n", HTTPSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "# old HTTP site\n"}},
+		StreamBase: "# old stream base\n", StreamSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "# old stream site\n"}},
+	}}
+	if err := agent.apply(state); err != nil {
+		t.Fatal(err)
+	}
+	oldHTTPIndex, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStreamIndex, err := os.ReadFile(streamConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.testErr = errors.New("new fragment generation is invalid")
+	state.Version = 6
+	state.NginxFragments.HTTPBase = "# new HTTP base\n"
+	state.NginxFragments.StreamBase = "# new stream base\n"
+	if err := agent.apply(state); err == nil {
+		t.Fatal("invalid fragment upgrade was accepted")
+	}
+	for path, want := range map[string]string{configPath: string(oldHTTPIndex), streamConfigPath: string(oldStreamIndex)} {
+		contents, err := os.ReadFile(path)
+		if err != nil || string(contents) != want {
+			t.Fatalf("restored fragment index %s = %q, %v", path, contents, err)
+		}
+	}
+	oldPaths, err := filepath.Glob(filepath.Join(directory, "fragments", "*-v5-*", "*.conf"))
+	if err != nil || len(oldPaths) != 4 {
+		t.Fatalf("previous fragment generation = %#v, %v", oldPaths, err)
+	}
+	newPaths, err := filepath.Glob(filepath.Join(directory, "fragments", "*-v6-*"))
+	if err != nil || len(newPaths) != 0 {
+		t.Fatalf("failed fragment generation remains = %#v, %v", newPaths, err)
+	}
+}
+
+func slicesContain(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}

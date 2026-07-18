@@ -51,6 +51,21 @@ let securityLoading = false;
 let securityPollTimer = null;
 let securityActionPending = false;
 let securityDataGeneration = 0;
+let messagePage = { messages: [], unread_count: 0 };
+let localMessages = [];
+let messageFilter = 'all';
+let messagePollTimer = null;
+let messageLoading = false;
+let backupSnapshots = [];
+let backupSnapshotsLoaded = false;
+let backupSnapshotsError = '';
+let backupRunStatus = null;
+let onlineRestoreJob = null;
+let onlineRestoreLoading = false;
+let onlineRestorePollTimer = null;
+let onlineRestoreDialogMode = '';
+let onlineRestoreSelectedSnapshot = null;
+let bulkUpgradePending = false;
 
 const nodeStatusLabels = {
   pending: '待激活',
@@ -121,13 +136,126 @@ async function request(path, options = {}) {
 }
 
 function notice(message, success = false) {
-  const target = byId('app').classList.contains('hidden') ? 'auth-notice' : 'notice';
-  const box = byId(target);
-  box.textContent = message;
-  box.className = success ? (target === 'auth-notice' ? 'auth-notice success' : 'success') : (target === 'auth-notice' ? 'auth-notice' : '');
+  if (byId('app').classList.contains('hidden')) {
+    const box = byId('auth-notice');
+    box.textContent = message;
+    box.className = success ? 'auth-notice success' : 'auth-notice';
+    return;
+  }
+  const createdAt = new Date().toISOString();
+  localMessages.unshift({
+    id: `local-${createdAt}-${Math.random().toString(16).slice(2)}`,
+    severity: success ? 'success' : 'error',
+    category: 'local',
+    title: success ? '操作成功' : '操作失败',
+    body: String(message || ''),
+    created_at: createdAt,
+    read_at: null,
+    local: true,
+  });
+  localMessages = localMessages.slice(0, 20);
+  renderMessages();
 }
 function show(id) { byId(id).classList.remove('hidden'); }
 function hide(id) { byId(id).classList.add('hidden'); }
+
+function messageCenterOpen() { return document.body.classList.contains('message-center-open'); }
+
+function setMessageCenterOpen(open, restoreFocus = false) {
+  document.body.classList.toggle('message-center-open', Boolean(open));
+  byId('message-center').setAttribute('aria-hidden', String(!open));
+  for (const id of ['message-center-toggle', 'mobile-message-center-toggle']) byId(id).setAttribute('aria-expanded', String(Boolean(open)));
+  if (open) {
+    void refreshMessages({ schedule: false });
+    window.requestAnimationFrame(() => byId('close-message-center').focus());
+  } else if (restoreFocus) {
+    const trigger = mobileSidebarQuery.matches ? byId('mobile-message-center-toggle') : byId('message-center-toggle');
+    trigger.focus();
+  }
+}
+
+function messageResourceHash(message) {
+  if (message.resource_type === 'site' && message.resource_id) return `#/sites/${encodeURIComponent(message.resource_id)}`;
+  if (message.resource_type === 'node' && message.resource_id) return `#/nodes/${encodeURIComponent(message.resource_id)}`;
+  if (message.category === 'backup' || message.category === 'restore') return '#/settings';
+  return '';
+}
+
+function messageSeverityLabel(severity) {
+  if (severity === 'success') return '成功';
+  if (severity === 'warning') return '注意';
+  if (severity === 'error') return '失败';
+  return '信息';
+}
+
+function renderMessages() {
+  const serverMessages = Array.isArray(messagePage.messages) ? messagePage.messages : [];
+  const messages = [...localMessages, ...serverMessages]
+    .filter((message) => messageFilter !== 'unread' || !message.read_at)
+    .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime());
+  const localUnread = localMessages.filter((message) => !message.read_at).length;
+  const unread = Number(messagePage.unread_count || 0) + localUnread;
+  byId('message-center-meta').textContent = `${numberFormatter.format(unread)} 条未读`;
+  for (const id of ['message-badge', 'mobile-message-badge']) {
+    const badge = byId(id);
+    badge.textContent = unread > 99 ? '99+' : String(unread);
+    badge.classList.toggle('hidden', unread === 0);
+  }
+  byId('mark-all-messages-read').disabled = unread === 0;
+  byId('message-list').innerHTML = messages.length ? messages.map((message) => {
+    const resourceHash = messageResourceHash(message);
+    const unreadClass = message.read_at ? '' : ' unread';
+    return `<article class="message-item ${escapeHTML(message.severity || 'info')}${unreadClass}" data-message-id="${escapeHTML(message.id)}" data-local="${message.local ? '1' : '0'}">
+      <button class="message-item-main" type="button" data-message-open="${escapeHTML(message.id)}" ${resourceHash ? `data-message-hash="${escapeHTML(resourceHash)}"` : ''}>
+        <span class="message-severity">${escapeHTML(messageSeverityLabel(message.severity))}</span>
+        <span class="message-copy"><strong>${escapeHTML(message.title)}</strong><span>${escapeHTML(message.body || '')}</span><time datetime="${escapeHTML(message.created_at)}">${escapeHTML(formatDateTime(message.created_at))}</time></span>
+      </button>
+      <button class="message-delete secondary icon-button small" type="button" data-message-delete="${escapeHTML(message.id)}" title="删除消息" aria-label="删除消息"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#trash-2"></use></svg></button>
+    </article>`;
+  }).join('') : '<div class="message-empty">暂无消息</div>';
+}
+
+async function refreshMessages({ schedule = true } = {}) {
+  if (messageLoading || byId('app').classList.contains('hidden')) return;
+  messageLoading = true;
+  if (schedule) window.clearTimeout(messagePollTimer);
+  try {
+    messagePage = await request('/api/messages?limit=80');
+    renderMessages();
+  } catch (error) {
+    if (messageCenterOpen()) byId('message-center-meta').textContent = `加载失败：${error.message}`;
+  } finally {
+    messageLoading = false;
+    if (schedule && !byId('app').classList.contains('hidden')) {
+      messagePollTimer = window.setTimeout(() => void refreshMessages(), 10000);
+    }
+  }
+}
+
+async function markMessageRead(id, local) {
+  if (local) {
+    const message = localMessages.find((item) => item.id === id);
+    if (message && !message.read_at) message.read_at = new Date().toISOString();
+    renderMessages();
+    return;
+  }
+  const message = messagePage.messages.find((item) => item.id === id);
+  if (!message || message.read_at) return;
+  await request(`/api/messages/${encodeURIComponent(id)}/read`, { method: 'POST', body: '{}' });
+  message.read_at = new Date().toISOString();
+  messagePage.unread_count = Math.max(0, Number(messagePage.unread_count || 0) - 1);
+  renderMessages();
+}
+
+async function deleteMessage(id, local) {
+  if (local) localMessages = localMessages.filter((item) => item.id !== id);
+  else {
+    await request(`/api/messages/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    messagePage.messages = messagePage.messages.filter((item) => item.id !== id);
+    await refreshMessages({ schedule: false });
+  }
+  renderMessages();
+}
 
 function settingsSourceLabel(source) {
   if (source === 'database') return '当前来源：控制台设置';
@@ -303,6 +431,177 @@ function setSettingsBusy(formID, busy) {
 
 function syncSMTPControls() {
   byId('test-smtp-settings').disabled = byId('smtp-settings-form').classList.contains('is-busy') || !byId('settings-smtp-enabled').checked;
+}
+
+function backupRunStateLabel(state) {
+  return ({ running: '执行中', retrying: '等待重试', succeeded: '成功', failed: '失败', skipped: '已跳过' })[state] || '尚无记录';
+}
+
+function onlineRestoreStateLabel(state) {
+  return ({ queued: '已排队', downloading: '下载中', validating: '校验中', ready: '待切换', committing: '切换中', completed: '已完成', failed: '失败', cancelled: '已取消' })[state] || state || '无任务';
+}
+
+function onlineRestoreErrorLabel(message) {
+  if (message === 'online restore is unavailable') return '当前部署未启用在线恢复';
+  return message || '未知错误';
+}
+
+function renderBackupRunStatus() {
+  const target = byId('backup-run-status');
+  if (!backupRunStatus) {
+    target.innerHTML = '<span class="restore-status-label">最近备份</span><strong>尚无状态记录</strong>';
+    return;
+  }
+  const state = backupRunStateLabel(backupRunStatus.state);
+  const timestamp = backupRunStatus.finished_at || backupRunStatus.updated_at;
+  target.innerHTML = `<span class="restore-status-label">最近备份</span><span class="status ${escapeHTML(backupRunStatus.state)}">${escapeHTML(state)}</span><span>${escapeHTML(timestamp ? formatDateTime(timestamp) : '')}</span><span>${escapeHTML(`${backupRunStatus.attempt || 0}/${backupRunStatus.max_attempts || 0} 次`)}</span>${backupRunStatus.error ? `<span class="restore-status-error">${escapeHTML(backupRunStatus.error)}</span>` : ''}`;
+}
+
+function renderOnlineRestoreJob() {
+  const target = byId('online-restore-job');
+  if (!onlineRestoreJob) {
+    hide('online-restore-job');
+    return;
+  }
+  show('online-restore-job');
+  const active = ['queued', 'downloading', 'validating', 'ready', 'committing'].includes(onlineRestoreJob.state);
+  const canCancel = !['committing', 'completed', 'cancelled'].includes(onlineRestoreJob.state);
+  const actions = [];
+  if (onlineRestoreJob.state === 'ready') actions.push(`<button class="commit-online-restore danger small" type="button">${icon('rotate-ccw')}<span>切换到此快照</span></button>`);
+  if (canCancel) actions.push(`<button class="cancel-online-restore secondary small" type="button">${icon('x')}<span>取消</span></button>`);
+  target.innerHTML = `<div class="restore-job-main"><span class="status ${escapeHTML(onlineRestoreJob.state)}">${escapeHTML(onlineRestoreStateLabel(onlineRestoreJob.state))}</span><div><strong>恢复任务 ${escapeHTML(onlineRestoreJob.snapshot_short_id || '')}</strong><p>${escapeHTML(onlineRestoreJob.error || onlineRestoreJob.detail || '')}</p></div></div><div class="restore-job-actions">${actions.join('')}</div>`;
+  target.classList.toggle('is-active', active);
+}
+
+function renderBackupSnapshots() {
+  const table = byId('backup-snapshot-table');
+  if (!backupSnapshotsLoaded) {
+    table.innerHTML = '<tr><td colspan="4" class="muted">正在读取 Restic 快照…</td></tr>';
+    return;
+  }
+  if (backupSnapshotsError) {
+    table.innerHTML = `<tr><td colspan="4" class="muted">快照加载失败：${escapeHTML(backupSnapshotsError)}</td></tr>`;
+    return;
+  }
+  if (!backupSnapshots.length) {
+    table.innerHTML = '<tr><td colspan="4" class="muted">仓库中没有 cdn-control-compose 快照。</td></tr>';
+    return;
+  }
+  const restoreActive = onlineRestoreJob && ['queued', 'downloading', 'validating', 'ready', 'committing'].includes(onlineRestoreJob.state);
+  table.innerHTML = backupSnapshots.map((snapshot) => `<tr>
+    <td>${escapeHTML(formatDateTime(snapshot.time))}</td>
+    <td><code title="${escapeHTML(snapshot.id)}">${escapeHTML(snapshot.short_id || snapshot.id.slice(0, 8))}</code></td>
+    <td>${escapeHTML(snapshot.hostname || '--')}</td>
+    <td><button class="start-online-restore small secondary" type="button" data-snapshot-id="${escapeHTML(snapshot.id)}" data-snapshot-short-id="${escapeHTML(snapshot.short_id || snapshot.id.slice(0, 8))}" ${restoreActive ? 'disabled' : ''}>${icon('rotate-ccw')}<span>恢复</span></button></td>
+  </tr>`).join('');
+}
+
+function scheduleOnlineRestorePoll() {
+  window.clearTimeout(onlineRestorePollTimer);
+  if (onlineRestoreJob && ['queued', 'downloading', 'validating', 'committing'].includes(onlineRestoreJob.state) && !byId('app').classList.contains('hidden')) {
+    onlineRestorePollTimer = window.setTimeout(() => void refreshOnlineRestore({ loadSnapshots: false }), 2000);
+  }
+}
+
+async function refreshOnlineRestore({ loadSnapshots = false } = {}) {
+  if (onlineRestoreLoading) return;
+  onlineRestoreLoading = true;
+  const refreshButton = byId('refresh-backup-snapshots');
+  refreshButton.classList.add('is-loading');
+  refreshButton.disabled = true;
+  try {
+    const requests = [request('/api/backups/status'), request('/api/backups/restores/current')];
+    if (loadSnapshots || !backupSnapshotsLoaded) requests.push(request('/api/backups/snapshots'));
+    const results = await Promise.allSettled(requests);
+    if (results[0].status === 'fulfilled') backupRunStatus = results[0].value;
+    if (results[1].status === 'fulfilled') onlineRestoreJob = results[1].value;
+    if (requests.length === 3) {
+      backupSnapshotsLoaded = true;
+      if (results[2].status === 'fulfilled') {
+        backupSnapshots = Array.isArray(results[2].value) ? results[2].value : [];
+        backupSnapshotsError = '';
+        byId('online-restore-state').textContent = `${numberFormatter.format(backupSnapshots.length)} 个可用快照`;
+      } else {
+        backupSnapshots = [];
+        backupSnapshotsError = onlineRestoreErrorLabel(results[2].reason.message);
+        byId('online-restore-state').textContent = `快照加载失败：${backupSnapshotsError}`;
+      }
+    }
+    renderBackupRunStatus();
+    renderOnlineRestoreJob();
+    renderBackupSnapshots();
+  } finally {
+    onlineRestoreLoading = false;
+    refreshButton.classList.remove('is-loading');
+    refreshButton.disabled = false;
+    scheduleOnlineRestorePoll();
+  }
+}
+
+function openOnlineRestoreDialog(mode, snapshot = null) {
+  onlineRestoreDialogMode = mode;
+  onlineRestoreSelectedSnapshot = snapshot;
+  byId('online-restore-dialog-error').textContent = '';
+  hide('online-restore-dialog-error');
+  byId('online-restore-confirm').value = '';
+  if (mode === 'commit') {
+    byId('online-restore-dialog-title').textContent = '切换恢复快照';
+    byId('online-restore-dialog-meta').textContent = onlineRestoreJob?.snapshot_short_id || '';
+    byId('online-restore-confirm-label').textContent = '输入 RESTORE 以确认切换';
+    buttonContent(byId('confirm-online-restore'), 'rotate-ccw', '确认切换');
+  } else {
+    byId('online-restore-dialog-title').textContent = '准备在线恢复';
+    byId('online-restore-dialog-meta').textContent = `${snapshot?.shortID || ''} · ${snapshot?.id || ''}`;
+    byId('online-restore-confirm-label').textContent = `输入 ${snapshot?.shortID || ''} 以确认`;
+    buttonContent(byId('confirm-online-restore'), 'shield-check', '下载并校验');
+  }
+  byId('online-restore-dialog').showModal();
+  byId('online-restore-confirm').focus();
+}
+
+function closeOnlineRestoreDialog() {
+  if (byId('online-restore-dialog').open) byId('online-restore-dialog').close();
+  onlineRestoreDialogMode = '';
+  onlineRestoreSelectedSnapshot = null;
+}
+
+async function confirmOnlineRestore() {
+  const button = byId('confirm-online-restore');
+  if (button.disabled) return;
+  button.disabled = true;
+  const confirmation = byId('online-restore-confirm').value.trim();
+  try {
+    if (onlineRestoreDialogMode === 'commit') {
+      onlineRestoreJob = await request(`/api/backups/restores/${encodeURIComponent(onlineRestoreJob.id)}/commit`, { method: 'POST', body: JSON.stringify({ confirmation }) });
+      notice('恢复切换已提交，控制面将短暂重启', true);
+    } else {
+      onlineRestoreJob = await request('/api/backups/restores', { method: 'POST', body: JSON.stringify({ snapshot_id: onlineRestoreSelectedSnapshot.id, confirmation }) });
+      notice('快照下载与隔离校验已开始', true);
+    }
+    closeOnlineRestoreDialog();
+    renderOnlineRestoreJob();
+    renderBackupSnapshots();
+    scheduleOnlineRestorePoll();
+    void refreshMessages({ schedule: false });
+  } catch (error) {
+    byId('online-restore-dialog-error').textContent = error.message;
+    show('online-restore-dialog-error');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function cancelOnlineRestore() {
+  if (!onlineRestoreJob) return;
+  try {
+    onlineRestoreJob = await request(`/api/backups/restores/${encodeURIComponent(onlineRestoreJob.id)}`, { method: 'DELETE' });
+    notice('在线恢复已取消', true);
+    renderOnlineRestoreJob();
+    renderBackupSnapshots();
+    void refreshMessages({ schedule: false });
+  } catch (error) {
+    notice(error.message);
+  }
 }
 
 function securityActionLabel(action) {
@@ -1390,6 +1689,41 @@ function closeNodeUpgrade() {
   if (dialog.open) dialog.close();
 }
 
+function bulkUpgradeStateLabel(state) {
+  return ({ created: '已排队', already_active: '升级中', up_to_date: '已是最新', blocked: '已跳过' })[state] || state;
+}
+
+function renderBulkUpgradeResult(result) {
+  byId('node-upgrade-all-meta').textContent = `${numberFormatter.format(result.created || 0)} 个已排队 · ${numberFormatter.format(result.up_to_date || 0)} 个已是最新 · ${numberFormatter.format(result.blocked || 0)} 个已跳过`;
+  byId('node-upgrade-all-summary').innerHTML = `<span><strong>${numberFormatter.format(result.created || 0)}</strong> 已排队</span><span><strong>${numberFormatter.format(result.already_active || 0)}</strong> 进行中</span><span><strong>${numberFormatter.format(result.up_to_date || 0)}</strong> 最新</span><span><strong>${numberFormatter.format(result.blocked || 0)}</strong> 跳过</span>`;
+  byId('node-upgrade-all-results').innerHTML = (result.results || []).map((item) => `<tr><td><a href="#/nodes/${encodeURIComponent(item.node_id)}">${escapeHTML(item.name || item.node_id)}</a></td><td><span class="status ${escapeHTML(item.state)}">${escapeHTML(bulkUpgradeStateLabel(item.state))}</span></td><td>${escapeHTML(item.detail || '')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">没有节点。</td></tr>';
+  const dialog = byId('node-upgrade-all-dialog');
+  if (!dialog.open) dialog.showModal();
+}
+
+async function startAllNodeUpgrades() {
+  if (bulkUpgradePending) return;
+  bulkUpgradePending = true;
+  const button = byId('upgrade-all-nodes');
+  button.disabled = true;
+  try {
+    const result = await request('/api/nodes/upgrade-all', { method: 'POST', body: '{}' });
+    renderBulkUpgradeResult(result);
+    notice(result.created ? `${result.created} 个节点升级已排队` : '所有可用节点均无需新建升级任务', true);
+    await refresh();
+    void refreshMessages({ schedule: false });
+  } catch (error) {
+    notice(error.message);
+  } finally {
+    bulkUpgradePending = false;
+    button.disabled = false;
+  }
+}
+
+function closeBulkUpgrade() {
+  if (byId('node-upgrade-all-dialog').open) byId('node-upgrade-all-dialog').close();
+}
+
 function uninstallBlockerText(blocker) {
   const site = blocker.site_name ? `站点「${blocker.site_name}」` : '站点';
   if (blocker.code === 'still_assigned') return `${site}仍分配了此节点，请先移除并保存。`;
@@ -1578,7 +1912,6 @@ async function refreshOverview() {
     state.textContent = requests ? '' : '最近 24 小时暂无请求数据。';
     state.className = requests ? 'overview-state hidden' : 'overview-state empty';
     byId('overview-updated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
-    if (byId('notice').textContent.startsWith('概览数据加载失败')) byId('notice').textContent = '';
   } catch (error) {
     if (!overviewLoaded) {
       state.className = 'overview-state error';
@@ -2294,6 +2627,7 @@ function renderNodeRoute(route, { routeChanged = false } = {}) {
 function renderSettingsRoute({ routeChanged = false } = {}) {
   if (routeChanged && settingsData) populateSettingsForms();
   if (!settingsData && !settingsLoading) void refreshSettings({ force: true }).catch((error) => notice(error.message));
+  if (routeChanged || !backupSnapshotsLoaded) void refreshOnlineRestore({ loadSnapshots: !backupSnapshotsLoaded });
 }
 
 function activateRoute(route, { forceForm = false, focus = true } = {}) {
@@ -2395,6 +2729,8 @@ function showApp() {
   byId('auth-notice').textContent = '';
   syncRouteFromLocation();
   syncSidebarMode();
+  renderMessages();
+  void refreshMessages();
   refresh().catch((error) => notice(error.message));
 }
 
@@ -2435,6 +2771,8 @@ byId('logout').addEventListener('click', async () => {
     window.clearTimeout(publishPollTimer);
     window.clearTimeout(siteDeletePollTimer);
     window.clearTimeout(securityPollTimer);
+    window.clearTimeout(messagePollTimer);
+    window.clearTimeout(onlineRestorePollTimer);
     closeNodeUpgrade();
     closeNodeUninstall();
     closeSiteDelete();
@@ -2442,6 +2780,8 @@ byId('logout').addEventListener('click', async () => {
     publishPollTimer = null;
     siteDeletePollTimer = null;
     securityPollTimer = null;
+    messagePollTimer = null;
+    onlineRestorePollTimer = null;
     tlsStatuses = new Map();
     publishStatuses = new Map();
     deletionStatuses = new Map();
@@ -2462,9 +2802,16 @@ byId('logout').addEventListener('click', async () => {
     securityDataGeneration += 1;
     overviewLoaded = false;
     overviewData = null;
+    messagePage = { messages: [], unread_count: 0 };
+    localMessages = [];
+    backupSnapshots = [];
+    backupSnapshotsLoaded = false;
+    backupRunStatus = null;
+    onlineRestoreJob = null;
     csrf = '';
     setSidebarOpen(false);
-    byId('notice').textContent = '';
+    setMessageCenterOpen(false);
+    renderMessages();
     hide('app');
     hide('logout');
     show('auth-shell');
@@ -2476,8 +2823,57 @@ byId('logout').addEventListener('click', async () => {
 byId('sidebar-toggle').addEventListener('click', () => setSidebarOpen(!sidebarOpen()));
 byId('sidebar-close').addEventListener('click', () => setSidebarOpen(false, true));
 byId('sidebar-backdrop').addEventListener('click', () => setSidebarOpen(false, true));
+byId('message-center-toggle').addEventListener('click', () => setMessageCenterOpen(!messageCenterOpen()));
+byId('mobile-message-center-toggle').addEventListener('click', () => setMessageCenterOpen(!messageCenterOpen()));
+byId('close-message-center').addEventListener('click', () => setMessageCenterOpen(false, true));
+byId('message-center-backdrop').addEventListener('click', () => setMessageCenterOpen(false, true));
+byId('mark-all-messages-read').addEventListener('click', async () => {
+  try {
+    await request('/api/messages/read-all', { method: 'POST', body: '{}' });
+    localMessages.forEach((message) => { message.read_at = message.read_at || new Date().toISOString(); });
+    messagePage.messages.forEach((message) => { message.read_at = message.read_at || new Date().toISOString(); });
+    messagePage.unread_count = 0;
+    renderMessages();
+  } catch (error) {
+    notice(error.message);
+  }
+});
+document.querySelectorAll('.message-filter').forEach((button) => button.addEventListener('click', () => {
+  messageFilter = button.dataset.messageFilter;
+  document.querySelectorAll('.message-filter').forEach((item) => {
+    const active = item === button;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-pressed', String(active));
+  });
+  renderMessages();
+}));
+byId('message-list').addEventListener('click', async (event) => {
+  const deleteButton = event.target.closest('[data-message-delete]');
+  const openButton = event.target.closest('[data-message-open]');
+  const item = event.target.closest('.message-item');
+  if (!item) return;
+  const id = item.dataset.messageId;
+  const local = item.dataset.local === '1';
+  try {
+    if (deleteButton) {
+      await deleteMessage(id, local);
+      return;
+    }
+    if (openButton) {
+      await markMessageRead(id, local);
+      const hash = openButton.dataset.messageHash;
+      if (hash) {
+        setMessageCenterOpen(false);
+        navigateTo(hash);
+      }
+    }
+  } catch (error) {
+    notice(error.message);
+  }
+});
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && sidebarOpen()) setSidebarOpen(false, true);
+  else if (event.key === 'Escape' && messageCenterOpen()) setMessageCenterOpen(false, true);
 });
 mobileSidebarQuery.addEventListener('change', syncSidebarMode);
 byId('refresh-overview').addEventListener('click', refreshOverview);
@@ -2486,6 +2882,20 @@ byId('refresh-security').addEventListener('click', () => {
   setSecurityState('正在刷新安全状态…');
   refreshSecurity().catch((error) => setSecurityState(error.message));
 });
+byId('upgrade-all-nodes').addEventListener('click', startAllNodeUpgrades);
+byId('close-node-upgrade-all').addEventListener('click', closeBulkUpgrade);
+byId('refresh-backup-snapshots').addEventListener('click', () => refreshOnlineRestore({ loadSnapshots: true }).catch((error) => notice(error.message)));
+byId('backup-snapshot-table').addEventListener('click', (event) => {
+  const button = event.target.closest('.start-online-restore');
+  if (!button) return;
+  openOnlineRestoreDialog('start', { id: button.dataset.snapshotId, shortID: button.dataset.snapshotShortId });
+});
+byId('online-restore-job').addEventListener('click', (event) => {
+  if (event.target.closest('.commit-online-restore')) openOnlineRestoreDialog('commit');
+  if (event.target.closest('.cancel-online-restore')) void cancelOnlineRestore();
+});
+byId('close-online-restore').addEventListener('click', closeOnlineRestoreDialog);
+byId('confirm-online-restore').addEventListener('click', confirmOnlineRestore);
 byId('deploy-security').addEventListener('click', async () => {
   if (securityActionPending) return;
   securityActionPending = true;
@@ -2770,6 +3180,8 @@ byId('backup-settings-form').addEventListener('submit', async (event) => {
   try {
     await request('/api/settings/backup', { method: 'PUT', body: JSON.stringify(backupSettingsPayload()) });
     await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare', 'smtp'] });
+    backupSnapshotsLoaded = false;
+    void refreshOnlineRestore({ loadSnapshots: true });
     notice('S3 备份设置已保存', true);
   } catch (error) {
     notice(error.message);
@@ -2797,6 +3209,8 @@ byId('reset-backup-settings').addEventListener('click', async () => {
   try {
     await request('/api/settings/backup', { method: 'DELETE' });
     await refreshSettings({ force: true, preserveDirtySections: ['dns', 'cloudflare', 'smtp'] });
+    backupSnapshotsLoaded = false;
+    void refreshOnlineRestore({ loadSnapshots: true });
     notice('S3 备份已恢复环境变量配置', true);
   } catch (error) {
     notice(error.message);

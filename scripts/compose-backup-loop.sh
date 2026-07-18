@@ -9,6 +9,10 @@ source /usr/local/lib/cdn-platform/compose-backup-common.sh
 schedule_key=""
 next_epoch=0
 while true; do
+  if [[ -e "${ONLINE_RESTORE_ROOT:-/var/lib/cdn-platform-restore}/maintenance.lock" ]]; then
+    sleep 60 & wait $!
+    continue
+  fi
   rm -rf "$runtime_dir"/*
   load_backup_runtime "$runtime_dir"
   backup_time="$BACKUP_TIME"
@@ -28,7 +32,7 @@ while true; do
     echo "next backup at $(date -d "@$next_epoch" --iso-8601=seconds) (settings: $BACKUP_SETTINGS_SOURCE)"
   fi
   if ((now_epoch >= next_epoch)); then
-    /usr/local/lib/cdn-platform/compose-backup.sh
+    /usr/local/lib/cdn-platform/compose-backup-run.sh || true
     next_epoch=0
     continue
   fi

@@ -2,12 +2,16 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"cdn-platform/internal/domain"
 	"cdn-platform/internal/integrations"
@@ -402,5 +406,145 @@ func TestTCPOnlySiteKeepsNodeUntilHealthFailureThreshold(t *testing.T) {
 	records := dns.Zones["zone-mail"]
 	if len(records) != 2 {
 		t.Fatalf("transient failure removed TCP endpoint before threshold: %#v", records)
+	}
+}
+
+func TestHealthReconciliationBoundsConcurrentNodeProbes(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	for index := range 6 {
+		if _, err := database.CreateNode(fmt.Sprintf("edge-%d", index), fmt.Sprintf("203.0.113.%d", index+1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var active, maximum atomic.Int32
+	entered := make(chan struct{}, 6)
+	release := make(chan struct{})
+	client := &http.Client{Transport: healthRoundTripFunc(func(*http.Request) (*http.Response, error) {
+		current := active.Add(1)
+		defer active.Add(-1)
+		for {
+			prior := maximum.Load()
+			if current <= prior || maximum.CompareAndSwap(prior, current) {
+				break
+			}
+		}
+		entered <- struct{}{}
+		<-release
+		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader("ok\n")), Header: make(http.Header)}, nil
+	})}
+	manager := HealthManager{Server: &Server{Store: database, DNS: &MemoryDNS{}}, Client: client, WorkerLimit: 2, RoundTimeout: time.Second}
+	done := make(chan error, 1)
+	go func() { done <- manager.Reconcile(context.Background()) }()
+	for range 2 {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("bounded workers did not start")
+		}
+	}
+	select {
+	case <-entered:
+		t.Fatal("more probes started than the worker limit allows")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := maximum.Load(); got != 2 {
+		t.Fatalf("maximum concurrent probes = %d, want 2", got)
+	}
+	status := manager.LastRound()
+	if status.FinishedAt.IsZero() || status.ErrorCount != 0 || status.TimedOut {
+		t.Fatalf("health round status = %#v", status)
+	}
+}
+
+func TestHealthRoundTimeoutDoesNotCountUnscheduledProbeAsFailure(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-timeout", "203.0.113.40")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: healthRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})}
+	manager := HealthManager{
+		Server: &Server{Store: database, DNS: &MemoryDNS{}}, Client: client,
+		WorkerLimit: 1, RoundTimeout: 25 * time.Millisecond,
+	}
+	err = manager.Reconcile(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("health reconciliation error = %v", err)
+	}
+	health, healthErr := database.NodeHealth(node.ID)
+	if healthErr != nil {
+		t.Fatal(healthErr)
+	}
+	if health.ConsecutiveFailures != 0 || health.LastError != "" {
+		t.Fatalf("round timeout changed node health = %#v", health)
+	}
+	status := manager.LastRound()
+	if !status.TimedOut || status.ErrorCount < 1 || status.DurationMS < 20 {
+		t.Fatalf("timed-out health round status = %#v", status)
+	}
+}
+
+type failingHealthDNS struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (d *failingHealthDNS) Reconcile(_ context.Context, _ string, owner string, _ []integrations.DNSRecord) error {
+	d.mu.Lock()
+	d.calls = append(d.calls, owner)
+	d.mu.Unlock()
+	return fmt.Errorf("DNS failure for %s", owner)
+}
+
+func (*failingHealthDNS) RemoveNode(context.Context, string, string) error { return nil }
+
+func TestHealthReconciliationAggregatesIndependentDNSErrors(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-dns-errors", "203.0.113.50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"disabled-a", "disabled-b"} {
+		if _, err := database.CreateSite(domain.Site{
+			Name: name, Domains: []string{name + ".example.test"},
+			Nodes:         []string{node.ID},
+			PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: false,
+		}, "zone-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dns := &failingHealthDNS{}
+	manager := HealthManager{Server: &Server{Store: database, DNS: dns}, Client: healthyNodeClient()}
+	err = manager.Reconcile(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "disabled-a") || !strings.Contains(err.Error(), "disabled-b") {
+		t.Fatalf("aggregated DNS error = %v", err)
+	}
+	dns.mu.Lock()
+	calls := append([]string(nil), dns.calls...)
+	dns.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("DNS reconcile calls = %#v", calls)
+	}
+	if status := manager.LastRound(); status.ErrorCount != 2 || status.Error == "" {
+		t.Fatalf("failed health round status = %#v", status)
 	}
 }

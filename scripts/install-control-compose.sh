@@ -13,6 +13,14 @@ fi
 root="${1:-/opt/cdn-platform}"
 source_dir="$root/app"
 install -d -m 0750 "$root" "$source_dir" "$root/config" "$root/backup/staging/clickhouse"
+install -d -o 10001 -g 10001 -m 0750 "$root/backup/status"
+install -d -o 10001 -g 101 -m 2750 "$root/backup/online-restore"
+touch "$root/backup/online-restore/operations.lock"
+chown 10001:10001 "$root/backup/online-restore/operations.lock"
+chmod 0660 "$root/backup/online-restore/operations.lock"
+touch "$root/backup/online-restore/backup.lock"
+chown 10001:10001 "$root/backup/online-restore/backup.lock"
+chmod 0660 "$root/backup/online-restore/backup.lock"
 install -d -o 10001 -g 10001 -m 0750 \
   "$root/data/control" "$root/data/control-tls" \
   "$root/logs/certbot-sites" "$root/logs/certbot-control"

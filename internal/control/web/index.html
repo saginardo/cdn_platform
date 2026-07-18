@@ -58,6 +58,7 @@
             <button class="nav" data-view="sites"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#globe"></use></svg><span>站点</span></button>
             <button class="nav" data-view="settings"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#settings"></use></svg><span>设置</span></button>
           </nav>
+          <button id="message-center-toggle" class="sidebar-messages secondary" type="button" aria-controls="message-center" aria-expanded="false"><span class="message-button-icon"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#bell"></use></svg><span id="message-badge" class="message-badge hidden">0</span></span><span>消息中心</span></button>
           <button id="logout" class="sidebar-logout secondary hidden" title="退出登录"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#log-out"></use></svg><span>退出</span></button>
         </aside>
         <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" tabindex="-1" aria-label="关闭导航"></button>
@@ -68,10 +69,9 @@
               <svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#panel-left-open"></use></svg>
             </button>
             <div class="mobile-title"><span class="mobile-brand">CDN Platform</span><span id="mobile-page-title">概览</span></div>
+            <button id="mobile-message-center-toggle" class="mobile-message-button secondary icon-button" type="button" aria-controls="message-center" aria-expanded="false" title="消息中心" aria-label="打开消息中心"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#bell"></use></svg><span id="mobile-message-badge" class="message-badge hidden">0</span></button>
           </header>
           <div class="page">
-            <div id="notice" role="status" aria-live="polite"></div>
-
             <section id="overview" class="view" aria-busy="true">
               <div id="overview-main-page">
               <div class="dashboard-heading">
@@ -284,7 +284,10 @@
               <div id="node-list-page">
                 <div class="section-heading node-heading">
                   <div class="heading-copy"><h1>节点</h1><p id="node-list-meta" class="section-meta">0 个节点</p></div>
-                  <button id="show-node-form" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#plus"></use></svg><span>添加节点</span></button>
+                  <div class="node-heading-actions">
+                    <button id="upgrade-all-nodes" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#upload"></use></svg><span>全部升级</span></button>
+                    <button id="show-node-form" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#plus"></use></svg><span>添加节点</span></button>
+                  </div>
                 </div>
                 <form id="node-form" class="form-grid hidden">
                   <label>名称 <input id="node-name" required placeholder="sg-edge-01"></label>
@@ -404,6 +407,15 @@
             <div class="dialog-actions">
               <button id="start-node-upgrade" type="button" class="hidden"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#upload"></use></svg><span>开始升级</span></button>
             </div>
+          </dialog>
+
+          <dialog id="node-upgrade-all-dialog" aria-labelledby="node-upgrade-all-title">
+            <div class="dialog-header">
+              <div><h2 id="node-upgrade-all-title">全部节点升级</h2><p id="node-upgrade-all-meta" class="section-meta"></p></div>
+              <button id="close-node-upgrade-all" type="button" class="secondary icon-button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
+            </div>
+            <div id="node-upgrade-all-summary" class="bulk-upgrade-summary"></div>
+            <div class="table-wrap"><table class="responsive-table bulk-upgrade-table" data-table="bulk-upgrades"><thead><tr><th>节点</th><th>结果</th><th>详情</th></tr></thead><tbody id="node-upgrade-all-results"></tbody></table></div>
           </dialog>
 
           <dialog id="node-uninstall-dialog" aria-labelledby="node-uninstall-title">
@@ -789,11 +801,43 @@
                     <button id="reset-backup-settings" class="secondary" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rotate-ccw"></use></svg><span>恢复环境变量</span></button>
                   </div>
                 </form>
+
+                <section id="online-restore-section" class="settings-section settings-restore-section" aria-labelledby="online-restore-title">
+                  <div class="settings-section-heading">
+                    <div><h2 id="online-restore-title">S3 在线恢复</h2><span id="online-restore-state" class="settings-source">等待加载</span></div>
+                    <button id="refresh-backup-snapshots" class="secondary icon-button" type="button" title="刷新备份与快照" aria-label="刷新备份与快照"><svg class="icon refresh-mark" aria-hidden="true"><use href="/lucide-icons.svg#refresh-cw"></use></svg></button>
+                  </div>
+                  <div id="backup-run-status" class="restore-status-strip"></div>
+                  <div id="online-restore-job" class="restore-job hidden"></div>
+                  <div class="table-wrap restore-snapshot-wrap"><table class="responsive-table restore-snapshot-table" data-table="restore-snapshots"><thead><tr><th>备份时间</th><th>快照</th><th>主机</th><th>操作</th></tr></thead><tbody id="backup-snapshot-table"><tr><td colspan="4" class="muted">等待加载快照</td></tr></tbody></table></div>
+                </section>
                 </div>
               </div>
+
+              <dialog id="online-restore-dialog" aria-labelledby="online-restore-dialog-title">
+                <div class="dialog-header">
+                  <div><h2 id="online-restore-dialog-title">准备在线恢复</h2><p id="online-restore-dialog-meta" class="section-meta"></p></div>
+                  <button id="close-online-restore" type="button" class="secondary icon-button" title="关闭" aria-label="关闭"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
+                </div>
+                <p id="online-restore-dialog-error" class="dialog-error hidden" role="alert"></p>
+                <label class="confirmation"><span id="online-restore-confirm-label">输入快照短 ID 以确认</span><input id="online-restore-confirm" autocomplete="off" spellcheck="false"></label>
+                <div class="dialog-actions"><button id="confirm-online-restore" class="danger" type="button"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#rotate-ccw"></use></svg><span>开始校验</span></button></div>
+              </dialog>
             </section>
           </div>
         </div>
+        <button id="message-center-backdrop" class="message-center-backdrop" type="button" tabindex="-1" aria-label="关闭消息中心"></button>
+        <aside id="message-center" class="message-center" aria-label="消息中心" aria-hidden="true">
+          <div class="message-center-header">
+            <div><h2>消息中心</h2><p id="message-center-meta">0 条未读</p></div>
+            <div class="message-center-actions">
+              <button id="mark-all-messages-read" class="secondary icon-button" type="button" title="全部标为已读" aria-label="全部标为已读"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#check-check"></use></svg></button>
+              <button id="close-message-center" class="secondary icon-button" type="button" title="关闭" aria-label="关闭消息中心"><svg class="icon" aria-hidden="true"><use href="/lucide-icons.svg#x"></use></svg></button>
+            </div>
+          </div>
+          <div class="message-filters" role="group" aria-label="消息筛选"><button class="message-filter active" type="button" data-message-filter="all" aria-pressed="true">全部</button><button class="message-filter" type="button" data-message-filter="unread" aria-pressed="false">未读</button></div>
+          <div id="message-list" class="message-list" aria-live="polite"><div class="message-empty">暂无消息</div></div>
+        </aside>
       </section>
     </main>
     <script src="/app.js"></script>

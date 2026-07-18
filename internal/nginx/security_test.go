@@ -1,7 +1,9 @@
 package nginx
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -55,7 +57,7 @@ func TestRenderWithSecurityPolicies(t *testing.T) {
 	}
 	for _, wanted := range []string{
 		"# CDN security revision:", "map $uri $cdn_security_policy_id", "log_format cdn_security_json", "security.json cdn_security_json",
-		"if ($cdn_security_policy_id) { return 444; }", `"ban"`, `"block"`, "21600", `\\.env`, "php[-_]?info",
+		"if ($cdn_security_policy_id) { return 444; }", `"ban"`, `"block"`, "21600", `"~(?i)^/+`, `\\.env`, "php[-_]?info",
 	} {
 		if !strings.Contains(configuration, wanted) {
 			t.Errorf("security configuration lacks %q:\n%s", wanted, configuration)
@@ -159,6 +161,102 @@ func TestRenderedSecurityConfigurationPassesNginxSyntaxCheck(t *testing.T) {
 	command := exec.Command(binary, "-t", "-c", path, "-p", directory)
 	if output, err := command.CombinedOutput(); err != nil && !(strings.Contains(string(output), "syntax is ok") && strings.Contains(string(output), "Operation not permitted")) {
 		t.Fatalf("nginx -t: %v\n%s\n%s", err, output, nginxConfiguration)
+	}
+}
+
+func TestRenderedSecurityConfigurationRuntime(t *testing.T) {
+	binary, err := exec.LookPath("nginx")
+	if err != nil {
+		t.Skip("nginx is not installed")
+	}
+	configuration, err := RenderWithSecurity(nil, defaultSecurityPoliciesForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := t.TempDir()
+	socketPath := filepath.Join(directory, "nginx.sock")
+	securityLogPath := filepath.Join(directory, "security.json")
+	configuration = strings.ReplaceAll(configuration, "/opt/cdn-edge/logs/security.json", securityLogPath)
+	configuration = strings.Replace(configuration, "listen 80 default_server;", "listen unix:"+socketPath+" default_server;", 1)
+	nginxConfiguration := fmt.Sprintf("pid %s;\nerror_log %s notice;\nevents {}\nhttp {\n%s\n}\n",
+		filepath.Join(directory, "nginx.pid"), filepath.Join(directory, "error.log"), configuration)
+	path := filepath.Join(directory, "nginx.conf")
+	if err := os.WriteFile(path, []byte(nginxConfiguration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(binary, "-t", "-c", path, "-p", directory)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("nginx -t: %v\n%s\n%s", err, output, nginxConfiguration)
+	}
+	command = exec.Command(binary, "-c", path, "-p", directory)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("start nginx: %v\n%s", err, output)
+	}
+	t.Cleanup(func() {
+		command := exec.Command(binary, "-s", "quit", "-c", path, "-p", directory)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Logf("stop nginx: %v: %s", err, output)
+		}
+	})
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		connection, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
+		if err == nil {
+			_ = connection.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("temporary nginx did not listen on %s: %v", socketPath, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	connection, err := net.DialTimeout("unix", socketPath, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprint(connection, "GET /.env HTTP/1.0\r\nHost: localhost\r\n\r\n"); err != nil {
+		_ = connection.Close()
+		t.Fatal(err)
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		_ = connection.Close()
+		t.Fatal(err)
+	}
+	response, err := io.ReadAll(connection)
+	_ = connection.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response) != 0 {
+		t.Fatalf("sensitive path was not closed with status 444:\n%s", response)
+	}
+	var contents []byte
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		contents, err = os.ReadFile(securityLogPath)
+		if err == nil && len(strings.TrimSpace(string(contents))) > 0 {
+			break
+		}
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("security event was not logged: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var event struct {
+		PolicyID   string                      `json:"policy_id"`
+		Action     domain.SecurityPolicyAction `json:"action"`
+		BanSeconds int                         `json:"ban_seconds"`
+		Path       string                      `json:"path"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(contents))), &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.PolicyID != domain.DefaultSecurityPolicyID || event.Action != domain.SecurityActionBan ||
+		event.BanSeconds != 21600 || event.Path != "/.env" {
+		t.Fatalf("unexpected security event: %#v", event)
 	}
 }
 

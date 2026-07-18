@@ -225,9 +225,29 @@ func publishedSiteDomains(tx *sql.Tx, siteID string) ([]string, error) {
 // Existing databases already use published=true to identify drafts that match
 // their deployed state. Capture those rows once when the snapshot table is
 // introduced; future migrations leave existing snapshots untouched.
-func (s *Store) backfillSitePublications() error {
-	sites, err := s.ListSites()
+func backfillSitePublicationsTx(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json,
+		backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb,
+		read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json,
+		cache_generation, config_version, published, enabled, deleting, created_at, updated_at
+		FROM sites ORDER BY name`)
 	if err != nil {
+		return err
+	}
+	sites := make([]domain.Site, 0)
+	for rows.Next() {
+		site, _, err := scanSite(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		sites = append(sites, site)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
 		return err
 	}
 	for _, site := range sites {
@@ -235,22 +255,14 @@ func (s *Store) backfillSitePublications() error {
 			continue
 		}
 		var exists int
-		if err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM site_publications WHERE site_id = ?)`, site.ID).Scan(&exists); err != nil {
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM site_publications WHERE site_id = ?)`, site.ID).Scan(&exists); err != nil {
 			return err
 		}
 		if exists != 0 {
 			continue
 		}
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
-		}
 		if err := saveSitePublicationTx(tx, site, now()); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("backfill published site %s: %w", site.ID, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return err
 		}
 	}
 	return nil

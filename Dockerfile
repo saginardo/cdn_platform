@@ -12,7 +12,7 @@ FROM debian:12-slim
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates certbot curl python3-certbot-dns-cloudflare restic sqlite3 tzdata \
+        ca-certificates certbot curl python3-certbot-dns-cloudflare restic sqlite3 tzdata util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 cdn-platform \
     && useradd --uid 10001 --gid 10001 --home-dir /var/lib/cdn-platform --shell /usr/sbin/nologin cdn-platform

@@ -65,8 +65,7 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) Migrate() error {
-	_, err := s.db.Exec(`
+const initialSchema = `
 CREATE TABLE IF NOT EXISTS admin_users (
   id TEXT PRIMARY KEY,
   password_hash TEXT NOT NULL,
@@ -151,6 +150,7 @@ CREATE TABLE IF NOT EXISTS node_states (
   version INTEGER NOT NULL,
   nginx_config TEXT NOT NULL,
 	nginx_stream_config TEXT NOT NULL DEFAULT '',
+	nginx_fragments_json TEXT NOT NULL DEFAULT 'null',
   public_ports_json TEXT NOT NULL DEFAULT '[]',
   certificate_ciphertext BLOB,
   private_key_ciphertext BLOB,
@@ -359,90 +359,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_security_policies_priority ON security_policies(priority, created_at);
 	CREATE INDEX IF NOT EXISTS idx_security_bans_expires ON security_bans(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at DESC);
-	`)
-	if err != nil {
-		return err
-	}
-	// Existing v1 databases may predate the published column.
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN published INTEGER NOT NULL DEFAULT 0`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN stream_paths_json TEXT NOT NULL DEFAULT '[]'`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN passthrough INTEGER NOT NULL DEFAULT 0`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN client_max_body_size_mb INTEGER NOT NULL DEFAULT 128`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN read_write_timeout_seconds INTEGER NOT NULL DEFAULT 360`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN dns_ttl_seconds INTEGER`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN tcp_only INTEGER NOT NULL DEFAULT 0`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN tcp_forwards_json TEXT NOT NULL DEFAULT '[]'`)
-	_, _ = s.db.Exec(`ALTER TABLE sites ADD COLUMN deleting INTEGER NOT NULL DEFAULT 0`)
-	if _, err := s.db.Exec(`UPDATE sites SET stream_paths_json = '[]' WHERE stream_paths_json <> '[]'`); err != nil {
-		return fmt.Errorf("retire legacy stream paths: %w", err)
-	}
-	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN applied_version INTEGER NOT NULL DEFAULT 0`)
-	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN capabilities_json TEXT NOT NULL DEFAULT '[]'`)
-	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN agent_sha256 TEXT NOT NULL DEFAULT ''`)
-	_, _ = s.db.Exec(`ALTER TABLE nodes ADD COLUMN active_upgrade_task_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = s.db.Exec(`ALTER TABLE deployment_tasks ADD COLUMN deadline_at TEXT`)
-	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_override INTEGER NOT NULL DEFAULT 0`)
-	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_repository TEXT NOT NULL DEFAULT ''`)
-	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_access_key_id TEXT NOT NULL DEFAULT ''`)
-	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_region TEXT NOT NULL DEFAULT 'us-east-1'`)
-	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_time TEXT NOT NULL DEFAULT '03:25'`)
-	_, _ = s.db.Exec(`ALTER TABLE control_settings ADD COLUMN backup_random_delay_seconds INTEGER NOT NULL DEFAULT 1200`)
-	// JSON null distinguishes pre-capability HTTP states from an intentional
-	// empty listener set. New publishers always persist an explicit array.
-	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN public_ports_json TEXT NOT NULL DEFAULT 'null'`)
-	_, _ = s.db.Exec(`ALTER TABLE node_states ADD COLUMN nginx_stream_config TEXT NOT NULL DEFAULT ''`)
-	// Publish tasks created before edge confirmation existed have neither a
-	// deadline nor target rows. They cannot be resumed safely after upgrade, so
-	// make the required manual retry visible before enforcing the new active
-	// task uniqueness constraint.
-	if _, err := s.db.Exec(`UPDATE deployment_tasks
-		SET status = ?, detail = ?, updated_at = ?
-		WHERE kind = 'publish_site' AND status IN (?, ?, ?) AND deadline_at IS NULL`,
-		domain.TaskFailed, "publish confirmation interrupted by control-plane upgrade; retry Publish", stamp(now()),
-		domain.TaskQueued, domain.TaskDispatching, domain.TaskApplying); err != nil {
-		return fmt.Errorf("migrate legacy publish tasks: %w", err)
-	}
-	// A certificate worker lives only for the controller process lifetime. Any
-	// active task found while opening the database belongs to an earlier process
-	// and must be retried explicitly rather than replayed against the ACME API.
-	if _, err := s.FailActiveCertificateTasks("certificate issuance interrupted by control-plane restart; retry Issue TLS"); err != nil {
-		return err
-	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_certificate_site
-		ON deployment_tasks(site_id)
-		WHERE kind IN ('issue_certificate', 'renew_certificate') AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
-		return fmt.Errorf("create active certificate task index: %w", err)
-	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_publish_site
-		ON deployment_tasks(site_id)
-		WHERE kind = 'publish_site' AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
-		return fmt.Errorf("create active publish task index: %w", err)
-	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_active_delete_site
-		ON deployment_tasks(site_id)
-		WHERE kind = 'delete_site' AND status IN ('queued', 'dispatching', 'applying')`); err != nil {
-		return fmt.Errorf("create active site deletion task index: %w", err)
-	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_node_upgrade_tasks_active
-		ON node_upgrade_tasks(node_id)
-		WHERE status IN ('queued', 'applying')`); err != nil {
-		return fmt.Errorf("create active node upgrade index: %w", err)
-	}
-	if err := s.seedBuiltinSecurityPolicies(); err != nil {
-		return err
-	}
-	if err := s.backfillSitePublications(); err != nil {
-		return err
-	}
-	return s.backfillSiteDomains()
-}
+`
 
-func (s *Store) seedBuiltinSecurityPolicies() error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin built-in security policy migration: %w", err)
-	}
-	defer tx.Rollback()
+func seedBuiltinSecurityPoliciesTx(tx *sql.Tx) error {
 	seededAt := stamp(now())
 	if _, err := tx.Exec(`UPDATE security_policies SET pattern = ?, updated_at = ?
 		WHERE id = ? AND pattern = ?`, domain.DefaultSecurityPolicyPattern, seededAt,
@@ -476,14 +395,11 @@ func (s *Store) seedBuiltinSecurityPolicies() error {
 			return fmt.Errorf("seed built-in security policy %q: %w", policy.name, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit built-in security policy migration: %w", err)
-	}
 	return nil
 }
 
-func (s *Store) backfillSiteDomains() error {
-	rows, err := s.db.Query(`SELECT id, domains_json FROM sites`)
+func backfillSiteDomainsTx(tx *sql.Tx) error {
+	rows, err := tx.Query(`SELECT id, domains_json FROM sites`)
 	if err != nil {
 		return err
 	}
@@ -512,19 +428,36 @@ func (s *Store) backfillSiteDomains() error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
-	publications, err := s.ListSitePublications()
+	publicationRows, err := tx.Query(`SELECT site_json FROM site_publications`)
 	if err != nil {
 		return err
 	}
-	for _, publication := range publications {
-		sites = append(sites, existingSite{id: publication.Site.ID, domains: publication.Site.Domains})
+	for publicationRows.Next() {
+		var encoded string
+		if err := publicationRows.Scan(&encoded); err != nil {
+			publicationRows.Close()
+			return err
+		}
+		var site domain.Site
+		if err := json.Unmarshal([]byte(encoded), &site); err != nil {
+			publicationRows.Close()
+			return fmt.Errorf("decode published site domains: %w", err)
+		}
+		sites = append(sites, existingSite{id: site.ID, domains: site.Domains})
+	}
+	if err := publicationRows.Err(); err != nil {
+		publicationRows.Close()
+		return err
+	}
+	if err := publicationRows.Close(); err != nil {
+		return err
 	}
 	for _, site := range sites {
 		for _, domainName := range site.domains {
 			var owner string
-			err := s.db.QueryRow(`SELECT site_id FROM site_domains WHERE domain_name = ?`, domainName).Scan(&owner)
+			err := tx.QueryRow(`SELECT site_id FROM site_domains WHERE domain_name = ?`, domainName).Scan(&owner)
 			if errors.Is(err, sql.ErrNoRows) {
-				if _, err := s.db.Exec(`INSERT INTO site_domains(domain_name, site_id) VALUES (?, ?)`, domainName, site.id); err != nil {
+				if _, err := tx.Exec(`INSERT INTO site_domains(domain_name, site_id) VALUES (?, ?)`, domainName, site.id); err != nil {
 					return err
 				}
 				continue
@@ -1875,7 +1808,11 @@ func saveNodeStatesTx(tx *sql.Tx, updates []NodeStateUpdate, updatedAt string) e
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO node_states(node_id, version, nginx_config, nginx_stream_config, public_ports_json, certificate_ciphertext, private_key_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(node_id) DO UPDATE SET version=excluded.version, nginx_config=excluded.nginx_config, nginx_stream_config=excluded.nginx_stream_config, public_ports_json=excluded.public_ports_json, certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=NULL, updated_at=excluded.updated_at`, update.NodeID, update.State.Version, update.State.NginxConfig, update.State.NginxStreamConfig, string(ports), update.CertificatesCiphertext, updatedAt); err != nil {
+		fragments, err := json.Marshal(update.State.NginxFragments)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO node_states(node_id, version, nginx_config, nginx_stream_config, nginx_fragments_json, public_ports_json, certificate_ciphertext, private_key_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(node_id) DO UPDATE SET version=excluded.version, nginx_config=excluded.nginx_config, nginx_stream_config=excluded.nginx_stream_config, nginx_fragments_json=excluded.nginx_fragments_json, public_ports_json=excluded.public_ports_json, certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=NULL, updated_at=excluded.updated_at`, update.NodeID, update.State.Version, update.State.NginxConfig, update.State.NginxStreamConfig, string(fragments), string(ports), update.CertificatesCiphertext, updatedAt); err != nil {
 			return err
 		}
 	}
@@ -1885,8 +1822,8 @@ func saveNodeStatesTx(tx *sql.Tx, updates []NodeStateUpdate, updatedAt string) e
 func (s *Store) NodeState(nodeID string) (domain.DesiredState, []byte, error) {
 	var state domain.DesiredState
 	var certificates []byte
-	var ports string
-	err := s.db.QueryRow(`SELECT version, nginx_config, nginx_stream_config, public_ports_json, certificate_ciphertext FROM node_states WHERE node_id = ?`, nodeID).Scan(&state.Version, &state.NginxConfig, &state.NginxStreamConfig, &ports, &certificates)
+	var fragments, ports string
+	err := s.db.QueryRow(`SELECT version, nginx_config, nginx_stream_config, nginx_fragments_json, public_ports_json, certificate_ciphertext FROM node_states WHERE node_id = ?`, nodeID).Scan(&state.Version, &state.NginxConfig, &state.NginxStreamConfig, &fragments, &ports, &certificates)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.DesiredState{}, nil, ErrNotFound
 	}
@@ -1895,6 +1832,9 @@ func (s *Store) NodeState(nodeID string) (domain.DesiredState, []byte, error) {
 	}
 	if err := json.Unmarshal([]byte(ports), &state.PublicPorts); err != nil {
 		return domain.DesiredState{}, nil, fmt.Errorf("decode desired public ports: %w", err)
+	}
+	if err := json.Unmarshal([]byte(fragments), &state.NginxFragments); err != nil {
+		return domain.DesiredState{}, nil, fmt.Errorf("decode desired Nginx fragments: %w", err)
 	}
 	return state, certificates, nil
 }

@@ -45,9 +45,12 @@ type Server struct {
 	Cloudflare         *integrations.CloudflareDNS
 	Issuer             integrations.CertificateIssuer
 	CertificateManager *CertificateManager
+	HealthManager      *HealthManager
 	SiteDeleter        *SiteDeletionManager
 	Settings           *SettingsManager
 	BackupValidator    BackupRepositoryValidator
+	BackupStatusPath   string
+	OnlineRestore      *OnlineRestoreManager
 	Notifier           integrations.Notifier
 	Logs               logstore.Store
 	ControlURL         string
@@ -58,6 +61,7 @@ type Server struct {
 	SetupAllowCIDRs    []*net.IPNet
 	TrustedProxyCIDRs  []*net.IPNet
 	Logger             *slog.Logger
+	RestartControl     func()
 	loginMu            sync.Mutex
 	loginHits          map[string][]time.Time
 }
@@ -76,6 +80,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/logout", s.requireAdmin(s.logout))
 	mux.HandleFunc("GET /api/session", s.requireAdmin(s.session))
 	mux.HandleFunc("GET /api/overview", s.requireAdmin(s.overview))
+	mux.HandleFunc("GET /api/health/reconciliation", s.requireAdmin(s.healthReconciliationStatus))
+	mux.HandleFunc("GET /api/messages", s.requireAdmin(s.listMessages))
+	mux.HandleFunc("POST /api/messages/read-all", s.requireAdmin(s.markAllMessagesRead))
+	mux.HandleFunc("POST /api/messages/{id}/read", s.requireAdmin(s.markMessageRead))
+	mux.HandleFunc("DELETE /api/messages/{id}", s.requireAdmin(s.deleteMessage))
 	mux.HandleFunc("GET /api/logs", s.requireAdmin(s.searchLogs))
 	mux.HandleFunc("GET /api/settings", s.requireAdmin(s.getSettings))
 	mux.HandleFunc("PUT /api/settings/dns", s.requireAdmin(s.updateDNSSettings))
@@ -88,6 +97,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/settings/backup", s.requireAdmin(s.updateBackupSettings))
 	mux.HandleFunc("DELETE /api/settings/backup", s.requireAdmin(s.clearBackupSettings))
 	mux.HandleFunc("POST /api/settings/backup/test", s.requireAdmin(s.testBackupSettings))
+	mux.HandleFunc("GET /api/backups/status", s.requireAdmin(s.backupRunStatus))
+	mux.HandleFunc("GET /api/backups/snapshots", s.requireAdmin(s.listBackupSnapshots))
+	mux.HandleFunc("GET /api/backups/restores/current", s.requireAdmin(s.currentOnlineRestore))
+	mux.HandleFunc("POST /api/backups/restores", s.requireAdmin(s.startOnlineRestore))
+	mux.HandleFunc("POST /api/backups/restores/{id}/commit", s.requireAdmin(s.commitOnlineRestore))
+	mux.HandleFunc("DELETE /api/backups/restores/{id}", s.requireAdmin(s.cancelOnlineRestore))
 	mux.HandleFunc("GET /api/security", s.requireAdmin(s.getSecurityOverview))
 	mux.HandleFunc("POST /api/security/policies", s.requireAdmin(s.createSecurityPolicy))
 	mux.HandleFunc("PUT /api/security/policies/{id}", s.requireAdmin(s.updateSecurityPolicy))
@@ -99,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/security/bans/{ip}", s.requireAdmin(s.deleteSecurityBan))
 	mux.HandleFunc("GET /api/nodes", s.requireAdmin(s.listNodes))
 	mux.HandleFunc("POST /api/nodes", s.requireAdmin(s.createNode))
+	mux.HandleFunc("POST /api/nodes/upgrade-all", s.requireAdmin(s.startAllNodeUpgrades))
 	mux.HandleFunc("GET /api/nodes/{id}", s.requireAdmin(s.nodeDetail))
 	mux.HandleFunc("GET /api/nodes/{id}/cache-status", s.requireAdmin(s.nodeCacheStatus))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
@@ -177,6 +193,31 @@ func ResolveEdgeBinarySHA256(path, configured string) (string, error) {
 
 func (s *Server) health(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) healthReconciliationStatus(response http.ResponseWriter, _ *http.Request) {
+	if s.HealthManager == nil {
+		writeJSON(response, http.StatusOK, HealthRoundStatus{})
+		return
+	}
+	writeJSON(response, http.StatusOK, s.HealthManager.LastRound())
+}
+
+func (s *Server) backupRunStatus(response http.ResponseWriter, _ *http.Request) {
+	if strings.TrimSpace(s.BackupStatusPath) == "" {
+		writeJSON(response, http.StatusOK, nil)
+		return
+	}
+	status, err := ReadBackupRunStatus(s.BackupStatusPath)
+	if errors.Is(err, os.ErrNotExist) {
+		writeJSON(response, http.StatusOK, nil)
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, status)
 }
 
 func (s *Server) setupStatus(response http.ResponseWriter, request *http.Request) {

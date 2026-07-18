@@ -72,10 +72,11 @@ const (
 )
 
 const (
-	EdgeCapabilityTCPStream     = "tcp_stream_v1"
-	EdgeCapabilityOnlineUpgrade = "online_upgrade_v1"
-	EdgeCapabilityCacheUsage    = "cache_usage_v1"
-	EdgeCapabilityMachineStatus = "machine_status_v1"
+	EdgeCapabilityTCPStream      = "tcp_stream_v1"
+	EdgeCapabilityOnlineUpgrade  = "online_upgrade_v1"
+	EdgeCapabilityCacheUsage     = "cache_usage_v1"
+	EdgeCapabilityMachineStatus  = "machine_status_v1"
+	EdgeCapabilityNginxFragments = "nginx_fragments_v1"
 )
 
 type TCPForward struct {
@@ -184,11 +185,24 @@ type PublishStatus struct {
 }
 
 type DesiredState struct {
-	Version           int64                `json:"version"`
-	NginxConfig       string               `json:"nginx_config"`
-	NginxStreamConfig string               `json:"nginx_stream_config,omitempty"`
-	PublicPorts       []int                `json:"public_ports"`
-	Certificates      map[string]TLSBundle `json:"certificates,omitempty"`
+	Version           int64                 `json:"version"`
+	NginxConfig       string                `json:"nginx_config"`
+	NginxStreamConfig string                `json:"nginx_stream_config,omitempty"`
+	NginxFragments    *NginxConfigFragments `json:"nginx_fragments,omitempty"`
+	PublicPorts       []int                 `json:"public_ports"`
+	Certificates      map[string]TLSBundle  `json:"certificates,omitempty"`
+}
+
+type NginxConfigFragment struct {
+	Name    string `json:"name"`
+	Content string `json:"content"`
+}
+
+type NginxConfigFragments struct {
+	HTTPBase    string                `json:"http_base"`
+	HTTPSites   []NginxConfigFragment `json:"http_sites,omitempty"`
+	StreamBase  string                `json:"stream_base"`
+	StreamSites []NginxConfigFragment `json:"stream_sites,omitempty"`
 }
 
 type NodeUpgradeStatus string

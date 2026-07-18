@@ -248,6 +248,31 @@ func OpenReadOnly(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
+func (s *Store) IntegrityCheck() error {
+	rows, err := s.db.Query(`PRAGMA quick_check`)
+	if err != nil {
+		return fmt.Errorf("run SQLite quick_check: %w", err)
+	}
+	defer rows.Close()
+	var failures []string
+	for rows.Next() {
+		var result string
+		if err := rows.Scan(&result); err != nil {
+			return fmt.Errorf("read SQLite quick_check: %w", err)
+		}
+		if result != "ok" {
+			failures = append(failures, result)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read SQLite quick_check: %w", err)
+	}
+	if len(failures) != 0 {
+		return fmt.Errorf("SQLite quick_check failed: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
 func ReadSecret(path, name string) ([]byte, error) {
 	if strings.TrimSpace(name) == "" {
 		return nil, errors.New("secret name is required")

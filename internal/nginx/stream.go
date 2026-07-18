@@ -82,7 +82,8 @@ func RenderStream(sites []domain.Site) (string, error) {
 	out.WriteString("}\n")
 
 	for _, item := range items {
-		out.WriteString("\nserver {\n")
+		fmt.Fprintf(&out, "\n# CDN stream site fragment %s port %d begin\n", item.SiteID, item.ListenPort)
+		out.WriteString("server {\n")
 		fmt.Fprintf(&out, "    listen %d", item.ListenPort)
 		if item.ListenTLS {
 			out.WriteString(" ssl")
@@ -100,6 +101,58 @@ func RenderStream(sites []domain.Site) (string, error) {
 			out.WriteString("\n    proxy_ssl on;\n    proxy_ssl_server_name on;\n    proxy_ssl_name $cdn_tcp_upstream_sni;\n    proxy_ssl_protocols TLSv1.2 TLSv1.3;\n    proxy_ssl_verify on;\n    proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;\n    proxy_ssl_verify_depth 3;\n")
 		}
 		out.WriteString("\n    access_log /var/log/nginx/cdn-platform-tcp-access.log cdn_tcp_json;\n    error_log /var/log/nginx/cdn-platform-tcp-error.log warn;\n}\n")
+		fmt.Fprintf(&out, "# CDN stream site fragment %s port %d end\n", item.SiteID, item.ListenPort)
 	}
 	return out.String(), nil
+}
+
+func SplitStreamConfig(configuration string) (string, []domain.NginxConfigFragment, error) {
+	const markerPrefix = "# CDN stream site fragment "
+	var base strings.Builder
+	grouped := make(map[string]*strings.Builder)
+	cursor := 0
+	for {
+		relativeStart := strings.Index(configuration[cursor:], markerPrefix)
+		if relativeStart < 0 {
+			base.WriteString(configuration[cursor:])
+			break
+		}
+		start := cursor + relativeStart
+		lineEnd := strings.IndexByte(configuration[start:], '\n')
+		if lineEnd < 0 {
+			return "", nil, fmt.Errorf("stream site fragment marker is incomplete")
+		}
+		lineEnd += start
+		marker := strings.TrimSpace(configuration[start:lineEnd])
+		fields := strings.Fields(marker)
+		if len(fields) != 9 || fields[0] != "#" || fields[1] != "CDN" || fields[2] != "stream" ||
+			fields[3] != "site" || fields[4] != "fragment" || fields[6] != "port" || fields[8] != "begin" {
+			return "", nil, fmt.Errorf("invalid stream site fragment marker %q", marker)
+		}
+		siteID, port := fields[5], fields[7]
+		endMarker := markerPrefix + siteID + " port " + port + " end"
+		relativeEnd := strings.Index(configuration[lineEnd+1:], endMarker)
+		if relativeEnd < 0 {
+			return "", nil, fmt.Errorf("stream site fragment %s port %s has no end marker", siteID, port)
+		}
+		end := lineEnd + 1 + relativeEnd + len(endMarker)
+		if end < len(configuration) && configuration[end] == '\n' {
+			end++
+		}
+		base.WriteString(configuration[cursor:start])
+		name := siteFragmentName(siteID)
+		builder := grouped[name]
+		if builder == nil {
+			builder = &strings.Builder{}
+			grouped[name] = builder
+		}
+		builder.WriteString(configuration[start:end])
+		cursor = end
+	}
+	fragments := make([]domain.NginxConfigFragment, 0, len(grouped))
+	for name, content := range grouped {
+		fragments = append(fragments, domain.NginxConfigFragment{Name: name, Content: content.String()})
+	}
+	sort.Slice(fragments, func(i, j int) bool { return fragments[i].Name < fragments[j].Name })
+	return base.String(), fragments, nil
 }

@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -96,5 +97,55 @@ func TestNodeOnlineUpgradeStatusRequiresCapabilityAndFreshHeartbeat(t *testing.T
 	}
 	if status.CanUpgrade || status.UpgradeCapable || !strings.Contains(status.UpgradeBlocker, "手动") {
 		t.Fatalf("legacy node status = %#v", status)
+	}
+}
+
+func TestStartAllNodeUpgradesQueuesOnlyEligibleOutdatedNodes(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	sourceDigest := strings.Repeat("1", 64)
+	targetDigest := strings.Repeat("2", 64)
+	eligible, _ := database.CreateNode("eligible", "203.0.113.101")
+	current, _ := database.CreateNode("current", "203.0.113.102")
+	blocked, _ := database.CreateNode("blocked", "203.0.113.103")
+	for _, node := range []domain.Node{eligible, current} {
+		if err := database.SetNodeCapabilities(node.ID, []string{domain.EdgeCapabilityOnlineUpgrade}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.HeartbeatWithAgent(eligible.ID, 0, "", nil, sourceDigest, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.HeartbeatWithAgent(current.ID, 0, "", nil, targetDigest, ""); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		Store: database, EdgeControlURL: "https://control.example.test:8443",
+		EdgeBinaryURL: "https://control.example.test/edge", EdgeBinarySHA256: targetDigest,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/nodes/upgrade-all", nil)
+	response := httptest.NewRecorder()
+	server.startAllNodeUpgrades(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("bulk upgrade status = %d, body=%s", response.Code, response.Body.String())
+	}
+	var result nodeUpgradeAllResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Created != 1 || result.UpToDate != 1 || result.Blocked != 1 || len(result.Results) != 3 {
+		t.Fatalf("bulk upgrade result = %#v", result)
+	}
+	if _, err := database.LatestNodeUpgrade(eligible.ID); err != nil {
+		t.Fatalf("eligible node was not queued: %v", err)
+	}
+	if _, err := database.LatestNodeUpgrade(current.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("current node received an upgrade: %v", err)
+	}
+	if _, err := database.LatestNodeUpgrade(blocked.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("blocked node received an upgrade: %v", err)
 	}
 }

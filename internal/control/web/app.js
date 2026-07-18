@@ -66,6 +66,9 @@ let onlineRestorePollTimer = null;
 let onlineRestoreDialogMode = '';
 let onlineRestoreSelectedSnapshot = null;
 let bulkUpgradePending = false;
+let bulkUpgradePollTimer = null;
+let bulkUpgradeResult = null;
+let bulkUpgradeGeneration = 0;
 
 const nodeStatusLabels = {
   pending: '待激活',
@@ -1690,13 +1693,90 @@ function closeNodeUpgrade() {
 }
 
 function bulkUpgradeStateLabel(state) {
-  return ({ created: '已排队', already_active: '升级中', up_to_date: '已是最新', blocked: '已跳过' })[state] || state;
+  return ({ created: '已排队', queued: '排队中', already_active: '升级中', applying: '升级中', succeeded: '成功', failed: '失败', up_to_date: '已是最新', blocked: '已跳过' })[state] || state;
+}
+
+function bulkUpgradeItemState(item) {
+  if (['up_to_date', 'blocked'].includes(item.state)) return item.state;
+  return item.task?.status || item.state;
+}
+
+function bulkUpgradeIsActive(item) {
+  return ['created', 'queued', 'already_active', 'applying'].includes(bulkUpgradeItemState(item));
+}
+
+function stopBulkUpgradePolling() {
+  window.clearTimeout(bulkUpgradePollTimer);
+  bulkUpgradePollTimer = null;
+  bulkUpgradeGeneration += 1;
+}
+
+function scheduleBulkUpgradePoll() {
+  window.clearTimeout(bulkUpgradePollTimer);
+  bulkUpgradePollTimer = null;
+  if (!bulkUpgradeResult || !byId('node-upgrade-all-dialog').open || !(bulkUpgradeResult.results || []).some(bulkUpgradeIsActive)) return;
+  const generation = bulkUpgradeGeneration;
+  bulkUpgradePollTimer = window.setTimeout(() => {
+    bulkUpgradePollTimer = null;
+    void pollBulkUpgradeStatuses(generation).catch((error) => {
+      if (generation !== bulkUpgradeGeneration) return;
+      notice(error.message);
+      scheduleBulkUpgradePoll();
+    });
+  }, 2000);
+}
+
+async function pollBulkUpgradeStatuses(generation) {
+  if (generation !== bulkUpgradeGeneration || !bulkUpgradeResult) return;
+  const activeItems = (bulkUpgradeResult.results || []).filter(bulkUpgradeIsActive);
+  const updates = await Promise.all(activeItems.map(async (item) => {
+    try {
+      const status = await request(`/api/nodes/${encodeURIComponent(item.node_id)}/upgrade`);
+      return { nodeID: item.node_id, status };
+    } catch (error) {
+      return { nodeID: item.node_id, error };
+    }
+  }));
+  if (generation !== bulkUpgradeGeneration || !bulkUpgradeResult) return;
+  const updatesByNode = new Map(updates.map((update) => [update.nodeID, update]));
+  bulkUpgradeResult.results = (bulkUpgradeResult.results || []).map((item) => {
+    const update = updatesByNode.get(item.node_id);
+    if (!update) return item;
+    if (update.error) return { ...item, detail: `状态刷新失败：${update.error.message}` };
+    const status = update.status;
+    const task = status.upgrade_task || null;
+    let state = status.upgrade_up_to_date ? 'succeeded' : task?.status;
+    if (!state) state = 'blocked';
+    const detail = task?.detail || status.upgrade_blocker || bulkUpgradeStateLabel(state);
+    return { ...item, state, detail, task };
+  });
+  renderBulkUpgradeResult(bulkUpgradeResult);
+  if ((bulkUpgradeResult.results || []).some(bulkUpgradeIsActive)) {
+    scheduleBulkUpgradePoll();
+    return;
+  }
+  notice('全部节点升级任务已结束', true);
+  await refresh();
+  void refreshMessages({ schedule: false });
 }
 
 function renderBulkUpgradeResult(result) {
-  byId('node-upgrade-all-meta').textContent = `${numberFormatter.format(result.created || 0)} 个已排队 · ${numberFormatter.format(result.up_to_date || 0)} 个已是最新 · ${numberFormatter.format(result.blocked || 0)} 个已跳过`;
-  byId('node-upgrade-all-summary').innerHTML = `<span><strong>${numberFormatter.format(result.created || 0)}</strong> 已排队</span><span><strong>${numberFormatter.format(result.already_active || 0)}</strong> 进行中</span><span><strong>${numberFormatter.format(result.up_to_date || 0)}</strong> 最新</span><span><strong>${numberFormatter.format(result.blocked || 0)}</strong> 跳过</span>`;
-  byId('node-upgrade-all-results').innerHTML = (result.results || []).map((item) => `<tr><td><a href="#/nodes/${encodeURIComponent(item.node_id)}">${escapeHTML(item.name || item.node_id)}</a></td><td><span class="status ${escapeHTML(item.state)}">${escapeHTML(bulkUpgradeStateLabel(item.state))}</span></td><td>${escapeHTML(item.detail || '')}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">没有节点。</td></tr>';
+  const counts = { queued: 0, applying: 0, completed: 0, issues: 0 };
+  (result.results || []).forEach((item) => {
+    const state = bulkUpgradeItemState(item);
+    if (['created', 'queued'].includes(state)) counts.queued += 1;
+    else if (['already_active', 'applying'].includes(state)) counts.applying += 1;
+    else if (['succeeded', 'up_to_date'].includes(state)) counts.completed += 1;
+    else counts.issues += 1;
+  });
+  const total = (result.results || []).length;
+  const terminal = counts.completed + counts.issues;
+  byId('node-upgrade-all-meta').textContent = `${numberFormatter.format(terminal)}/${numberFormatter.format(total)} 已完成 · ${numberFormatter.format(counts.queued + counts.applying)} 个进行中`;
+  byId('node-upgrade-all-summary').innerHTML = `<span><strong>${numberFormatter.format(counts.queued)}</strong> 排队</span><span><strong>${numberFormatter.format(counts.applying)}</strong> 升级中</span><span><strong>${numberFormatter.format(counts.completed)}</strong> 已完成</span><span><strong>${numberFormatter.format(counts.issues)}</strong> 失败/跳过</span>`;
+  byId('node-upgrade-all-results').innerHTML = (result.results || []).map((item) => {
+    const state = bulkUpgradeItemState(item);
+    return `<tr><td><a href="#/nodes/${encodeURIComponent(item.node_id)}">${escapeHTML(item.name || item.node_id)}</a></td><td><span class="status ${escapeHTML(state)}">${escapeHTML(bulkUpgradeStateLabel(state))}</span></td><td>${escapeHTML(item.detail || '')}</td></tr>`;
+  }).join('') || '<tr><td colspan="3" class="muted">没有节点。</td></tr>';
   const dialog = byId('node-upgrade-all-dialog');
   if (!dialog.open) dialog.showModal();
 }
@@ -1708,7 +1788,10 @@ async function startAllNodeUpgrades() {
   button.disabled = true;
   try {
     const result = await request('/api/nodes/upgrade-all', { method: 'POST', body: '{}' });
+    stopBulkUpgradePolling();
+    bulkUpgradeResult = result;
     renderBulkUpgradeResult(result);
+    scheduleBulkUpgradePoll();
     notice(result.created ? `${result.created} 个节点升级已排队` : '所有可用节点均无需新建升级任务', true);
     await refresh();
     void refreshMessages({ schedule: false });
@@ -1721,6 +1804,8 @@ async function startAllNodeUpgrades() {
 }
 
 function closeBulkUpgrade() {
+  stopBulkUpgradePolling();
+  bulkUpgradeResult = null;
   if (byId('node-upgrade-all-dialog').open) byId('node-upgrade-all-dialog').close();
 }
 
@@ -2884,6 +2969,10 @@ byId('refresh-security').addEventListener('click', () => {
 });
 byId('upgrade-all-nodes').addEventListener('click', startAllNodeUpgrades);
 byId('close-node-upgrade-all').addEventListener('click', closeBulkUpgrade);
+byId('node-upgrade-all-dialog').addEventListener('close', () => {
+  stopBulkUpgradePolling();
+  bulkUpgradeResult = null;
+});
 byId('refresh-backup-snapshots').addEventListener('click', () => refreshOnlineRestore({ loadSnapshots: true }).catch((error) => notice(error.message)));
 byId('backup-snapshot-table').addEventListener('click', (event) => {
   const button = event.target.closest('.start-online-restore');

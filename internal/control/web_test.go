@@ -179,6 +179,7 @@ func TestEmbeddedConsoleSupportsBulkUpgradeAndOnlineRestore(t *testing.T) {
 	script := string(scriptContents)
 	for _, expected := range []string{
 		"request('/api/nodes/upgrade-all'", "request('/api/backups/snapshots')",
+		"function pollBulkUpgradeStatuses(generation)", "bulkUpgradePollTimer", "/api/nodes/${encodeURIComponent(item.node_id)}/upgrade",
 		"request('/api/backups/restores'", "/commit`, { method: 'POST'",
 		"function renderBackupSnapshots()", "function startAllNodeUpgrades()",
 		"backupSnapshotsError", "当前部署未启用在线恢复",

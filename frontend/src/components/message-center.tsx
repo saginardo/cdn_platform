@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
+import { ListPagination } from "@/components/list-pagination";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
@@ -20,6 +21,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { api, errorMessage } from "@/lib/api";
+import { useListPagination } from "@/hooks/use-list-pagination";
 import { formatDateTime } from "@/lib/format";
 import type { Message, MessagePage } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -70,6 +72,7 @@ export function MessageCenter({
   const messages = (page?.messages ?? []).filter(
     (message) => filter === "all" || !message.read_at,
   );
+  const pagination = useListPagination(messages);
 
   function openMessage(message: Message) {
     if (!message.read_at) markRead.mutate(message.id);
@@ -112,7 +115,14 @@ export function MessageCenter({
               <TooltipContent>全部标为已读</TooltipContent>
             </Tooltip>
           </div>
-          <Tabs value={filter} onValueChange={setFilter} className="mt-3">
+          <Tabs
+            value={filter}
+            onValueChange={(value) => {
+              setFilter(value);
+              pagination.setPage(1);
+            }}
+            className="mt-3"
+          >
             <TabsList>
               <TabsTrigger value="all">全部</TabsTrigger>
               <TabsTrigger value="unread">未读</TabsTrigger>
@@ -122,7 +132,7 @@ export function MessageCenter({
         <ScrollArea className="min-h-0 flex-1">
           {messages.length ? (
             <div className="divide-y">
-              {messages.map((message) => (
+              {pagination.items.map((message) => (
                 <article
                   key={message.id}
                   className={cn(
@@ -179,6 +189,13 @@ export function MessageCenter({
             </div>
           )}
         </ScrollArea>
+        {messages.length ? (
+          <ListPagination
+            pagination={pagination}
+            itemLabel="条消息"
+            className="shrink-0"
+          />
+        ) : null}
       </SheetContent>
     </Sheet>
   );

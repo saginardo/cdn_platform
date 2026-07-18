@@ -82,9 +82,20 @@ const site = {
   updated_at: now.toISOString(),
 };
 
-async function mockAPI(page: Page) {
+async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (
+      url.pathname === "/api/settings/branding" &&
+      route.request().method() === "PUT"
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(route.request().postDataJSON()),
+      });
+      return;
+    }
     const responses: Record<string, unknown> = {
       "/api/session": { user: "admin", csrf_token: "e2e-csrf" },
       "/api/messages": { messages: [], unread_count: 0 },
@@ -118,7 +129,7 @@ async function mockAPI(page: Page) {
         from: series[22].time,
         to: now.toISOString(),
         offset: 0,
-        page_size: 100,
+        page_size: 20,
         has_more: false,
       },
       "/api/security": {
@@ -130,6 +141,7 @@ async function mockAPI(page: Page) {
         nodes: [],
       },
       "/api/settings": {
+        branding: { name: "CDN Platform", subtitle: "控制面板" },
         dns: { default_ttl_seconds: 60 },
         cloudflare: {
           source: "environment",
@@ -167,6 +179,7 @@ async function mockAPI(page: Page) {
       "/api/backups/status": null,
       "/api/backups/snapshots": [],
       "/api/backups/restores/current": null,
+      ...overrides,
     };
     const data = responses[url.pathname];
     if (data === undefined) {
@@ -213,6 +226,84 @@ test("desktop overview renders shadcn chart and aligned navigation", async ({
     path: testInfo.outputPath("overview-desktop.png"),
     fullPage: true,
   });
+});
+
+test("list pagination renders at most 20 entries per page", async ({
+  page,
+}) => {
+  const sites = Array.from({ length: 25 }, (_, index) => ({
+    ...overview.sites[0],
+    id: `site-${index + 1}`,
+    name: `分页站点 ${String(index + 1).padStart(2, "0")}`,
+  }));
+  await mockAPI(page, { "/api/overview": { ...overview, sites } });
+  await page.goto("/#/overview");
+
+  const rows = page.locator("tbody tr");
+  await expect(rows).toHaveCount(20);
+  await expect(page.getByText("第 1-20 条，共 25 个站点")).toBeVisible();
+  await expect(page.getByText("分页站点 20")).toBeVisible();
+  await expect(page.getByText("分页站点 21")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "下一页" }).click();
+  await expect(rows).toHaveCount(5);
+  await expect(page.getByText("第 21-25 条，共 25 个站点")).toBeVisible();
+  await expect(page.getByText("分页站点 21")).toBeVisible();
+  await expect(page.getByText("分页站点 20")).toHaveCount(0);
+});
+
+test("branding settings update the sidebar immediately", async ({
+  page,
+}, testInfo) => {
+  await mockAPI(page);
+  await page.goto("/#/settings");
+
+  await expect(page.getByLabel("品牌标识")).toHaveValue("CDN Platform");
+  await expect(page.getByLabel("副标题")).toHaveValue("控制面板");
+  await page.getByLabel("品牌标识").fill("DustK Edge");
+  await page.getByLabel("副标题").fill("边缘控制台");
+  await page.getByRole("button", { name: "保存品牌" }).click();
+
+  const sidebar = page.locator('[data-sidebar="sidebar"]');
+  await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
+  await expect(sidebar.getByText("边缘控制台", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("branding-settings.png"),
+    fullPage: true,
+  });
+});
+
+test("theme menu supports light dark and system modes", async ({
+  page,
+}, testInfo) => {
+  await page.emulateMedia({ colorScheme: "light" });
+  await mockAPI(page);
+  await page.goto("/#/overview");
+
+  const sidebar = page.locator('[data-sidebar="sidebar"]');
+  await expect(sidebar.getByText("消息中心", { exact: true })).toHaveCount(0);
+
+  await page.getByRole("button", { name: "主题：跟随系统" }).click();
+  await page.getByRole("menuitemradio", { name: "深色" }).click();
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(page.getByRole("button", { name: "主题：深色" })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("theme-dark.png"),
+    fullPage: true,
+  });
+
+  await page.getByRole("button", { name: "主题：深色" }).click();
+  await page.getByRole("menuitemradio", { name: "浅色" }).click();
+  await expect(page.locator("html")).toHaveClass(/light/);
+
+  await page.getByRole("button", { name: "主题：浅色" }).click();
+  await page.getByRole("menuitemradio", { name: "跟随系统" }).click();
+  await expect(
+    page.getByRole("button", { name: "主题：跟随系统" }),
+  ).toBeVisible();
+
+  await page.getByRole("button", { name: "打开消息中心" }).click();
+  await expect(page.getByRole("heading", { name: "消息中心" })).toBeVisible();
 });
 
 test("mobile sidebar closes after hash navigation without horizontal overflow", async ({

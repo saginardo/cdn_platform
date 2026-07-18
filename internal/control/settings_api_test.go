@@ -79,7 +79,16 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	backupValidator := &recordingBackupValidator{}
 	server := &Server{Store: database, Cipher: cipher, Settings: settings, Cloudflare: cloudflare, BackupValidator: backupValidator}
 
-	response := settingsRequest(t, server, http.MethodPut, "/api/settings/dns", map[string]any{"default_ttl_seconds": 59}, true)
+	response := settingsRequest(t, server, http.MethodPut, "/api/settings/branding", map[string]any{"name": "", "subtitle": "控制面板"}, true)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid branding = %d %s", response.Code, response.Body.String())
+	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/branding", map[string]any{"name": "DustK CDN", "subtitle": "运营面板"}, true)
+	if response.Code != http.StatusOK || settings.View().Branding.Name != "DustK CDN" || settings.View().Branding.Subtitle != "运营面板" {
+		t.Fatalf("valid branding = %d %s", response.Code, response.Body.String())
+	}
+
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/dns", map[string]any{"default_ttl_seconds": 59}, true)
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid TTL = %d %s", response.Code, response.Body.String())
 	}
@@ -151,6 +160,9 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	}
 	if !strings.Contains(body, `"secret_access_key_configured":true`) || !strings.Contains(body, `"restic_password_configured":true`) {
 		t.Fatalf("settings response lacks backup secret status: %s", body)
+	}
+	if !strings.Contains(body, `"branding":{"name":"DustK CDN","subtitle":"运营面板"}`) {
+		t.Fatalf("settings response lacks branding: %s", body)
 	}
 
 	response = settingsRequest(t, server, http.MethodDelete, "/api/settings/cloudflare", nil, true)

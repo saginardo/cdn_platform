@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/messages/{id}", s.requireAdmin(s.deleteMessage))
 	mux.HandleFunc("GET /api/logs", s.requireAdmin(s.searchLogs))
 	mux.HandleFunc("GET /api/settings", s.requireAdmin(s.getSettings))
+	mux.HandleFunc("PUT /api/settings/branding", s.requireAdmin(s.updateBrandingSettings))
 	mux.HandleFunc("PUT /api/settings/dns", s.requireAdmin(s.updateDNSSettings))
 	mux.HandleFunc("PUT /api/settings/cloudflare", s.requireAdmin(s.updateCloudflareSettings))
 	mux.HandleFunc("DELETE /api/settings/cloudflare", s.requireAdmin(s.clearCloudflareSettings))
@@ -942,7 +943,7 @@ func (s *Server) siteLogs(response http.ResponseWriter, request *http.Request) {
 	writeJSON(response, http.StatusOK, events)
 }
 
-const logSearchPageSize = 100
+const logSearchPageSize = 20
 
 type logSearchResponse struct {
 	Logs     []domain.AccessLogEvent `json:"logs"`

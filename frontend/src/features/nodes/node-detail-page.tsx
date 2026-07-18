@@ -20,6 +20,7 @@ import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
+import { ListPagination } from "@/components/list-pagination";
 import {
   EmptyState,
   PageBody,
@@ -56,6 +57,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api, errorMessage } from "@/lib/api";
+import { useListPagination } from "@/hooks/use-list-pagination";
 import {
   formatBytes,
   formatDateTime,
@@ -544,6 +546,8 @@ function CacheStatus({
 }
 
 function AssignedSites({ sites }: { sites: NodeDetail["sites"] }) {
+  const pagination = useListPagination(sites);
+
   return (
     <Card>
       <CardHeader>
@@ -552,42 +556,49 @@ function AssignedSites({ sites }: { sites: NodeDetail["sites"] }) {
       </CardHeader>
       <CardContent className="px-0">
         {sites.length ? (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="pl-6">站点</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>缓存</TableHead>
-                <TableHead className="pr-6 text-right">管理</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sites.map((site) => (
-                <TableRow key={site.id}>
-                  <TableCell className="pl-6">
-                    <div className="font-medium">{site.name}</div>
-                    <div className="text-xs text-muted-foreground">
-                      {site.domains.join(", ")}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge
-                      status={site.published ? "succeeded" : "pending"}
-                      label={site.published ? "已发布" : "未发布"}
-                    />
-                  </TableCell>
-                  <TableCell>{site.cache_enabled ? "启用" : "关闭"}</TableCell>
-                  <TableCell className="pr-6 text-right">
-                    <Button asChild variant="outline" size="sm">
-                      <Link to={`/sites/${encodeURIComponent(site.id)}`}>
-                        查看
-                      </Link>
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="pl-6">站点</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead>缓存</TableHead>
+                    <TableHead className="pr-6 text-right">管理</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {pagination.items.map((site) => (
+                    <TableRow key={site.id}>
+                      <TableCell className="pl-6">
+                        <div className="font-medium">{site.name}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {site.domains.join(", ")}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <StatusBadge
+                          status={site.published ? "succeeded" : "pending"}
+                          label={site.published ? "已发布" : "未发布"}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        {site.cache_enabled ? "启用" : "关闭"}
+                      </TableCell>
+                      <TableCell className="pr-6 text-right">
+                        <Button asChild variant="outline" size="sm">
+                          <Link to={`/sites/${encodeURIComponent(site.id)}`}>
+                            查看
+                          </Link>
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <ListPagination pagination={pagination} itemLabel="个站点" />
+          </>
         ) : (
           <div className="px-6 pb-6">
             <EmptyState title="未关联站点" />
@@ -615,6 +626,7 @@ function UninstallPanel({
 }) {
   const base = `/api/nodes/${encodeURIComponent(node.id)}/uninstall`;
   const job = status?.job;
+  const blockersPagination = useListPagination(status?.blockers ?? []);
   const canPrepare = node.status === "draining" || node.status === "revoked";
   const deletable =
     node.status === "uninstalled" ||
@@ -642,7 +654,7 @@ function UninstallPanel({
             {job.detail ? (
               <p className="text-xs text-muted-foreground">{job.detail}</p>
             ) : null}
-            {status?.blockers.map((blocker) => (
+            {blockersPagination.items.map((blocker) => (
               <p
                 key={`${blocker.code}-${blocker.site_id}`}
                 className="text-xs text-destructive"
@@ -650,6 +662,13 @@ function UninstallPanel({
                 {blocker.detail}
               </p>
             ))}
+            {blockersPagination.totalPages > 1 ? (
+              <ListPagination
+                pagination={blockersPagination}
+                itemLabel="项阻塞"
+                className="mt-3 px-0"
+              />
+            ) : null}
           </div>
         ) : null}
         {!job ? (

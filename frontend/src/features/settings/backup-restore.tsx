@@ -11,6 +11,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { ListPagination } from "@/components/list-pagination";
 import { EmptyState, PageError } from "@/components/page";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -33,6 +34,7 @@ import {
 import { api, errorMessage } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import type { BackupRunStatus, RestoreJob, RestoreSnapshot } from "@/lib/types";
+import { useListPagination } from "@/hooks/use-list-pagination";
 
 export function BackupRestore() {
   const queryClient = useQueryClient();
@@ -48,6 +50,7 @@ export function BackupRestore() {
     queryKey: ["backup-snapshots"],
     queryFn: () => api<RestoreSnapshot[]>("/api/backups/snapshots"),
   });
+  const snapshotsPagination = useListPagination(snapshots.data ?? []);
   const job = useQuery({
     queryKey: ["restore-job"],
     queryFn: () => api<RestoreJob | null>("/api/backups/restores/current"),
@@ -180,41 +183,47 @@ export function BackupRestore() {
               正在读取快照
             </div>
           ) : snapshots.data?.length ? (
-            <div className="overflow-x-auto border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>备份时间</TableHead>
-                    <TableHead>快照</TableHead>
-                    <TableHead>主机</TableHead>
-                    <TableHead className="text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {snapshots.data.map((snapshot) => (
-                    <TableRow key={snapshot.id}>
-                      <TableCell className="whitespace-nowrap">
-                        {formatDateTime(snapshot.time)}
-                      </TableCell>
-                      <TableCell>
-                        <code>{snapshot.short_id}</code>
-                      </TableCell>
-                      <TableCell>{snapshot.hostname || "--"}</TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          disabled={busy || activeRestore(current?.state)}
-                          onClick={() => setSelected(snapshot)}
-                        >
-                          <ShieldCheck />
-                          准备恢复
-                        </Button>
-                      </TableCell>
+            <div className="border">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>备份时间</TableHead>
+                      <TableHead>快照</TableHead>
+                      <TableHead>主机</TableHead>
+                      <TableHead className="text-right">操作</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {snapshotsPagination.items.map((snapshot) => (
+                      <TableRow key={snapshot.id}>
+                        <TableCell className="whitespace-nowrap">
+                          {formatDateTime(snapshot.time)}
+                        </TableCell>
+                        <TableCell>
+                          <code>{snapshot.short_id}</code>
+                        </TableCell>
+                        <TableCell>{snapshot.hostname || "--"}</TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={busy || activeRestore(current?.state)}
+                            onClick={() => setSelected(snapshot)}
+                          >
+                            <ShieldCheck />
+                            准备恢复
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <ListPagination
+                pagination={snapshotsPagination}
+                itemLabel="个快照"
+              />
             </div>
           ) : (
             <EmptyState

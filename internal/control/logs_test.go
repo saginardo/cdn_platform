@@ -74,7 +74,7 @@ func TestLogSearchParsesFiltersAndReturnsPage(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.Logs) != 1 || payload.Logs[0].Status != 404 || !payload.HasMore || payload.Offset != 100 || payload.PageSize != 100 || payload.From != from || payload.To != to {
+	if len(payload.Logs) != 1 || payload.Logs[0].Status != 404 || !payload.HasMore || payload.Offset != 100 || payload.PageSize != logSearchPageSize || payload.From != from || payload.To != to {
 		t.Fatalf("unexpected response: %#v", payload)
 	}
 }

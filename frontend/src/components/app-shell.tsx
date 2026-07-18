@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { Bell, ChevronRight } from "lucide-react";
 import { Suspense, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
@@ -5,6 +6,7 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 import { AppSidebar } from "@/components/app-sidebar";
 import { MessageCenter, useMessages } from "@/components/message-center";
 import { PageBody, PageLoading } from "@/components/page";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -18,6 +20,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/features/auth/auth-provider";
+import { api } from "@/lib/api";
+import type { Settings } from "@/lib/types";
 
 const pageNames: Record<string, string> = {
   overview: "概览",
@@ -32,6 +36,10 @@ export function AppShell() {
   const [messagesOpen, setMessagesOpen] = useState(false);
   const { logout } = useAuth();
   const messageQuery = useMessages();
+  const settingsQuery = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api<Settings>("/api/settings"),
+  });
   const location = useLocation();
   const segments = location.pathname.split("/").filter(Boolean);
   const section = segments[0] || "overview";
@@ -42,8 +50,8 @@ export function AppShell() {
       style={{ "--sidebar-width": "13.5rem" } as React.CSSProperties}
     >
       <AppSidebar
-        unread={messageQuery.data?.unread_count ?? 0}
-        onMessages={() => setMessagesOpen(true)}
+        brandName={settingsQuery.data?.branding?.name || "CDN Platform"}
+        brandSubtitle={settingsQuery.data?.branding?.subtitle ?? "控制面板"}
         onLogout={() => void logout()}
       />
       <SidebarInset className="min-w-0">
@@ -67,7 +75,8 @@ export function AppShell() {
               </>
             ) : null}
           </nav>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-1">
+            <ThemeToggle />
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button

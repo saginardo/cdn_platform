@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Cloud,
+  Globe2,
   LoaderCircle,
   Mail,
+  Palette,
   RefreshCw,
   RotateCcw,
   Save,
@@ -51,7 +53,7 @@ export function SettingsPage() {
     <>
       <PageHeader
         title="设置"
-        description="控制面运行参数与外部集成"
+        description="品牌、运行参数与外部集成"
         actions={
           <Button
             variant="outline"
@@ -69,12 +71,19 @@ export function SettingsPage() {
         {query.isLoading ? <PageLoading /> : null}
         {query.error ? <PageError error={query.error} /> : null}
         {query.data ? (
-          <Tabs defaultValue="general" className="space-y-5">
-            <TabsList>
+          <Tabs defaultValue="branding" className="space-y-5">
+            <TabsList className="max-w-full overflow-x-auto">
+              <TabsTrigger value="branding">品牌</TabsTrigger>
               <TabsTrigger value="general">网络与 DNS</TabsTrigger>
               <TabsTrigger value="notifications">通知</TabsTrigger>
               <TabsTrigger value="backup">备份与恢复</TabsTrigger>
             </TabsList>
+            <TabsContent value="branding">
+              <BrandingForm
+                key={`branding-${query.data.branding.name}-${query.data.branding.subtitle}`}
+                settings={query.data}
+              />
+            </TabsContent>
             <TabsContent value="general" className="grid gap-4 lg:grid-cols-2">
               <DNSForm
                 key={`dns-${query.data.dns.default_ttl_seconds}`}
@@ -102,6 +111,108 @@ export function SettingsPage() {
         ) : null}
       </PageBody>
     </>
+  );
+}
+
+const defaultBranding: Settings["branding"] = {
+  name: "CDN Platform",
+  subtitle: "控制面板",
+};
+
+function BrandingForm({ settings }: { settings: Settings }) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(settings.branding.name);
+  const [subtitle, setSubtitle] = useState(settings.branding.subtitle);
+  const mutation = useMutation({
+    mutationFn: () =>
+      api<Settings["branding"]>("/api/settings/branding", {
+        method: "PUT",
+        body: JSON.stringify({ name, subtitle }),
+      }),
+    onSuccess: (branding) => {
+      queryClient.setQueryData<Settings>(["settings"], (current) =>
+        current ? { ...current, branding } : current,
+      );
+      toast.success("品牌设置已保存");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+
+  return (
+    <FormCard
+      title="品牌"
+      description="控制台侧边栏标识"
+      icon={<Palette />}
+      source="控制台设置"
+    >
+      <form
+        className="grid gap-5"
+        onSubmit={(event) => {
+          event.preventDefault();
+          mutation.mutate();
+        }}
+      >
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="品牌标识" id="brand-name">
+            <Input
+              id="brand-name"
+              required
+              maxLength={48}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </Field>
+          <Field label="副标题" id="brand-subtitle">
+            <Input
+              id="brand-subtitle"
+              maxLength={80}
+              value={subtitle}
+              onChange={(event) => setSubtitle(event.target.value)}
+            />
+          </Field>
+        </div>
+        <div className="grid gap-2">
+          <Label>侧边栏预览</Label>
+          <div className="flex min-h-16 w-full max-w-sm items-center gap-3 border bg-sidebar px-3 py-2 text-sidebar-foreground">
+            <span className="grid size-8 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground">
+              <Globe2 className="size-4" />
+            </span>
+            <span className="grid min-w-0 text-left leading-tight">
+              <span className="truncate font-semibold">
+                {name.trim() || defaultBranding.name}
+              </span>
+              {subtitle.trim() ? (
+                <span className="truncate text-xs text-muted-foreground">
+                  {subtitle.trim()}
+                </span>
+              ) : null}
+            </span>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button type="submit" disabled={mutation.isPending || !name.trim()}>
+            {mutation.isPending ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <Save />
+            )}
+            保存品牌
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={mutation.isPending}
+            onClick={() => {
+              setName(defaultBranding.name);
+              setSubtitle(defaultBranding.subtitle);
+            }}
+          >
+            <RotateCcw />
+            恢复默认值
+          </Button>
+        </div>
+      </form>
+    </FormCard>
   );
 }
 

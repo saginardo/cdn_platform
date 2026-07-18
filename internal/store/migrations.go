@@ -21,6 +21,22 @@ var schemaMigrations = []schemaMigration{
 	{Version: 4, Name: "nginx-config-fragments", Apply: migrateNginxFragments},
 	{Version: 5, Name: "message-center", Apply: migrateMessageCenter},
 	{Version: 6, Name: "message-dismissal", Apply: migrateMessageDismissal},
+	{Version: 7, Name: "branding-settings", Apply: migrateBrandingSettings},
+}
+
+func migrateBrandingSettings(tx *sql.Tx) error {
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{"brand_name", "brand_name TEXT NOT NULL DEFAULT 'CDN Platform'"},
+		{"brand_subtitle", "brand_subtitle TEXT NOT NULL DEFAULT '控制面板'"},
+	} {
+		if err := addColumnIfMissing(tx, "control_settings", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func LatestSchemaVersion() int {

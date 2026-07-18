@@ -10,6 +10,7 @@ import {
   PageHeader,
   PageLoading,
 } from "@/components/page";
+import { ListPagination } from "@/components/list-pagination";
 import {
   OverviewLineChart,
   chartPoint,
@@ -24,6 +25,7 @@ import {
 } from "@/components/ui/card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
+import { useListPagination } from "@/hooks/use-list-pagination";
 import { formatBytes, formatNumber, formatPercent } from "@/lib/format";
 import type { Overview } from "@/lib/types";
 
@@ -39,6 +41,7 @@ export function OverviewSitePage() {
   });
   const site = query.data?.sites.find((item) => item.id === siteId);
   const chartData = useMemo(() => (site?.series ?? []).map(chartPoint), [site]);
+  const statusPagination = useListPagination(site?.status_codes ?? []);
 
   return (
     <>
@@ -109,28 +112,37 @@ export function OverviewSitePage() {
                 <CardTitle>HTTP 状态码</CardTitle>
                 <CardDescription>按请求量降序</CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="px-0">
                 {site.status_codes.length ? (
-                  <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                    {site.status_codes.map((item) => (
-                      <div
-                        key={item.code}
-                        className="flex items-center justify-between border px-4 py-3"
-                      >
-                        <span className="font-mono text-sm">
-                          HTTP {item.code}
-                        </span>
-                        <span className="text-sm tabular-nums text-muted-foreground">
-                          {formatNumber(item.requests)} ·{" "}
-                          {formatPercent(
-                            site.requests ? item.requests / site.requests : 0,
-                          )}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+                  <>
+                    <div className="grid gap-3 px-6 sm:grid-cols-2 xl:grid-cols-3">
+                      {statusPagination.items.map((item) => (
+                        <div
+                          key={item.code}
+                          className="flex items-center justify-between border px-4 py-3"
+                        >
+                          <span className="font-mono text-sm">
+                            HTTP {item.code}
+                          </span>
+                          <span className="text-sm tabular-nums text-muted-foreground">
+                            {formatNumber(item.requests)} ·{" "}
+                            {formatPercent(
+                              site.requests ? item.requests / site.requests : 0,
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <ListPagination
+                      pagination={statusPagination}
+                      itemLabel="个状态码"
+                      className="mt-4"
+                    />
+                  </>
                 ) : (
-                  <EmptyState title="暂无状态码数据" />
+                  <div className="px-6">
+                    <EmptyState title="暂无状态码数据" />
+                  </div>
                 )}
               </CardContent>
             </Card>

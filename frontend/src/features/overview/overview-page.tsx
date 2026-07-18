@@ -17,6 +17,7 @@ import {
   PageHeader,
   PageLoading,
 } from "@/components/page";
+import { ListPagination } from "@/components/list-pagination";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -49,6 +50,7 @@ import {
   formatPercent,
 } from "@/lib/format";
 import type { Overview, OverviewPoint } from "@/lib/types";
+import { useListPagination } from "@/hooks/use-list-pagination";
 
 type Metric = "requests" | "bytes" | "error_requests";
 
@@ -81,6 +83,7 @@ export function OverviewPage() {
   const errorRate = totals?.requests
     ? totals.error_requests / totals.requests
     : 0;
+  const sitesPagination = useListPagination(query.data?.sites ?? []);
 
   return (
     <>
@@ -225,57 +228,63 @@ export function OverviewPage() {
               </CardHeader>
               <CardContent className="px-0">
                 {query.data.sites.length ? (
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="pl-6">站点</TableHead>
-                          <TableHead>请求数</TableHead>
-                          <TableHead>传输量</TableHead>
-                          <TableHead>错误率</TableHead>
-                          <TableHead className="w-12 pr-6">
-                            <span className="sr-only">详情</span>
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {query.data.sites.map((site) => (
-                          <TableRow key={site.id}>
-                            <TableCell className="pl-6">
-                              <div className="font-medium">{site.name}</div>
-                              <div className="max-w-md truncate text-xs text-muted-foreground">
-                                {site.domains.join(", ") || "未配置域名"}
-                              </div>
-                            </TableCell>
-                            <TableCell className="tabular-nums">
-                              {formatNumber(site.requests)}
-                            </TableCell>
-                            <TableCell className="tabular-nums">
-                              {formatBytes(site.bytes)}
-                            </TableCell>
-                            <TableCell className="tabular-nums">
-                              {formatPercent(
-                                site.requests
-                                  ? site.error_requests / site.requests
-                                  : 0,
-                                2,
-                              )}
-                            </TableCell>
-                            <TableCell className="pr-6">
-                              <Button asChild variant="ghost" size="icon-sm">
-                                <Link
-                                  to={`/overview/sites/${encodeURIComponent(site.id)}`}
-                                  aria-label={`查看 ${site.name} 分析`}
-                                >
-                                  <ArrowRight />
-                                </Link>
-                              </Button>
-                            </TableCell>
+                  <>
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead className="pl-6">站点</TableHead>
+                            <TableHead>请求数</TableHead>
+                            <TableHead>传输量</TableHead>
+                            <TableHead>错误率</TableHead>
+                            <TableHead className="w-12 pr-6">
+                              <span className="sr-only">详情</span>
+                            </TableHead>
                           </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
+                        </TableHeader>
+                        <TableBody>
+                          {sitesPagination.items.map((site) => (
+                            <TableRow key={site.id}>
+                              <TableCell className="pl-6">
+                                <div className="font-medium">{site.name}</div>
+                                <div className="max-w-md truncate text-xs text-muted-foreground">
+                                  {site.domains.join(", ") || "未配置域名"}
+                                </div>
+                              </TableCell>
+                              <TableCell className="tabular-nums">
+                                {formatNumber(site.requests)}
+                              </TableCell>
+                              <TableCell className="tabular-nums">
+                                {formatBytes(site.bytes)}
+                              </TableCell>
+                              <TableCell className="tabular-nums">
+                                {formatPercent(
+                                  site.requests
+                                    ? site.error_requests / site.requests
+                                    : 0,
+                                  2,
+                                )}
+                              </TableCell>
+                              <TableCell className="pr-6">
+                                <Button asChild variant="ghost" size="icon-sm">
+                                  <Link
+                                    to={`/overview/sites/${encodeURIComponent(site.id)}`}
+                                    aria-label={`查看 ${site.name} 分析`}
+                                  >
+                                    <ArrowRight />
+                                  </Link>
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                    <ListPagination
+                      pagination={sitesPagination}
+                      itemLabel="个站点"
+                    />
+                  </>
                 ) : (
                   <div className="px-6 pb-6">
                     <EmptyState

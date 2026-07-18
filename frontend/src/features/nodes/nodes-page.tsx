@@ -18,6 +18,7 @@ import {
   PageHeader,
   PageLoading,
 } from "@/components/page";
+import { ListPagination } from "@/components/list-pagination";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,6 +42,7 @@ import {
 import { api, errorMessage } from "@/lib/api";
 import { formatDateTime, formatNumber, shortHash } from "@/lib/format";
 import type { Node, NodeUpgradeTask } from "@/lib/types";
+import { useListPagination } from "@/hooks/use-list-pagination";
 
 interface BulkUpgradeResult {
   created: number;
@@ -68,6 +70,7 @@ export function NodesPage() {
         ? 5_000
         : 20_000,
   });
+  const pagination = useListPagination(nodes.data ?? []);
   const bulkUpgrade = useMutation({
     mutationFn: () =>
       api<BulkUpgradeResult>("/api/nodes/upgrade-all", { method: "POST" }),
@@ -129,7 +132,7 @@ export function NodesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {nodes.data.map((node) => (
+                    {pagination.items.map((node) => (
                       <TableRow key={node.id}>
                         <TableCell className="pl-5">
                           <div className="font-medium">{node.name}</div>
@@ -185,19 +188,22 @@ export function NodesPage() {
                   </TableBody>
                 </Table>
               </div>
-              <div className="flex items-center justify-between border-t px-5 py-3 text-xs text-muted-foreground">
-                <span>{nodes.data.length} 个节点</span>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label="刷新节点"
-                  onClick={() => void nodes.refetch()}
-                >
-                  <RefreshCw
-                    className={nodes.isFetching ? "animate-spin" : undefined}
-                  />
-                </Button>
-              </div>
+              <ListPagination
+                pagination={pagination}
+                itemLabel="个节点"
+                action={
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="刷新节点"
+                    onClick={() => void nodes.refetch()}
+                  >
+                    <RefreshCw
+                      className={nodes.isFetching ? "animate-spin" : undefined}
+                    />
+                  </Button>
+                }
+              />
             </div>
           ) : (
             <EmptyState
@@ -310,6 +316,8 @@ function BulkResultDialog({
   result: BulkUpgradeResult | null;
   onOpenChange: (open: boolean) => void;
 }) {
+  const pagination = useListPagination(result?.results ?? []);
+
   return (
     <Dialog open={Boolean(result)} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl">
@@ -322,32 +330,35 @@ function BulkResultDialog({
           </DialogDescription>
         </DialogHeader>
         {result ? (
-          <div className="max-h-[55vh] overflow-auto border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>节点</TableHead>
-                  <TableHead>结果</TableHead>
-                  <TableHead>说明</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {result.results.map((item) => (
-                  <TableRow key={item.node_id}>
-                    <TableCell className="font-medium">{item.name}</TableCell>
-                    <TableCell>
-                      <StatusBadge
-                        status={bulkStateStatus(item.state)}
-                        label={bulkStateLabel(item.state)}
-                      />
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {item.detail || "--"}
-                    </TableCell>
+          <div className="border">
+            <div className="max-h-[55vh] overflow-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>节点</TableHead>
+                    <TableHead>结果</TableHead>
+                    <TableHead>说明</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {pagination.items.map((item) => (
+                    <TableRow key={item.node_id}>
+                      <TableCell className="font-medium">{item.name}</TableCell>
+                      <TableCell>
+                        <StatusBadge
+                          status={bulkStateStatus(item.state)}
+                          label={bulkStateLabel(item.state)}
+                        />
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {item.detail || "--"}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <ListPagination pagination={pagination} itemLabel="条结果" />
           </div>
         ) : null}
         <DialogFooter>

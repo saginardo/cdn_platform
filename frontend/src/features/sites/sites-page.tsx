@@ -9,6 +9,7 @@ import {
   PageHeader,
   PageLoading,
 } from "@/components/page";
+import { ListPagination } from "@/components/list-pagination";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,6 +23,7 @@ import {
 import { api } from "@/lib/api";
 import { formatDateTime, formatNumber } from "@/lib/format";
 import type { DeploymentTask, PublishStatus, Site } from "@/lib/types";
+import { useListPagination } from "@/hooks/use-list-pagination";
 
 interface TLSStatus {
   certificate_task: DeploymentTask | null;
@@ -34,6 +36,7 @@ export function SitesPage() {
     queryFn: () => api<Site[]>("/api/sites"),
     refetchInterval: 20_000,
   });
+  const pagination = useListPagination(query.data ?? []);
   return (
     <>
       <PageHeader
@@ -70,7 +73,7 @@ export function SitesPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {query.data.map((site) => (
+                    {pagination.items.map((site) => (
                       <TableRow key={site.id}>
                         <TableCell className="pl-5">
                           <div className="font-medium">{site.name}</div>
@@ -111,19 +114,22 @@ export function SitesPage() {
                   </TableBody>
                 </Table>
               </div>
-              <div className="flex items-center justify-between border-t px-5 py-3 text-xs text-muted-foreground">
-                <span>{query.data.length} 个站点</span>
-                <Button
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label="刷新站点"
-                  onClick={() => void query.refetch()}
-                >
-                  <RefreshCw
-                    className={query.isFetching ? "animate-spin" : undefined}
-                  />
-                </Button>
-              </div>
+              <ListPagination
+                pagination={pagination}
+                itemLabel="个站点"
+                action={
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="刷新站点"
+                    onClick={() => void query.refetch()}
+                  >
+                    <RefreshCw
+                      className={query.isFetching ? "animate-spin" : undefined}
+                    />
+                  </Button>
+                }
+              />
             </div>
           ) : (
             <EmptyState

@@ -19,6 +19,24 @@ func (s *Server) getSettings(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, s.Settings.View())
 }
 
+func (s *Server) updateBrandingSettings(response http.ResponseWriter, request *http.Request) {
+	if s.Settings == nil {
+		writeError(response, http.StatusServiceUnavailable, errors.New("settings are not configured"))
+		return
+	}
+	var input domain.BrandingSettings
+	if !readJSON(response, request, &input) {
+		return
+	}
+	if err := s.Settings.SaveBranding(input); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	view := s.Settings.View().Branding
+	s.audit(request, adminID(request.Context()), "update_branding", "settings", "branding", fmt.Sprintf("name=%q; subtitle_length=%d", view.Name, len([]rune(view.Subtitle))))
+	writeJSON(response, http.StatusOK, view)
+}
+
 func (s *Server) updateDNSSettings(response http.ResponseWriter, request *http.Request) {
 	if s.Settings == nil {
 		writeError(response, http.StatusServiceUnavailable, errors.New("settings are not configured"))

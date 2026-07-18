@@ -63,7 +63,8 @@ type BackupSettingsView struct {
 }
 
 type SettingsView struct {
-	DNS struct {
+	Branding domain.BrandingSettings `json:"branding"`
+	DNS      struct {
 		DefaultTTLSeconds int `json:"default_ttl_seconds"`
 	} `json:"dns"`
 	Cloudflare CloudflareSettingsView `json:"cloudflare"`
@@ -79,6 +80,7 @@ type SettingsManager struct {
 	mu           sync.RWMutex
 	env          EnvironmentSettings
 	dnsTTL       int
+	branding     domain.BrandingSettings
 	token        string
 	tokenDB      bool
 	smtp         SMTPProfile
@@ -103,6 +105,7 @@ func NewSettingsManager(database *store.Store, cipher *Cipher, environment Envir
 		return nil, err
 	}
 	manager.dnsTTL = persisted.DNSDefaultTTLSeconds
+	manager.branding = domain.NormalizeBrandingSettings(persisted.Branding)
 	manager.token = environment.CloudflareAPIToken
 	if ciphertext, err := database.Secret(store.SecretCloudflareAPIToken); err == nil {
 		plaintext, err := cipher.Decrypt(ciphertext)
@@ -169,6 +172,7 @@ func (m *SettingsManager) View() SettingsView {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var view SettingsView
+	view.Branding = m.branding
 	view.DNS.DefaultTTLSeconds = m.dnsTTL
 	view.Cloudflare.OverrideConfigured = m.tokenDB
 	view.Cloudflare.EnvironmentSet = m.env.CloudflareAPIToken != ""
@@ -208,6 +212,22 @@ func (m *SettingsManager) View() SettingsView {
 		view.Backup.Source = SettingsSourceUnconfigured
 	}
 	return view
+}
+
+func (m *SettingsManager) SaveBranding(settings domain.BrandingSettings) error {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	settings = domain.NormalizeBrandingSettings(settings)
+	if err := domain.ValidateBrandingSettings(settings); err != nil {
+		return err
+	}
+	if err := m.Store.SaveBrandingSettings(settings); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.branding = settings
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *SettingsManager) DNSDefaultTTL() int {

@@ -18,6 +18,7 @@ import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
+import { ListPagination } from "@/components/list-pagination";
 import {
   EmptyState,
   PageBody,
@@ -59,6 +60,7 @@ import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorMessage } from "@/lib/api";
+import { useListPagination } from "@/hooks/use-list-pagination";
 import type {
   DeploymentTask,
   Node,
@@ -712,6 +714,7 @@ function NodeSelector({
   const available = nodes.filter(
     (node) => !["revoked", "uninstalling", "uninstalled"].includes(node.status),
   );
+  const pagination = useListPagination(available);
   return (
     <Card>
       <CardHeader>
@@ -720,37 +723,44 @@ function NodeSelector({
       </CardHeader>
       <CardContent>
         {available.length ? (
-          <div className="grid gap-2 sm:grid-cols-2">
-            {available.map((node) => {
-              const checked = selected.includes(node.id);
-              return (
-                <label
-                  key={node.id}
-                  className="flex items-center gap-3 border px-3 py-3 text-sm hover:bg-muted/30"
-                >
-                  <Checkbox
-                    checked={checked}
-                    onCheckedChange={(value) =>
-                      onChange(
-                        value
-                          ? [...selected, node.id]
-                          : selected.filter((id) => id !== node.id),
-                      )
-                    }
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-medium">
-                      {node.name}
+          <>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {pagination.items.map((node) => {
+                const checked = selected.includes(node.id);
+                return (
+                  <label
+                    key={node.id}
+                    className="flex items-center gap-3 border px-3 py-3 text-sm hover:bg-muted/30"
+                  >
+                    <Checkbox
+                      checked={checked}
+                      onCheckedChange={(value) =>
+                        onChange(
+                          value
+                            ? [...selected, node.id]
+                            : selected.filter((id) => id !== node.id),
+                        )
+                      }
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-medium">
+                        {node.name}
+                      </span>
+                      <span className="block font-mono text-xs text-muted-foreground">
+                        {node.public_ipv4}
+                      </span>
                     </span>
-                    <span className="block font-mono text-xs text-muted-foreground">
-                      {node.public_ipv4}
-                    </span>
-                  </span>
-                  <StatusBadge status={node.status} />
-                </label>
-              );
-            })}
-          </div>
+                    <StatusBadge status={node.status} />
+                  </label>
+                );
+              })}
+            </div>
+            <ListPagination
+              pagination={pagination}
+              itemLabel="个节点"
+              className="mt-3 border"
+            />
+          </>
         ) : (
           <EmptyState
             title="没有可用节点"
@@ -769,6 +779,7 @@ function TCPForwards({
   draft: SiteDraft;
   setDraft: (draft: SiteDraft) => void;
 }) {
+  const pagination = useListPagination(draft.tcp_forwards);
   const update = (index: number, values: Partial<TCPForward>) =>
     setDraft({
       ...draft,
@@ -803,129 +814,145 @@ function TCPForwards({
       </CardHeader>
       <CardContent className="space-y-3">
         {draft.tcp_forwards.length ? (
-          draft.tcp_forwards.map((forward, index) => (
-            <div key={index} className="relative border p-4">
-              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                <Field label="名称" id={`tcp-name-${index}`}>
-                  <Input
-                    id={`tcp-name-${index}`}
-                    required
-                    maxLength={100}
-                    value={forward.name}
-                    onChange={(event) =>
-                      update(index, { name: event.target.value })
-                    }
-                    placeholder="IMAPS"
-                  />
-                </Field>
-                <Field label="监听端口" id={`tcp-listen-${index}`}>
-                  <Input
-                    id={`tcp-listen-${index}`}
-                    required
-                    type="number"
-                    min={1}
-                    max={65535}
-                    value={forward.listen_port || ""}
-                    onChange={(event) =>
-                      update(index, { listen_port: Number(event.target.value) })
-                    }
-                  />
-                </Field>
-                <Field label="上游主机" id={`tcp-host-${index}`}>
-                  <Input
-                    id={`tcp-host-${index}`}
-                    required
-                    value={forward.upstream_host}
-                    onChange={(event) =>
-                      update(index, { upstream_host: event.target.value })
-                    }
-                  />
-                </Field>
-                <Field label="上游端口" id={`tcp-upstream-${index}`}>
-                  <Input
-                    id={`tcp-upstream-${index}`}
-                    required
-                    type="number"
-                    min={1}
-                    max={65535}
-                    value={forward.upstream_port || ""}
-                    onChange={(event) =>
-                      update(index, {
-                        upstream_port: Number(event.target.value),
-                      })
-                    }
-                  />
-                </Field>
-                <SelectField
-                  label="连接超时"
-                  value={String(forward.connect_timeout_seconds)}
-                  onChange={(value) =>
-                    update(index, { connect_timeout_seconds: Number(value) })
-                  }
-                  options={[
-                    ["5", "5 秒"],
-                    ["10", "10 秒"],
-                    ["30", "30 秒"],
-                    ["60", "60 秒"],
-                  ]}
-                />
-                <SelectField
-                  label="空闲超时"
-                  value={String(forward.idle_timeout_seconds)}
-                  onChange={(value) =>
-                    update(index, { idle_timeout_seconds: Number(value) })
-                  }
-                  options={[
-                    ["300", "5 分钟"],
-                    ["900", "15 分钟"],
-                    ["1800", "30 分钟"],
-                    ["3600", "60 分钟"],
-                  ]}
-                />
-                <Toggle
-                  label="入口 TLS"
-                  checked={forward.listen_tls}
-                  onChange={(listen_tls) => update(index, { listen_tls })}
-                />
-                <Toggle
-                  label="上游 TLS"
-                  checked={forward.upstream_tls}
-                  onChange={(upstream_tls) => update(index, { upstream_tls })}
-                />
-                {forward.upstream_tls ? (
-                  <div className="grid gap-2 sm:col-span-2 xl:col-span-4">
-                    <Label htmlFor={`tcp-sni-${index}`}>上游 TLS SNI</Label>
-                    <Input
-                      id={`tcp-sni-${index}`}
-                      value={forward.upstream_tls_server_name || ""}
-                      onChange={(event) =>
+          <>
+            {pagination.items.map((forward, pageIndex) => {
+              const index = pagination.startIndex + pageIndex;
+              return (
+                <div key={index} className="relative border p-4">
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                    <Field label="名称" id={`tcp-name-${index}`}>
+                      <Input
+                        id={`tcp-name-${index}`}
+                        required
+                        maxLength={100}
+                        value={forward.name}
+                        onChange={(event) =>
+                          update(index, { name: event.target.value })
+                        }
+                        placeholder="IMAPS"
+                      />
+                    </Field>
+                    <Field label="监听端口" id={`tcp-listen-${index}`}>
+                      <Input
+                        id={`tcp-listen-${index}`}
+                        required
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={forward.listen_port || ""}
+                        onChange={(event) =>
+                          update(index, {
+                            listen_port: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </Field>
+                    <Field label="上游主机" id={`tcp-host-${index}`}>
+                      <Input
+                        id={`tcp-host-${index}`}
+                        required
+                        value={forward.upstream_host}
+                        onChange={(event) =>
+                          update(index, { upstream_host: event.target.value })
+                        }
+                      />
+                    </Field>
+                    <Field label="上游端口" id={`tcp-upstream-${index}`}>
+                      <Input
+                        id={`tcp-upstream-${index}`}
+                        required
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={forward.upstream_port || ""}
+                        onChange={(event) =>
+                          update(index, {
+                            upstream_port: Number(event.target.value),
+                          })
+                        }
+                      />
+                    </Field>
+                    <SelectField
+                      label="连接超时"
+                      value={String(forward.connect_timeout_seconds)}
+                      onChange={(value) =>
                         update(index, {
-                          upstream_tls_server_name: event.target.value,
+                          connect_timeout_seconds: Number(value),
                         })
                       }
+                      options={[
+                        ["5", "5 秒"],
+                        ["10", "10 秒"],
+                        ["30", "30 秒"],
+                        ["60", "60 秒"],
+                      ]}
                     />
+                    <SelectField
+                      label="空闲超时"
+                      value={String(forward.idle_timeout_seconds)}
+                      onChange={(value) =>
+                        update(index, { idle_timeout_seconds: Number(value) })
+                      }
+                      options={[
+                        ["300", "5 分钟"],
+                        ["900", "15 分钟"],
+                        ["1800", "30 分钟"],
+                        ["3600", "60 分钟"],
+                      ]}
+                    />
+                    <Toggle
+                      label="入口 TLS"
+                      checked={forward.listen_tls}
+                      onChange={(listen_tls) => update(index, { listen_tls })}
+                    />
+                    <Toggle
+                      label="上游 TLS"
+                      checked={forward.upstream_tls}
+                      onChange={(upstream_tls) =>
+                        update(index, { upstream_tls })
+                      }
+                    />
+                    {forward.upstream_tls ? (
+                      <div className="grid gap-2 sm:col-span-2 xl:col-span-4">
+                        <Label htmlFor={`tcp-sni-${index}`}>上游 TLS SNI</Label>
+                        <Input
+                          id={`tcp-sni-${index}`}
+                          value={forward.upstream_tls_server_name || ""}
+                          onChange={(event) =>
+                            update(index, {
+                              upstream_tls_server_name: event.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                    ) : null}
                   </div>
-                ) : null}
-              </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                className="absolute right-2 top-2"
-                aria-label="删除 TCP 转发"
-                onClick={() =>
-                  setDraft({
-                    ...draft,
-                    tcp_forwards: draft.tcp_forwards.filter(
-                      (_, current) => current !== index,
-                    ),
-                  })
-                }
-              >
-                <X />
-              </Button>
-            </div>
-          ))
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="absolute right-2 top-2"
+                    aria-label="删除 TCP 转发"
+                    onClick={() =>
+                      setDraft({
+                        ...draft,
+                        tcp_forwards: draft.tcp_forwards.filter(
+                          (_, current) => current !== index,
+                        ),
+                      })
+                    }
+                  >
+                    <X />
+                  </Button>
+                </div>
+              );
+            })}
+            <ListPagination
+              pagination={pagination}
+              itemLabel="个转发端口"
+              className="border"
+            />
+          </>
         ) : (
           <EmptyState
             title="未配置 TCP 转发"
@@ -966,6 +993,7 @@ function SiteOperations({
 }) {
   const publishActive = activeTask(publish?.task);
   const certActive = activeTask(tls?.certificate_task);
+  const publishPagination = useListPagination(publish?.nodes ?? []);
   const cacheable =
     !site.tcp_only &&
     !site.passthrough &&
@@ -1033,21 +1061,24 @@ function SiteOperations({
           源站白名单
         </Button>
         {publish?.nodes?.length ? (
-          <div className="max-h-44 overflow-auto border">
-            <Table>
-              <TableBody>
-                {publish.nodes.map((node) => (
-                  <TableRow key={node.node_id}>
-                    <TableCell className="text-xs">
-                      {node.node_name || node.node_id}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <StatusBadge status={node.status} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+          <div className="border">
+            <div className="max-h-44 overflow-auto">
+              <Table>
+                <TableBody>
+                  {publishPagination.items.map((node) => (
+                    <TableRow key={node.node_id}>
+                      <TableCell className="text-xs">
+                        {node.node_name || node.node_id}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <StatusBadge status={node.status} />
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <ListPagination pagination={publishPagination} itemLabel="个节点" />
           </div>
         ) : null}
         <Separator />
@@ -1076,6 +1107,8 @@ function AllowlistDialog({
   data?: Allowlist;
   loading: boolean;
 }) {
+  const pagination = useListPagination(data?.ipv4_cidrs ?? []);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -1092,15 +1125,22 @@ function AllowlistDialog({
         ) : (
           <div className="space-y-3">
             {data?.ipv4_cidrs.length ? (
-              data.ipv4_cidrs.map((cidr) => (
-                <div
-                  key={cidr}
-                  className="flex items-center gap-2 border px-3 py-2"
-                >
-                  <code className="min-w-0 flex-1 text-sm">{cidr}</code>
-                  <CopyButton value={cidr} />
-                </div>
-              ))
+              <>
+                {pagination.items.map((cidr) => (
+                  <div
+                    key={cidr}
+                    className="flex items-center gap-2 border px-3 py-2"
+                  >
+                    <code className="min-w-0 flex-1 text-sm">{cidr}</code>
+                    <CopyButton value={cidr} />
+                  </div>
+                ))}
+                <ListPagination
+                  pagination={pagination}
+                  itemLabel="个地址"
+                  className="border"
+                />
+              </>
             ) : (
               <EmptyState title="暂无可用地址" />
             )}

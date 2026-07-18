@@ -304,6 +304,10 @@ export interface SecurityOverview {
 }
 
 export interface Settings {
+  branding: {
+    name: string;
+    subtitle: string;
+  };
   dns: { default_ttl_seconds: number };
   cloudflare: {
     source: string;

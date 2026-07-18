@@ -43,6 +43,16 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 	if view.Cloudflare.Source != SettingsSourceEnvironment || view.SMTP.Source != SettingsSourceEnvironment || view.Backup.Source != SettingsSourceEnvironment || view.DNS.DefaultTTLSeconds != 60 {
 		t.Fatalf("unexpected environment view: %#v", view)
 	}
+	if view.Branding != domain.DefaultBrandingSettings() {
+		t.Fatalf("unexpected branding defaults: %#v", view.Branding)
+	}
+	branding := domain.BrandingSettings{Name: "DustK CDN", Subtitle: "运营面板"}
+	if err := manager.SaveBranding(branding); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SaveBranding(domain.BrandingSettings{Name: "\n"}); err == nil {
+		t.Fatal("accepted invalid branding")
+	}
 	if token, _ := manager.CloudflareToken(); token != "env-token" {
 		t.Fatalf("environment token = %q", token)
 	}
@@ -97,6 +107,9 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 	view = reloaded.View()
 	if view.Cloudflare.Source != SettingsSourceDatabase || view.SMTP.Source != SettingsSourceDatabase || view.SMTP.PasswordConfigured != true || view.Backup.Source != SettingsSourceDatabase || !view.Backup.Configured || view.DNS.DefaultTTLSeconds != 180 {
 		t.Fatalf("unexpected reloaded view: %#v", view)
+	}
+	if view.Branding != branding {
+		t.Fatalf("reloaded branding = %#v", view.Branding)
 	}
 	if token, _ := reloaded.CloudflareToken(); token != "database-token" {
 		t.Fatalf("database token = %q", token)

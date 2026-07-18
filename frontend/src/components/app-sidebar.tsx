@@ -2,7 +2,6 @@ import {
   Globe2,
   LayoutDashboard,
   LogOut,
-  Mail,
   ScrollText,
   Server,
   Settings,
@@ -20,7 +19,6 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
@@ -51,12 +49,12 @@ const groups = [
 ];
 
 export function AppSidebar({
-  unread,
-  onMessages,
+  brandName,
+  brandSubtitle,
   onLogout,
 }: {
-  unread: number;
-  onMessages: () => void;
+  brandName: string;
+  brandSubtitle: string;
   onLogout: () => void;
 }) {
   const location = useLocation();
@@ -68,17 +66,19 @@ export function AppSidebar({
           <SidebarMenuItem>
             <SidebarMenuButton
               size="lg"
-              tooltip="CDN Platform"
+              tooltip={brandName}
               className="h-11 justify-start px-2"
             >
               <span className="grid size-8 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground">
                 <Globe2 className="size-4" />
               </span>
               <span className="grid min-w-0 text-left leading-tight">
-                <span className="truncate font-semibold">CDN Platform</span>
-                <span className="truncate text-xs text-muted-foreground">
-                  控制面
-                </span>
+                <span className="truncate font-semibold">{brandName}</span>
+                {brandSubtitle ? (
+                  <span className="truncate text-xs text-muted-foreground">
+                    {brandSubtitle}
+                  </span>
+                ) : null}
               </span>
             </SidebarMenuButton>
           </SidebarMenuItem>
@@ -126,21 +126,6 @@ export function AppSidebar({
       <SidebarSeparator />
       <SidebarFooter>
         <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              tooltip="消息中心"
-              onClick={onMessages}
-              className="justify-start px-2"
-            >
-              <Mail />
-              <span>消息中心</span>
-            </SidebarMenuButton>
-            {unread ? (
-              <SidebarMenuBadge>
-                {unread > 99 ? "99+" : unread}
-              </SidebarMenuBadge>
-            ) : null}
-          </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
               tooltip="退出登录"

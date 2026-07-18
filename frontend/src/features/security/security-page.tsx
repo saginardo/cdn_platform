@@ -14,6 +14,7 @@ import { useState, type FormEvent } from "react";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { ListPagination } from "@/components/list-pagination";
 import {
   EmptyState,
   PageBody,
@@ -55,6 +56,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorMessage } from "@/lib/api";
+import { useListPagination } from "@/hooks/use-list-pagination";
 import { formatDateTime, formatNumber } from "@/lib/format";
 import type {
   RateLimitPolicy,
@@ -114,6 +116,13 @@ export function SecurityPage() {
     onError: (error) => toast.error(errorMessage(error)),
   });
   const data = query.data;
+  const policiesPagination = useListPagination(data?.policies ?? []);
+  const rateLimitPagination = useListPagination(
+    data?.rate_limit_policies ?? [],
+  );
+  const bansPagination = useListPagination(data?.bans ?? []);
+  const eventsPagination = useListPagination(data?.events ?? []);
+  const nodesPagination = useListPagination(data?.nodes ?? []);
   const enabled = data
     ? data.policies.filter((item) => item.enabled).length +
       data.rate_limit_policies.filter((item) => item.enabled).length
@@ -214,6 +223,12 @@ export function SecurityPage() {
                 <DataFrame
                   empty={!data.policies.length}
                   emptyTitle="暂无访问策略"
+                  footer={
+                    <ListPagination
+                      pagination={policiesPagination}
+                      itemLabel="个策略"
+                    />
+                  }
                 >
                   <Table>
                     <TableHeader>
@@ -227,7 +242,7 @@ export function SecurityPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.policies.map((item) => (
+                      {policiesPagination.items.map((item) => (
                         <TableRow key={item.id}>
                           <TableCell>
                             <div className="font-medium">{item.name}</div>
@@ -305,6 +320,12 @@ export function SecurityPage() {
                 <DataFrame
                   empty={!data.rate_limit_policies.length}
                   emptyTitle="暂无限速策略"
+                  footer={
+                    <ListPagination
+                      pagination={rateLimitPagination}
+                      itemLabel="个策略"
+                    />
+                  }
                 >
                   <Table>
                     <TableHeader>
@@ -318,7 +339,7 @@ export function SecurityPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.rate_limit_policies.map((item) => (
+                      {rateLimitPagination.items.map((item) => (
                         <TableRow key={item.id}>
                           <TableCell className="font-medium">
                             {item.name}
@@ -381,7 +402,16 @@ export function SecurityPage() {
                       : `${data.active_ban_count} 条`
                   }
                 />
-                <DataFrame empty={!data.bans.length} emptyTitle="暂无活动封禁">
+                <DataFrame
+                  empty={!data.bans.length}
+                  emptyTitle="暂无活动封禁"
+                  footer={
+                    <ListPagination
+                      pagination={bansPagination}
+                      itemLabel="个封禁"
+                    />
+                  }
+                >
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -394,7 +424,7 @@ export function SecurityPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.bans.map((ban) => (
+                      {bansPagination.items.map((ban) => (
                         <TableRow key={ban.ip}>
                           <TableCell>
                             <code>{ban.ip}</code>
@@ -432,11 +462,17 @@ export function SecurityPage() {
               <TabsContent value="events">
                 <SectionHeader
                   title="最近命中"
-                  meta="保留 7 天，显示最近 100 条"
+                  meta="保留 7 天，每页最多 20 条"
                 />
                 <DataFrame
                   empty={!data.events.length}
                   emptyTitle="暂无策略命中"
+                  footer={
+                    <ListPagination
+                      pagination={eventsPagination}
+                      itemLabel="条命中"
+                    />
+                  }
                 >
                   <Table>
                     <TableHeader>
@@ -450,7 +486,7 @@ export function SecurityPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.events.map((event, index) => (
+                      {eventsPagination.items.map((event, index) => (
                         <TableRow
                           key={event.id || `${event.observed_at}-${index}`}
                         >
@@ -479,7 +515,16 @@ export function SecurityPage() {
               </TabsContent>
               <TabsContent value="nodes">
                 <SectionHeader title="节点部署" meta="能力与策略应用版本" />
-                <DataFrame empty={!data.nodes.length} emptyTitle="暂无节点">
+                <DataFrame
+                  empty={!data.nodes.length}
+                  emptyTitle="暂无节点"
+                  footer={
+                    <ListPagination
+                      pagination={nodesPagination}
+                      itemLabel="个节点"
+                    />
+                  }
+                >
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -492,7 +537,7 @@ export function SecurityPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {data.nodes.map((node) => {
+                      {nodesPagination.items.map((node) => {
                         const ready =
                           node.configured &&
                           node.rate_limit_configured &&
@@ -982,20 +1027,25 @@ function SectionHeader({
 function DataFrame({
   empty,
   emptyTitle,
+  footer,
   children,
 }: {
   empty: boolean;
   emptyTitle: string;
+  footer?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <div className="overflow-x-auto border bg-card">
+    <div className="border bg-card">
       {empty ? (
         <div className="p-5">
           <EmptyState title={emptyTitle} />
         </div>
       ) : (
-        children
+        <>
+          <div className="overflow-x-auto">{children}</div>
+          {footer}
+        </>
       )}
     </div>
   );

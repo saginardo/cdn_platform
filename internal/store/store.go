@@ -234,6 +234,8 @@ CREATE TABLE IF NOT EXISTS control_settings (
   backup_region TEXT NOT NULL DEFAULT 'us-east-1',
   backup_time TEXT NOT NULL DEFAULT '03:25',
   backup_random_delay_seconds INTEGER NOT NULL DEFAULT 1200,
+  brand_name TEXT NOT NULL DEFAULT 'CDN Platform',
+  brand_subtitle TEXT NOT NULL DEFAULT '控制面板',
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS node_health (

@@ -29,6 +29,13 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if settings.BackupOverride || settings.Backup.Region != domain.DefaultBackupRegion || settings.Backup.BackupTime != domain.DefaultBackupTime {
 		t.Fatalf("unexpected backup defaults: %#v", settings.Backup)
 	}
+	if settings.Branding != domain.DefaultBrandingSettings() {
+		t.Fatalf("unexpected branding defaults: %#v", settings.Branding)
+	}
+	branding := domain.BrandingSettings{Name: "DustK CDN", Subtitle: "运营面板"}
+	if err := database.SaveBrandingSettings(branding); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.SaveDNSDefaultTTL(120); err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +50,7 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.DNSDefaultTTLSeconds != 120 || !settings.SMTP.Override || settings.SMTP.Host != smtp.Host || len(settings.SMTP.Recipients) != 1 {
+	if settings.DNSDefaultTTLSeconds != 120 || settings.Branding != branding || !settings.SMTP.Override || settings.SMTP.Host != smtp.Host || len(settings.SMTP.Recipients) != 1 {
 		t.Fatalf("unexpected saved settings: %#v", settings)
 	}
 	stored, err := database.Secret(SecretSMTPPassword)

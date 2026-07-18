@@ -33,6 +33,7 @@ type SMTPSettings struct {
 
 type ControlSettings struct {
 	DNSDefaultTTLSeconds int
+	Branding             domain.BrandingSettings
 	SMTP                 SMTPSettings
 	BackupOverride       bool
 	Backup               domain.BackupSettings
@@ -49,6 +50,7 @@ type BackupSettingsSnapshot struct {
 func (s *Store) ControlSettings() (ControlSettings, error) {
 	settings := ControlSettings{
 		DNSDefaultTTLSeconds: domain.DefaultDNSTTLSeconds,
+		Branding:             domain.DefaultBrandingSettings(),
 		Backup: domain.BackupSettings{
 			Region:             domain.DefaultBackupRegion,
 			BackupTime:         domain.DefaultBackupTime,
@@ -58,10 +60,12 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 	var smtpOverride, smtpEnabled, backupOverride int
 	var recipients, updatedAt string
 	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security,
-		backup_override, backup_repository, backup_access_key_id, backup_region, backup_time, backup_random_delay_seconds, updated_at
+		backup_override, backup_repository, backup_access_key_id, backup_region, backup_time, backup_random_delay_seconds,
+		brand_name, brand_subtitle, updated_at
 		FROM control_settings WHERE id = 1`).
 		Scan(&settings.DNSDefaultTTLSeconds, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &settings.SMTP.Security,
-			&backupOverride, &settings.Backup.Repository, &settings.Backup.AccessKeyID, &settings.Backup.Region, &settings.Backup.BackupTime, &settings.Backup.RandomDelaySeconds, &updatedAt)
+			&backupOverride, &settings.Backup.Repository, &settings.Backup.AccessKeyID, &settings.Backup.Region, &settings.Backup.BackupTime, &settings.Backup.RandomDelaySeconds,
+			&settings.Branding.Name, &settings.Branding.Subtitle, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return settings, nil
 	}
@@ -78,12 +82,27 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 	settings.SMTP.Enabled = smtpEnabled != 0
 	settings.BackupOverride = backupOverride != 0
 	settings.Backup = domain.NormalizeBackupSettings(settings.Backup)
+	settings.Branding = domain.NormalizeBrandingSettings(settings.Branding)
+	if err := domain.ValidateBrandingSettings(settings.Branding); err != nil {
+		return ControlSettings{}, fmt.Errorf("stored branding settings: %w", err)
+	}
 	parsed, err := parseTime(updatedAt)
 	if err != nil {
 		return ControlSettings{}, err
 	}
 	settings.UpdatedAt = &parsed
 	return settings, nil
+}
+
+func (s *Store) SaveBrandingSettings(settings domain.BrandingSettings) error {
+	settings = domain.NormalizeBrandingSettings(settings)
+	if err := domain.ValidateBrandingSettings(settings); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO control_settings(id, brand_name, brand_subtitle, updated_at) VALUES (1, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET brand_name=excluded.brand_name, brand_subtitle=excluded.brand_subtitle, updated_at=excluded.updated_at`,
+		settings.Name, settings.Subtitle, stamp(now()))
+	return err
 }
 
 // BackupSettingsSnapshot reads settings and both secrets in one SQLite

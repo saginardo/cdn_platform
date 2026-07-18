@@ -1,0 +1,419 @@
+export type NodeStatus =
+  | "pending"
+  | "active"
+  | "draining"
+  | "revoked"
+  | "uninstalling"
+  | "uninstalled";
+
+export interface NodeUpgradeTask {
+  id: string;
+  node_id: string;
+  status: "queued" | "applying" | "succeeded" | "failed";
+  source_sha256?: string;
+  target_sha256: string;
+  error_code?: string;
+  detail?: string;
+  deadline_at: string;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Node {
+  id: string;
+  name: string;
+  public_ipv4: string;
+  status: NodeStatus;
+  capabilities: string[];
+  agent_sha256?: string;
+  active_upgrade_task_id?: string;
+  last_heartbeat_at?: string;
+  applied_version: number;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+  target_agent_sha256?: string;
+  upgrade_capable: boolean;
+  upgrade_up_to_date: boolean;
+  can_upgrade: boolean;
+  upgrade_blocker?: string;
+  upgrade_task?: NodeUpgradeTask;
+}
+
+export interface MachineReport {
+  distribution: string;
+  version: string;
+  uptime_seconds: number;
+  load_1: number;
+  load_5: number;
+  load_15: number;
+  cpu_usage_percent: number;
+  cpu_logical_cores: number;
+  memory_used_bytes: number;
+  memory_total_bytes: number;
+  disk_used_bytes: number;
+  disk_total_bytes: number;
+  network_interface: string;
+  network_rx_bytes_per_second: number;
+  network_tx_bytes_per_second: number;
+  sample_seconds: number;
+  collected_at: string;
+}
+
+export interface NodeDetail {
+  node: Node;
+  machine: {
+    available: boolean;
+    unavailable_reason?: string;
+    stale: boolean;
+    report?: MachineReport;
+  };
+  sites: Array<{
+    id: string;
+    name: string;
+    domains: string[];
+    enabled: boolean;
+    published: boolean;
+    cache_enabled: boolean;
+  }>;
+}
+
+export interface NodeCacheStatus {
+  available: boolean;
+  unavailable_reason?: string;
+  from: string;
+  to: string;
+  last_seen_at?: string;
+  requests: number;
+  bytes: number;
+  cache_lookups: number;
+  cache_hits: number;
+  cache_misses: number;
+  bypasses: number;
+  uncached: number;
+  hit_rate: number;
+  statuses: Array<{ status: string; requests: number; bytes: number }>;
+  storage: {
+    available: boolean;
+    unavailable_reason?: string;
+    used_bytes: number;
+    total_bytes: number;
+    collected_at?: string;
+    stale: boolean;
+  };
+}
+
+export interface Origin {
+  url: string;
+  host_header: string;
+  tls_server_name?: string;
+  enabled: boolean;
+}
+
+export interface TCPForward {
+  name: string;
+  listen_port: number;
+  listen_tls: boolean;
+  upstream_host: string;
+  upstream_port: number;
+  upstream_tls: boolean;
+  upstream_tls_server_name?: string;
+  connect_timeout_seconds: number;
+  idle_timeout_seconds: number;
+}
+
+export interface Site {
+  id: string;
+  name: string;
+  zone_id: string;
+  domains: string[];
+  node_ids: string[];
+  primary_origin: Origin;
+  backup_origin?: Origin;
+  stream_paths: string[];
+  passthrough: boolean;
+  client_max_body_size_mb: number;
+  read_write_timeout_seconds: number;
+  dns_ttl_seconds: number | null;
+  tcp_only: boolean;
+  tcp_forwards: TCPForward[];
+  cache_generation: number;
+  config_version: number;
+  published: boolean;
+  enabled: boolean;
+  deleting: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DeploymentTask {
+  id: string;
+  kind: string;
+  site_id?: string;
+  status:
+    | "queued"
+    | "dispatching"
+    | "applying"
+    | "succeeded"
+    | "partial"
+    | "failed"
+    | "rolled_back";
+  detail?: string;
+  deadline_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublishStatus {
+  task: DeploymentTask | null;
+  nodes: Array<{
+    node_id: string;
+    node_name: string;
+    target_version: number;
+    status: "pending" | "succeeded" | "failed" | "timed_out";
+    error_code?: string;
+    detail?: string;
+  }>;
+}
+
+export interface OverviewPoint {
+  time: string;
+  requests: number;
+  bytes: number;
+  error_requests: number;
+}
+
+export interface OverviewStatusCode {
+  code: number;
+  requests: number;
+}
+
+export interface OverviewSite {
+  id: string;
+  name: string;
+  domains: string[];
+  requests: number;
+  bytes: number;
+  error_requests: number;
+  status_codes: OverviewStatusCode[];
+  series: OverviewPoint[];
+}
+
+export interface Overview {
+  from: string;
+  to: string;
+  bucket_seconds: number;
+  totals: { requests: number; bytes: number; error_requests: number };
+  series: OverviewPoint[];
+  status_codes: OverviewStatusCode[];
+  sites: OverviewSite[];
+}
+
+export interface AccessLog {
+  timestamp: string;
+  node_id: string;
+  site_id: string;
+  client_ip: string;
+  method: string;
+  path: string;
+  status: number;
+  bytes: number;
+  duration_ms: number;
+  upstream: string;
+  cache_status: string;
+}
+
+export interface LogPage {
+  logs: AccessLog[];
+  from: string;
+  to: string;
+  offset: number;
+  page_size: number;
+  has_more: boolean;
+}
+
+export interface SecurityPolicy {
+  id: string;
+  builtin: boolean;
+  name: string;
+  enabled: boolean;
+  pattern: string;
+  action: "block" | "ban";
+  ban_duration_seconds?: number;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RateLimitPolicy {
+  id: string;
+  name: string;
+  enabled: boolean;
+  key: string;
+  requests_per_second: number;
+  response_condition_enabled: boolean;
+  response_status_classes?: number[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SecurityOverview {
+  policies: SecurityPolicy[];
+  rate_limit_policies: RateLimitPolicy[];
+  bans: Array<{
+    ip: string;
+    policy_id?: string;
+    policy_name?: string;
+    trigger_node_id?: string;
+    host?: string;
+    path?: string;
+    method?: string;
+    expires_at: string;
+    created_at: string;
+    updated_at: string;
+  }>;
+  active_ban_count: number;
+  events: Array<{
+    id?: string;
+    node_id?: string;
+    policy_id: string;
+    policy_name?: string;
+    client_ip: string;
+    host?: string;
+    path: string;
+    method?: string;
+    action: "block" | "ban";
+    observed_at: string;
+    ban_expires_at?: string;
+  }>;
+  nodes: Array<{
+    id: string;
+    name: string;
+    status: NodeStatus;
+    capable: boolean;
+    configured: boolean;
+    rate_limit_capable: boolean;
+    rate_limit_configured: boolean;
+    desired_version: number;
+    applied_version: number;
+    last_error?: string;
+  }>;
+  deployment_error?: string;
+}
+
+export interface Settings {
+  dns: { default_ttl_seconds: number };
+  cloudflare: {
+    source: string;
+    configured: boolean;
+    override_configured: boolean;
+    environment_configured: boolean;
+  };
+  smtp: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    username: string;
+    from_address: string;
+    recipients: string[];
+    security: string;
+    source: string;
+    override_configured: boolean;
+    password_configured: boolean;
+    environment_configured: boolean;
+  };
+  backup: {
+    repository: string;
+    access_key_id: string;
+    region: string;
+    backup_time: string;
+    random_delay_seconds: number;
+    source: string;
+    configured: boolean;
+    override_configured: boolean;
+    secret_access_key_configured: boolean;
+    restic_password_configured: boolean;
+    environment_configured: boolean;
+  };
+}
+
+export interface Message {
+  id: string;
+  severity: "info" | "success" | "warning" | "error";
+  category: string;
+  title: string;
+  body?: string;
+  resource_type?: string;
+  resource_id?: string;
+  read_at?: string;
+  created_at: string;
+}
+
+export interface MessagePage {
+  messages: Message[];
+  unread_count: number;
+}
+
+export interface BackupRunStatus {
+  version: number;
+  state: string;
+  attempt: number;
+  max_attempts: number;
+  host?: string;
+  started_at: string;
+  updated_at: string;
+  finished_at?: string;
+  error?: string;
+}
+
+export interface RestoreSnapshot {
+  id: string;
+  short_id: string;
+  time: string;
+  hostname?: string;
+  paths?: string[];
+  tags?: string[];
+}
+
+export interface RestoreJob {
+  version: number;
+  id: string;
+  snapshot_id: string;
+  snapshot_short_id: string;
+  state: string;
+  phase?: string;
+  detail?: string;
+  error?: string;
+  schema_version?: number;
+  created_at: string;
+  updated_at: string;
+  ready_at?: string;
+  finished_at?: string;
+}
+
+export interface NodeUninstallStatus {
+  node: Node;
+  job?: {
+    node_id: string;
+    status: string;
+    previous_status: NodeStatus;
+    token_expires_at?: string;
+    ready_at: string;
+    affected_site_ids: string[];
+    detail?: string;
+    forced: boolean;
+    created_at: string;
+    updated_at: string;
+  };
+  blockers: Array<{
+    code: string;
+    site_id?: string;
+    site_name?: string;
+    detail: string;
+  }>;
+  can_generate_command: boolean;
+  ready_in_seconds: number;
+  uninstall_command?: string;
+}

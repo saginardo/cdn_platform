@@ -4,6 +4,14 @@ set -euo pipefail
 OUTPUT_DIR="${1:-dist}"
 mkdir -p "$OUTPUT_DIR"
 
+if ! command -v npm >/dev/null 2>&1; then
+  echo "npm is required to build the embedded management UI" >&2
+  exit 2
+fi
+
+npm --prefix frontend ci
+npm --prefix frontend run build
+
 build() {
   local package="$1"
   local output="$2"

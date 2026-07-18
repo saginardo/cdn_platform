@@ -1,0 +1,1033 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Ban,
+  CirclePlus,
+  LoaderCircle,
+  LockOpen,
+  Pencil,
+  Rocket,
+  ShieldCheck,
+  Trash2,
+  Zap,
+} from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { toast } from "sonner";
+
+import { ConfirmDialog } from "@/components/confirm-dialog";
+import {
+  EmptyState,
+  PageBody,
+  PageError,
+  PageHeader,
+  PageLoading,
+} from "@/components/page";
+import { StatusBadge } from "@/components/status-badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { api, errorMessage } from "@/lib/api";
+import { formatDateTime, formatNumber } from "@/lib/format";
+import type {
+  RateLimitPolicy,
+  SecurityOverview,
+  SecurityPolicy,
+} from "@/lib/types";
+
+export function SecurityPage() {
+  const queryClient = useQueryClient();
+  const [policy, setPolicy] = useState<SecurityPolicy | "new" | null>(null);
+  const [rateLimit, setRateLimit] = useState<RateLimitPolicy | "new" | null>(
+    null,
+  );
+  const [remove, setRemove] = useState<{
+    kind: "policy" | "rate";
+    id: string;
+    name: string;
+  } | null>(null);
+  const query = useQuery({
+    queryKey: ["security"],
+    queryFn: () => api<SecurityOverview>("/api/security"),
+    refetchInterval: 15_000,
+  });
+  const applyResult = (data: SecurityOverview) =>
+    queryClient.setQueryData(["security"], data);
+  const deploy = useMutation({
+    mutationFn: () =>
+      api<SecurityOverview>("/api/security/deploy", { method: "POST" }),
+    onSuccess: (data) => {
+      applyResult(data);
+      toast.success("安全策略已重新发布");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  const removeMutation = useMutation({
+    mutationFn: (target: NonNullable<typeof remove>) =>
+      api<SecurityOverview>(
+        `/api/security/${target.kind === "policy" ? "policies" : "rate-limit-policies"}/${encodeURIComponent(target.id)}`,
+        { method: "DELETE" },
+      ),
+    onSuccess: (data) => {
+      applyResult(data);
+      setRemove(null);
+      toast.success("策略已删除并发布");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  const unban = useMutation({
+    mutationFn: (ip: string) =>
+      api<SecurityOverview>(`/api/security/bans/${encodeURIComponent(ip)}`, {
+        method: "DELETE",
+      }),
+    onSuccess: (data) => {
+      applyResult(data);
+      toast.success("IP 封禁已解除");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  const data = query.data;
+  const enabled = data
+    ? data.policies.filter((item) => item.enabled).length +
+      data.rate_limit_policies.filter((item) => item.enabled).length
+    : 0;
+  const eligibleNodes =
+    data?.nodes.filter((node) =>
+      ["active", "draining"].includes(node.status),
+    ) ?? [];
+  const capableNodes = eligibleNodes.filter(
+    (node) => node.capable && node.rate_limit_capable,
+  );
+  const appliedNodes = capableNodes.filter(
+    (node) =>
+      node.configured &&
+      node.rate_limit_configured &&
+      node.desired_version > 0 &&
+      node.applied_version >= node.desired_version,
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="安全"
+        description="边缘访问策略、请求限速与活动封禁"
+        actions={
+          <>
+            <Button
+              variant="outline"
+              disabled={deploy.isPending}
+              onClick={() => deploy.mutate()}
+            >
+              {deploy.isPending ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <Rocket />
+              )}
+              重新发布
+            </Button>
+            <Button onClick={() => setPolicy("new")}>
+              <CirclePlus />
+              访问策略
+            </Button>
+          </>
+        }
+      />
+      <PageBody>
+        {query.isLoading ? <PageLoading /> : null}
+        {query.error ? <PageError error={query.error} /> : null}
+        {data ? (
+          <>
+            {data.deployment_error ? (
+              <Alert variant="destructive">
+                <AlertTitle>部分策略未能发布</AlertTitle>
+                <AlertDescription>{data.deployment_error}</AlertDescription>
+              </Alert>
+            ) : null}
+            <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <Summary
+                icon={ShieldCheck}
+                label="启用策略"
+                value={formatNumber(enabled)}
+              />
+              <Summary
+                icon={Ban}
+                label="活动封禁"
+                value={formatNumber(data.active_ban_count)}
+              />
+              <Summary
+                icon={Zap}
+                label="能力覆盖"
+                value={`${capableNodes.length} / ${eligibleNodes.length}`}
+              />
+              <Summary
+                icon={Rocket}
+                label="已应用节点"
+                value={`${appliedNodes.length} / ${capableNodes.length}`}
+              />
+            </section>
+            <Tabs defaultValue="policies" className="space-y-4">
+              <TabsList className="max-w-full overflow-x-auto">
+                <TabsTrigger value="policies">访问策略</TabsTrigger>
+                <TabsTrigger value="rate">请求限速</TabsTrigger>
+                <TabsTrigger value="bans">活动封禁</TabsTrigger>
+                <TabsTrigger value="events">最近命中</TabsTrigger>
+                <TabsTrigger value="nodes">节点覆盖</TabsTrigger>
+              </TabsList>
+              <TabsContent value="policies">
+                <SectionHeader
+                  title="通用访问策略"
+                  meta="按优先级匹配规范化路径"
+                  action={
+                    <Button size="sm" onClick={() => setPolicy("new")}>
+                      <CirclePlus />
+                      新增
+                    </Button>
+                  }
+                />
+                <DataFrame
+                  empty={!data.policies.length}
+                  emptyTitle="暂无访问策略"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>策略</TableHead>
+                        <TableHead>表达式</TableHead>
+                        <TableHead>动作</TableHead>
+                        <TableHead>优先级</TableHead>
+                        <TableHead>状态</TableHead>
+                        <TableHead className="text-right">操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.policies.map((item) => (
+                        <TableRow key={item.id}>
+                          <TableCell>
+                            <div className="font-medium">{item.name}</div>
+                            {item.builtin ? (
+                              <span className="text-xs text-muted-foreground">
+                                内置策略
+                              </span>
+                            ) : null}
+                          </TableCell>
+                          <TableCell>
+                            <code
+                              className="block max-w-xl truncate text-xs"
+                              title={item.pattern}
+                            >
+                              {item.pattern}
+                            </code>
+                          </TableCell>
+                          <TableCell>
+                            {item.action === "ban"
+                              ? `IP 封禁 · ${durationLabel(item.ban_duration_seconds)}`
+                              : "仅拦截"}
+                          </TableCell>
+                          <TableCell>{formatNumber(item.priority)}</TableCell>
+                          <TableCell>
+                            <StatusBadge
+                              status={item.enabled ? "succeeded" : "pending"}
+                              label={item.enabled ? "已启用" : "已停用"}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label="编辑策略"
+                                onClick={() => setPolicy(item)}
+                              >
+                                <Pencil />
+                              </Button>
+                              {!item.builtin ? (
+                                <Button
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  aria-label="删除策略"
+                                  onClick={() =>
+                                    setRemove({
+                                      kind: "policy",
+                                      id: item.id,
+                                      name: item.name,
+                                    })
+                                  }
+                                >
+                                  <Trash2 />
+                                </Button>
+                              ) : null}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </DataFrame>
+              </TabsContent>
+              <TabsContent value="rate">
+                <SectionHeader
+                  title="通用速率限制"
+                  meta="边缘节点按客户端 IP 执行一秒窗口限速"
+                  action={
+                    <Button size="sm" onClick={() => setRateLimit("new")}>
+                      <CirclePlus />
+                      新增
+                    </Button>
+                  }
+                />
+                <DataFrame
+                  empty={!data.rate_limit_policies.length}
+                  emptyTitle="暂无限速策略"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>策略</TableHead>
+                        <TableHead>计数 Key</TableHead>
+                        <TableHead>阈值</TableHead>
+                        <TableHead>响应条件</TableHead>
+                        <TableHead>状态</TableHead>
+                        <TableHead className="text-right">操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.rate_limit_policies.map((item) => (
+                        <TableRow key={item.id}>
+                          <TableCell className="font-medium">
+                            {item.name}
+                          </TableCell>
+                          <TableCell>客户端 IP</TableCell>
+                          <TableCell className="tabular-nums">
+                            {formatNumber(item.requests_per_second)} 请求/秒
+                          </TableCell>
+                          <TableCell>
+                            {item.response_condition_enabled
+                              ? item.response_status_classes
+                                  ?.map((code) => `${code}xx`)
+                                  .join("、") || "无有效条件"
+                              : "全部请求"}
+                          </TableCell>
+                          <TableCell>
+                            <StatusBadge
+                              status={item.enabled ? "succeeded" : "pending"}
+                              label={item.enabled ? "已启用" : "已停用"}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex justify-end gap-1">
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label="编辑限速策略"
+                                onClick={() => setRateLimit(item)}
+                              >
+                                <Pencil />
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label="删除限速策略"
+                                onClick={() =>
+                                  setRemove({
+                                    kind: "rate",
+                                    id: item.id,
+                                    name: item.name,
+                                  })
+                                }
+                              >
+                                <Trash2 />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </DataFrame>
+              </TabsContent>
+              <TabsContent value="bans">
+                <SectionHeader
+                  title="活动封禁"
+                  meta={
+                    data.active_ban_count > data.bans.length
+                      ? `共 ${data.active_ban_count} 条，显示前 ${data.bans.length} 条`
+                      : `${data.active_ban_count} 条`
+                  }
+                />
+                <DataFrame empty={!data.bans.length} emptyTitle="暂无活动封禁">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>IP</TableHead>
+                        <TableHead>触发策略</TableHead>
+                        <TableHead>节点</TableHead>
+                        <TableHead>请求</TableHead>
+                        <TableHead>到期时间</TableHead>
+                        <TableHead className="text-right">操作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.bans.map((ban) => (
+                        <TableRow key={ban.ip}>
+                          <TableCell>
+                            <code>{ban.ip}</code>
+                          </TableCell>
+                          <TableCell>{ban.policy_name || "--"}</TableCell>
+                          <TableCell>
+                            {nodeName(data, ban.trigger_node_id)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-xs">
+                              {ban.method || "--"} · {ban.host || "--"}
+                            </div>
+                            <code className="text-xs">{ban.path || "--"}</code>
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-xs">
+                            {formatDateTime(ban.expires_at)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={unban.isPending}
+                              onClick={() => unban.mutate(ban.ip)}
+                            >
+                              <LockOpen />
+                              解封
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </DataFrame>
+              </TabsContent>
+              <TabsContent value="events">
+                <SectionHeader
+                  title="最近命中"
+                  meta="保留 7 天，显示最近 100 条"
+                />
+                <DataFrame
+                  empty={!data.events.length}
+                  emptyTitle="暂无策略命中"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>时间</TableHead>
+                        <TableHead>IP</TableHead>
+                        <TableHead>策略</TableHead>
+                        <TableHead>节点</TableHead>
+                        <TableHead>请求</TableHead>
+                        <TableHead>动作</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.events.map((event, index) => (
+                        <TableRow
+                          key={event.id || `${event.observed_at}-${index}`}
+                        >
+                          <TableCell className="whitespace-nowrap text-xs">
+                            {formatDateTime(event.observed_at)}
+                          </TableCell>
+                          <TableCell>
+                            <code>{event.client_ip}</code>
+                          </TableCell>
+                          <TableCell>{event.policy_name || "--"}</TableCell>
+                          <TableCell>{nodeName(data, event.node_id)}</TableCell>
+                          <TableCell>
+                            <div className="text-xs">
+                              {event.method || "--"} · {event.host || "--"}
+                            </div>
+                            <code className="text-xs">{event.path}</code>
+                          </TableCell>
+                          <TableCell>
+                            {event.action === "ban" ? "IP 封禁" : "仅拦截"}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </DataFrame>
+              </TabsContent>
+              <TabsContent value="nodes">
+                <SectionHeader title="节点部署" meta="能力与策略应用版本" />
+                <DataFrame empty={!data.nodes.length} emptyTitle="暂无节点">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>节点</TableHead>
+                        <TableHead>状态</TableHead>
+                        <TableHead>访问能力</TableHead>
+                        <TableHead>限速能力</TableHead>
+                        <TableHead>版本</TableHead>
+                        <TableHead>结果</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {data.nodes.map((node) => {
+                        const ready =
+                          node.configured &&
+                          node.rate_limit_configured &&
+                          node.desired_version > 0 &&
+                          node.applied_version >= node.desired_version;
+                        return (
+                          <TableRow key={node.id}>
+                            <TableCell className="font-medium">
+                              {node.name}
+                            </TableCell>
+                            <TableCell>
+                              <StatusBadge status={node.status} />
+                            </TableCell>
+                            <TableCell>
+                              {node.capable
+                                ? node.configured
+                                  ? "已配置"
+                                  : "待配置"
+                                : "需升级"}
+                            </TableCell>
+                            <TableCell>
+                              {node.rate_limit_capable
+                                ? node.rate_limit_configured
+                                  ? "已配置"
+                                  : "待配置"
+                                : "需升级"}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              期望 v{node.desired_version} · 当前 v
+                              {node.applied_version}
+                            </TableCell>
+                            <TableCell>
+                              {node.last_error ? (
+                                <StatusBadge status="failed" label="节点错误" />
+                              ) : ready ? (
+                                <StatusBadge
+                                  status="succeeded"
+                                  label="已应用"
+                                />
+                              ) : (
+                                <StatusBadge
+                                  status="applying"
+                                  label="等待应用"
+                                />
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </DataFrame>
+              </TabsContent>
+            </Tabs>
+          </>
+        ) : null}
+      </PageBody>
+      <SecurityPolicyDialog
+        value={policy}
+        onOpenChange={(open) => {
+          if (!open) setPolicy(null);
+        }}
+        onSaved={applyResult}
+      />
+      <RateLimitDialog
+        value={rateLimit}
+        onOpenChange={(open) => {
+          if (!open) setRateLimit(null);
+        }}
+        onSaved={applyResult}
+      />
+      <ConfirmDialog
+        open={Boolean(remove)}
+        onOpenChange={(open) => {
+          if (!open) setRemove(null);
+        }}
+        title="删除安全策略"
+        description={`删除「${remove?.name ?? ""}」后会立即重新发布所有边缘配置。`}
+        confirmLabel="删除并发布"
+        destructive
+        busy={removeMutation.isPending}
+        onConfirm={async () => {
+          if (remove) await removeMutation.mutateAsync(remove);
+        }}
+      />
+    </>
+  );
+}
+
+function SecurityPolicyDialog({
+  value,
+  onOpenChange,
+  onSaved,
+}: {
+  value: SecurityPolicy | "new" | null;
+  onOpenChange: (open: boolean) => void;
+  onSaved: (data: SecurityOverview) => void;
+}) {
+  const existing = value && value !== "new" ? value : null;
+  return (
+    <PolicyDialogShell
+      key={existing?.id || String(value)}
+      open={Boolean(value)}
+      title={existing ? "编辑访问策略" : "新增访问策略"}
+      description="PCRE 兼容安全子集，保存后自动发布"
+      onOpenChange={onOpenChange}
+      existing={existing}
+      onSaved={onSaved}
+    />
+  );
+}
+
+function PolicyDialogShell({
+  open,
+  title,
+  description,
+  onOpenChange,
+  existing,
+  onSaved,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  onOpenChange: (open: boolean) => void;
+  existing: SecurityPolicy | null;
+  onSaved: (data: SecurityOverview) => void;
+}) {
+  const [name, setName] = useState(existing?.name ?? "");
+  const [priority, setPriority] = useState(existing?.priority ?? 100);
+  const [action, setAction] = useState<"block" | "ban">(
+    existing?.action ?? "ban",
+  );
+  const [duration, setDuration] = useState(
+    existing?.ban_duration_seconds ?? 21600,
+  );
+  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
+  const [pattern, setPattern] = useState(existing?.pattern ?? "");
+  const mutation = useMutation({
+    mutationFn: () =>
+      api<SecurityOverview>(
+        existing
+          ? `/api/security/policies/${encodeURIComponent(existing.id)}`
+          : "/api/security/policies",
+        {
+          method: existing ? "PUT" : "POST",
+          body: JSON.stringify({
+            name,
+            enabled,
+            pattern,
+            action,
+            ban_duration_seconds: action === "ban" ? duration : 0,
+            priority,
+          }),
+        },
+      ),
+    onSuccess: (data) => {
+      onSaved(data);
+      onOpenChange(false);
+      toast.success("访问策略已保存并发布");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    mutation.mutate();
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl">
+        <form onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>{title}</DialogTitle>
+            <DialogDescription>{description}</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-5 sm:grid-cols-2">
+            <Field label="名称" id="policy-name">
+              <Input
+                id="policy-name"
+                required
+                maxLength={80}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field label="优先级" id="policy-priority">
+              <Input
+                id="policy-priority"
+                type="number"
+                min={1}
+                max={10000}
+                required
+                value={priority}
+                onChange={(event) => setPriority(Number(event.target.value))}
+              />
+            </Field>
+            <div className="grid gap-2">
+              <Label>动作</Label>
+              <Select
+                value={action}
+                onValueChange={(value) => setAction(value as "block" | "ban")}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ban">IP 封禁</SelectItem>
+                  <SelectItem value="block">仅拦截请求</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {action === "ban" ? (
+              <div className="grid gap-2">
+                <Label>封禁时间</Label>
+                <Select
+                  value={String(duration)}
+                  onValueChange={(value) => setDuration(Number(value))}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="3600">1 小时</SelectItem>
+                    <SelectItem value="21600">6 小时</SelectItem>
+                    <SelectItem value="43200">12 小时</SelectItem>
+                    <SelectItem value="86400">24 小时</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            ) : null}
+            <div className="flex items-center justify-between border px-3 py-2 sm:col-span-2">
+              <Label htmlFor="policy-enabled">启用策略</Label>
+              <Switch
+                id="policy-enabled"
+                checked={enabled}
+                onCheckedChange={setEnabled}
+              />
+            </div>
+            <div className="grid gap-2 sm:col-span-2">
+              <Label htmlFor="policy-pattern">路径正则</Label>
+              <Textarea
+                id="policy-pattern"
+                required
+                maxLength={2048}
+                rows={7}
+                spellCheck={false}
+                className="font-mono text-xs"
+                value={pattern}
+                onChange={(event) => setPattern(event.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              取消
+            </Button>
+            <Button type="submit" disabled={mutation.isPending}>
+              {mutation.isPending ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <Rocket />
+              )}
+              保存并发布
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function RateLimitDialog({
+  value,
+  onOpenChange,
+  onSaved,
+}: {
+  value: RateLimitPolicy | "new" | null;
+  onOpenChange: (open: boolean) => void;
+  onSaved: (data: SecurityOverview) => void;
+}) {
+  const existing = value && value !== "new" ? value : null;
+  return (
+    <RateDialogShell
+      key={existing?.id || String(value)}
+      open={Boolean(value)}
+      existing={existing}
+      onOpenChange={onOpenChange}
+      onSaved={onSaved}
+    />
+  );
+}
+
+function RateDialogShell({
+  open,
+  existing,
+  onOpenChange,
+  onSaved,
+}: {
+  open: boolean;
+  existing: RateLimitPolicy | null;
+  onOpenChange: (open: boolean) => void;
+  onSaved: (data: SecurityOverview) => void;
+}) {
+  const [name, setName] = useState(existing?.name ?? "");
+  const [rps, setRPS] = useState(existing?.requests_per_second ?? 20);
+  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
+  const [conditional, setConditional] = useState(
+    existing?.response_condition_enabled ?? false,
+  );
+  const [classes, setClasses] = useState<number[]>(
+    existing?.response_status_classes ?? [4, 5],
+  );
+  const mutation = useMutation({
+    mutationFn: () =>
+      api<SecurityOverview>(
+        existing
+          ? `/api/security/rate-limit-policies/${encodeURIComponent(existing.id)}`
+          : "/api/security/rate-limit-policies",
+        {
+          method: existing ? "PUT" : "POST",
+          body: JSON.stringify({
+            name,
+            enabled,
+            requests_per_second: rps,
+            response_condition_enabled: conditional,
+            response_status_classes: conditional ? classes : [],
+          }),
+        },
+      ),
+    onSuccess: (data) => {
+      onSaved(data);
+      onOpenChange(false);
+      toast.success("限速策略已保存并发布");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    mutation.mutate();
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <form onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>
+              {existing ? "编辑限速策略" : "新增限速策略"}
+            </DialogTitle>
+            <DialogDescription>
+              边缘节点按客户端 IP 使用一秒窗口计数
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-5 sm:grid-cols-2">
+            <Field label="名称" id="rate-name">
+              <Input
+                id="rate-name"
+                required
+                maxLength={80}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field label="每秒请求上限" id="rate-rps">
+              <Input
+                id="rate-rps"
+                type="number"
+                min={1}
+                max={100000}
+                required
+                value={rps}
+                onChange={(event) => setRPS(Number(event.target.value))}
+              />
+            </Field>
+            <div className="flex items-center justify-between border px-3 py-2 sm:col-span-2">
+              <Label htmlFor="rate-enabled">启用策略</Label>
+              <Switch
+                id="rate-enabled"
+                checked={enabled}
+                onCheckedChange={setEnabled}
+              />
+            </div>
+            <div className="flex items-center justify-between border px-3 py-2 sm:col-span-2">
+              <div>
+                <Label htmlFor="rate-conditional">仅统计指定响应</Label>
+                <p className="text-xs text-muted-foreground">
+                  根据响应状态类别计入窗口
+                </p>
+              </div>
+              <Switch
+                id="rate-conditional"
+                checked={conditional}
+                onCheckedChange={setConditional}
+              />
+            </div>
+            {conditional ? (
+              <div className="grid grid-cols-4 gap-2 sm:col-span-2">
+                {[2, 3, 4, 5].map((code) => (
+                  <label
+                    key={code}
+                    className="flex items-center gap-2 border px-3 py-2 text-sm"
+                  >
+                    <Checkbox
+                      checked={classes.includes(code)}
+                      onCheckedChange={(checked) =>
+                        setClasses(
+                          checked
+                            ? [...classes, code].sort()
+                            : classes.filter((item) => item !== code),
+                        )
+                      }
+                    />
+                    {code}xx
+                  </label>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="submit"
+              disabled={mutation.isPending || (conditional && !classes.length)}
+            >
+              {mutation.isPending ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <Rocket />
+              )}
+              保存并发布
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function Summary({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: typeof ShieldCheck;
+  label: string;
+  value: string;
+}) {
+  return (
+    <Card>
+      <CardContent className="flex items-start justify-between p-5">
+        <div>
+          <p className="text-sm text-muted-foreground">{label}</p>
+          <p className="mt-2 text-2xl font-semibold tabular-nums">{value}</p>
+        </div>
+        <Icon className="size-4 text-sky-600" />
+      </CardContent>
+    </Card>
+  );
+}
+function SectionHeader({
+  title,
+  meta,
+  action,
+}: {
+  title: string;
+  meta: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="mb-3 flex items-center justify-between gap-3">
+      <div>
+        <h2 className="text-base font-semibold">{title}</h2>
+        <p className="text-xs text-muted-foreground">{meta}</p>
+      </div>
+      {action}
+    </div>
+  );
+}
+function DataFrame({
+  empty,
+  emptyTitle,
+  children,
+}: {
+  empty: boolean;
+  emptyTitle: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="overflow-x-auto border bg-card">
+      {empty ? (
+        <div className="p-5">
+          <EmptyState title={emptyTitle} />
+        </div>
+      ) : (
+        children
+      )}
+    </div>
+  );
+}
+function Field({
+  label,
+  id,
+  children,
+}: {
+  label: string;
+  id: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>{label}</Label>
+      {children}
+    </div>
+  );
+}
+function durationLabel(seconds?: number) {
+  return (
+    (
+      {
+        3600: "1 小时",
+        21600: "6 小时",
+        43200: "12 小时",
+        86400: "24 小时",
+      } as Record<number, string>
+    )[Number(seconds)] ?? "--"
+  );
+}
+function nodeName(data: SecurityOverview, id?: string) {
+  return data.nodes.find((node) => node.id === id)?.name || id || "--";
+}

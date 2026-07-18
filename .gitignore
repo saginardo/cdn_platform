@@ -39,3 +39,13 @@ cdn-edge-agent
 .DS_Store
 .idea/
 .vscode/
+
+# Frontend dependency/cache directories. The embedded Vite build is tracked so
+# direct Go builds remain reproducible without requiring Node first.
+frontend/node_modules/
+frontend/.vite/
+frontend/playwright-report/
+frontend/test-results/
+.tmp/
+!internal/control/web/dist/
+!internal/control/web/dist/**

@@ -27,8 +27,13 @@ install -d -o 10001 -g 10001 -m 0750 \
 install -d -o 101 -g 101 -m 0750 "$root/data/clickhouse" "$root/logs/clickhouse"
 chown -R 101:101 "$root/backup/staging/clickhouse"
 
-rm -rf "$source_dir/cmd" "$source_dir/internal" "$source_dir/deploy" "$source_dir/docs" "$source_dir/scripts"
+rm -rf "$source_dir/cmd" "$source_dir/internal" "$source_dir/deploy" "$source_dir/docs" "$source_dir/scripts" "$source_dir/frontend"
 cp -a cmd internal deploy docs scripts go.mod go.sum Dockerfile .dockerignore AGENTS.md LICENSE README.md "$source_dir/"
+install -d -m 0750 "$source_dir/frontend"
+cp -a frontend/.oxlintrc.json frontend/.prettierignore frontend/README.md frontend/components.json frontend/index.html \
+  frontend/package.json frontend/package-lock.json frontend/playwright.config.ts \
+  frontend/tsconfig.json frontend/tsconfig.app.json frontend/tsconfig.node.json frontend/vite.config.ts \
+  frontend/e2e frontend/src "$source_dir/frontend/"
 install -m 0644 compose.yaml "$root/compose.yaml"
 printf 'CDN_SOURCE_DIR=./app\n' >"$root/.env"
 chmod 0644 "$root/.env"

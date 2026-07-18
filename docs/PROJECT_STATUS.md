@@ -89,7 +89,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 | `internal/nginx` | 已实现 | HTTP 缓存、整站透传、回源、TLS、WebSocket/SSE、gRPC、备用源站与客户端 IP 限速配置渲染。 |
 | `internal/integrations` | 已实现 | Cloudflare、Certbot、SMTP 等外部适配器。 |
 | `internal/logstore` | 已实现 | ClickHouse 原始日志、分钟指标、节点缓存状态聚合和带过滤分页的检索读写。 |
-| `internal/control/web` | 已实现 | 简体中文管理台，资源通过 `//go:embed web/*` 编入控制面二进制。 |
+| `frontend/` 与 `internal/control/web/dist` | 已实现 | React 19、Vite、TypeScript、Tailwind CSS v4 和 shadcn/ui 简体中文管理台；Vite 哈希产物通过 `//go:embed web/dist` 编入控制面二进制。 |
 | `deploy/` 与 `scripts/` | 已实现 | Compose 主控安装、证书续期、Restic 重试/状态/告警、隔离恢复与切换、发布构建和 ClickHouse 配置。边缘安装资源由控制面从 `internal/control` 嵌入提供。 |
 
 ### 管理界面当前能力
@@ -99,9 +99,9 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 - 安全：全局访问策略增删改、内置敏感文件扫描与独立 PHP 恶意文件探测规则、拦截/IP 封禁动作、1/6/12/24 小时档位，以及按客户端 IP 执行的每秒请求限速策略；限速可选择仅由 2xx/3xx/4xx/5xx 响应计数，超限由边缘返回 429。页面同时展示访问安全/限速能力覆盖、活动封禁解封和最近命中。
 - 节点：列表仅保留运行概览和管理入口，并提供“一键升级全部”；后端一次评估全量节点，只为具备能力且制品落后的可用节点排队，逐节点报告已是最新、已有任务或阻塞原因。独立二级页面集中提供部署/升级命令、在线升级、暂停/启用调度、撤销/重新启用、卸载/删除、分配站点、心跳、能力与应用版本查看，并展示边缘心跳上报的发行版、版本、uptime、系统负载、CPU、RAM、根磁盘和默认出口网卡 RX/TX，以及缓存已用空间/5 GiB 总容量和最近 24 小时 ClickHouse 缓存状态分布。机器状态、缓存磁盘上报与请求统计独立降级，任一故障不阻塞节点管理。
 - 站点：创建、编辑、节点分配、主/备源站、独立回源 TLS SNI、回源读写空闲超时、整站透传开关、发布、申请 TLS、缓存刷新、源站 CIDR 查看，以及输入站点名确认的安全删除流程。
-- 站点列表采用紧凑工作台布局，仅展示节点、TLS 与发布状态，并保留发布和管理入口；创建、编辑、协议、缓存、请求体、超时、TLS、缓存刷新和源站 CIDR 均集中在独立二级页面。
+- 站点列表采用紧凑工作台布局，仅展示节点、TLS 与发布状态并保留管理入口；创建、编辑、发布、协议、缓存、请求体、超时、TLS、缓存刷新和源站 CIDR 均集中在独立二级页面。
 - TLS 状态不再解析历史任务文本。接口 `GET /api/sites/{id}/tls-status` 返回最新证书任务及 `published_after_certificate`，只要签发完成后存在成功发布任务就显示“已签发”。
-- 消息中心：顶部单行任务提示已移除；侧栏和移动端铃铛显示未读数，支持全部/未读筛选、逐条/全部已读和删除。发布、节点升级、卸载、备份及在线恢复的关键状态会按来源和状态去重持久化，已读消息保留三个月；当前浏览器操作结果也进入本地消息列表。
+- 消息中心：顶部单行任务提示已移除；侧栏和移动端铃铛显示未读数，支持全部/未读筛选、逐条/全部已读和删除。发布、节点升级、卸载、备份及在线恢复的关键状态会按来源和状态去重持久化，已读消息保留三个月；当前浏览器操作结果使用 Sonner 即时通知。
 - 设置：显示最近一次备份运行状态和 Restic 快照，可在不中断控制面的阶段下载、校验 SQLite/密钥/证书并恢复到临时 ClickHouse 数据库；二次确认后短暂重启完成切换，旧文件和旧数据库保留用于回滚。
 
 ## 5. 参考部署模板
@@ -191,13 +191,16 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 
 ```bash
 cd /path/to/cdn_platform
+npm --prefix frontend ci
+npm --prefix frontend run check
+npm --prefix frontend run test:e2e
+
 GOCACHE=/tmp/cdn_platform_go_cache \
 GOMODCACHE=/tmp/cdn_platform_go_modcache \
 go test ./...
-node --check internal/control/web/app.js
 ```
 
-前端文件在 `internal/control/web/`，由 `internal/control/server.go` 使用 `//go:embed web/*` 编入 `cdn-control`。因此修改 UI 后必须重新编译和重启控制面，单独上传静态文件不会生效。
+前端源码在 `frontend/`，`npm run build` 将路由分块和静态资源输出到 `internal/control/web/dist/`，再由 `internal/control/server.go` 使用 `//go:embed web/dist` 编入 `cdn-control`。因此修改 UI 后必须重新构建前端、重新编译并重启控制面，单独上传静态文件不会生效。Dockerfile 与 `scripts/build-release.sh` 已串联这两段构建。
 
 ### 发布控制面
 
@@ -247,7 +250,8 @@ curl -fsS http://127.0.0.1/__cdn_health
 | `internal/store/migrations.go` | SQLite 版本化事务迁移和 schema 版本检查。 |
 | `internal/store/store.go` | SQLite 连接、生命周期和持久化入口。 |
 | `internal/logstore/clickhouse.go` | ClickHouse schema、访问日志和指标查询。 |
-| `internal/control/web/` | 中文控制台的 HTML、CSS、JavaScript。 |
+| `frontend/` | React/Vite/Tailwind/shadcn 中文控制台源码、组件注册表和 Playwright 响应式测试。 |
+| `internal/control/web/dist/` | Vite 生成并由 Go 嵌入的哈希静态产物。 |
 | `compose.yaml` | 主控、ClickHouse、证书续期和可选备份服务。 |
 | `scripts/install-control-compose.sh` | Compose 主控目录初始化与安装。 |
 | `internal/control/install-edge.sh` | 控制面嵌入并提供的边缘新装、旧布局迁移与升级脚本。 |

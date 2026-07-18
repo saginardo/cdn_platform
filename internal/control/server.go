@@ -30,7 +30,7 @@ import (
 	"cdn-platform/internal/store"
 )
 
-//go:embed web/*
+//go:embed web/dist
 var embeddedWeb embed.FS
 
 //go:embed uninstall-edge.sh
@@ -154,11 +154,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/edge/v1/uninstall/start", s.startNodeUninstall)
 	mux.HandleFunc("POST /api/edge/v1/uninstall/fail", s.failNodeUninstall)
 	mux.HandleFunc("POST /api/edge/v1/uninstall/complete", s.completeNodeUninstall)
-	web, err := fs.Sub(embeddedWeb, "web")
+	web, err := fs.Sub(embeddedWeb, "web/dist")
 	if err == nil {
-		mux.Handle("/", http.FileServer(http.FS(web)))
+		mux.Handle("/", staticWebHandler(http.FileServer(http.FS(web))))
 	}
 	return s.withSecurityHeaders(s.withRequestLog(mux))
+}
+
+func staticWebHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if strings.HasPrefix(request.URL.Path, "/assets/") {
+			response.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			response.Header().Set("Cache-Control", "no-cache")
+		}
+		next.ServeHTTP(response, request)
+	})
 }
 
 func (s *Server) TLSConfig() *tls.Config {
@@ -1359,7 +1370,7 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		response.Header().Set("X-Content-Type-Options", "nosniff")
 		response.Header().Set("X-Frame-Options", "DENY")
 		response.Header().Set("Referrer-Policy", "same-origin")
-		response.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		response.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
 		next.ServeHTTP(response, request)
 	})
 }

@@ -97,4 +97,4 @@ RESULT http=206 bytes=2097152
 3. 若仍是 `200` 或下载了完整文件，检查控制面是否为新版、是否点击过发布、边缘 agent 是否已确认目标版本，以及实际生成的 Nginx 是否仍含该站点的 `proxy_cache cdn_cache`。
 4. 若返回 `206` 但速度仍慢，再分别比较业务域名、边缘 `${EDGE_DIAGNOSTIC_PORT}` 和真实源站，定位网络路径或源站吞吐；不要重新启用缓存来掩盖 Range 语义问题。
 
-相关实现：`internal/domain/domain.go`、`internal/store/store.go`、`internal/control/server.go`、`internal/control/web/`、`internal/nginx/render.go`。
+相关实现：`internal/domain/domain.go`、`internal/store/store.go`、`internal/control/server.go`、`frontend/src/features/sites/`、`internal/nginx/render.go`。

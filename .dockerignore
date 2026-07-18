@@ -1,6 +1,12 @@
 .git
 .agents
 .codex
+.tmp
+frontend/node_modules
+frontend/.vite
+frontend/playwright-report
+frontend/test-results
+internal/control/web/dist
 .env
 dist
 backup

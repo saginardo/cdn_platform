@@ -34,6 +34,7 @@ Before upgrading an existing database to a release with published snapshots, pub
 cmd/control          Control-plane executable
 cmd/edge-agent       Edge agent executable
 internal/control     API, auth, CA, publish, health/DNS orchestration
+frontend/            React/Vite/Tailwind/shadcn management console source
 internal/edge        Enrollment, mTLS polling, atomic apply, local log queue
 internal/nginx       Generated Nginx cache and origin configuration
 internal/integrations Cloudflare, Certbot, SMTP adapters
@@ -44,7 +45,12 @@ scripts/             Compose control-plane helpers and release builds
 
 ## Build and test
 
+The UI build requires Node.js 24 LTS and npm 11 or newer. The generated Vite output is embedded in the Go control binary.
+
 ```bash
+npm --prefix frontend ci
+npm --prefix frontend run check
+
 GOCACHE=/private/tmp/cdn_platform_go_cache \
 GOMODCACHE=/private/tmp/cdn_platform_gomodcache \
 GOPATH=/private/tmp/cdn_platform_gopath \
@@ -52,6 +58,10 @@ go test ./...
 
 ./scripts/build-release.sh dist
 ```
+
+Browser smoke tests live in `frontend/e2e` and cover authenticated workspaces, the login screen, responsive sidebar behavior, and the shadcn/Recharts overview chart. Run `npm --prefix frontend run test:e2e` after installing Playwright Chromium.
+
+For UI development, run the TLS control plane on `127.0.0.1:8443`, then start `npm --prefix frontend run dev`. Vite proxies authenticated API requests to the local TLS endpoint (including its development certificate) and keeps the existing hash routes.
 
 `dist/SHA256SUMS` contains the exact digest required by `EDGE_BINARY_SHA256`. The controller can also serve the signed edge binary itself when `EDGE_BINARY_PATH` is configured; use `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` as `EDGE_BINARY_URL`.
 

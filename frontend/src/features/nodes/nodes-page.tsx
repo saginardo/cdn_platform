@@ -1,0 +1,387 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  ArrowRight,
+  CirclePlus,
+  LoaderCircle,
+  RefreshCw,
+  Rocket,
+  Server,
+} from "lucide-react";
+import { useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
+import { toast } from "sonner";
+
+import {
+  EmptyState,
+  PageBody,
+  PageError,
+  PageHeader,
+  PageLoading,
+} from "@/components/page";
+import { StatusBadge } from "@/components/status-badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { api, errorMessage } from "@/lib/api";
+import { formatDateTime, formatNumber, shortHash } from "@/lib/format";
+import type { Node, NodeUpgradeTask } from "@/lib/types";
+
+interface BulkUpgradeResult {
+  created: number;
+  already_active: number;
+  up_to_date: number;
+  blocked: number;
+  results: Array<{
+    node_id: string;
+    name: string;
+    state: string;
+    detail?: string;
+    task?: NodeUpgradeTask;
+  }>;
+}
+
+export function NodesPage() {
+  const queryClient = useQueryClient();
+  const [createOpen, setCreateOpen] = useState(false);
+  const [bulkResult, setBulkResult] = useState<BulkUpgradeResult | null>(null);
+  const nodes = useQuery({
+    queryKey: ["nodes"],
+    queryFn: () => api<Node[]>("/api/nodes"),
+    refetchInterval: (query) =>
+      query.state.data?.some((node) => activeUpgrade(node.upgrade_task))
+        ? 5_000
+        : 20_000,
+  });
+  const bulkUpgrade = useMutation({
+    mutationFn: () =>
+      api<BulkUpgradeResult>("/api/nodes/upgrade-all", { method: "POST" }),
+    onSuccess: (result) => {
+      setBulkResult(result);
+      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+      toast.success(`已创建 ${result.created} 个升级任务`);
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  const upgradeable =
+    nodes.data?.filter((node) => node.can_upgrade).length ?? 0;
+
+  return (
+    <>
+      <PageHeader
+        title="节点"
+        description="边缘节点、版本与在线运维"
+        actions={
+          <>
+            <Button
+              variant="outline"
+              disabled={!nodes.data?.length || bulkUpgrade.isPending}
+              onClick={() => bulkUpgrade.mutate()}
+            >
+              {bulkUpgrade.isPending ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <Rocket />
+              )}
+              全部升级{upgradeable ? ` (${upgradeable})` : ""}
+            </Button>
+            <Button onClick={() => setCreateOpen(true)}>
+              <CirclePlus />
+              添加节点
+            </Button>
+          </>
+        }
+      />
+      <PageBody>
+        {nodes.isLoading ? <PageLoading /> : null}
+        {nodes.error ? <PageError error={nodes.error} /> : null}
+        {nodes.data ? (
+          nodes.data.length ? (
+            <div className="border bg-card">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="pl-5">节点</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>公网 IPv4</TableHead>
+                      <TableHead>心跳</TableHead>
+                      <TableHead>代理版本</TableHead>
+                      <TableHead>升级</TableHead>
+                      <TableHead className="w-12 pr-5">
+                        <span className="sr-only">管理</span>
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {nodes.data.map((node) => (
+                      <TableRow key={node.id}>
+                        <TableCell className="pl-5">
+                          <div className="font-medium">{node.name}</div>
+                          <div className="font-mono text-xs text-muted-foreground">
+                            {node.id}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge status={node.status} />
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">
+                          {node.public_ipv4}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {node.last_heartbeat_at
+                            ? formatDateTime(node.last_heartbeat_at)
+                            : "尚未注册"}
+                        </TableCell>
+                        <TableCell>
+                          <div className="font-mono text-xs">
+                            {shortHash(node.agent_sha256)}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            配置 v{formatNumber(node.applied_version)}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {node.upgrade_task &&
+                          activeUpgrade(node.upgrade_task) ? (
+                            <StatusBadge status={node.upgrade_task.status} />
+                          ) : node.upgrade_up_to_date ? (
+                            <StatusBadge status="succeeded" label="最新" />
+                          ) : node.can_upgrade ? (
+                            <StatusBadge status="ready" label="可升级" />
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              {node.upgrade_blocker || "不可升级"}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="pr-5">
+                          <Button asChild variant="ghost" size="icon-sm">
+                            <Link
+                              to={`/nodes/${encodeURIComponent(node.id)}`}
+                              aria-label={`管理 ${node.name}`}
+                            >
+                              <ArrowRight />
+                            </Link>
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              <div className="flex items-center justify-between border-t px-5 py-3 text-xs text-muted-foreground">
+                <span>{nodes.data.length} 个节点</span>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="刷新节点"
+                  onClick={() => void nodes.refetch()}
+                >
+                  <RefreshCw
+                    className={nodes.isFetching ? "animate-spin" : undefined}
+                  />
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <EmptyState
+              title="暂无边缘节点"
+              description="添加节点后生成安全的部署命令"
+            />
+          )
+        ) : null}
+      </PageBody>
+      <CreateNodeDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <BulkResultDialog
+        result={bulkResult}
+        onOpenChange={(open) => {
+          if (!open) setBulkResult(null);
+        }}
+      />
+    </>
+  );
+}
+
+function CreateNodeDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState("");
+  const [ip, setIP] = useState("");
+  const mutation = useMutation({
+    mutationFn: () =>
+      api<Node>("/api/nodes", {
+        method: "POST",
+        body: JSON.stringify({ name, public_ipv4: ip }),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+      toast.success("节点已添加");
+      setName("");
+      setIP("");
+      onOpenChange(false);
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    mutation.mutate();
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <form onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>添加边缘节点</DialogTitle>
+            <DialogDescription>
+              创建节点记录后，在详情页生成部署命令
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-5">
+            <div className="grid gap-2">
+              <Label htmlFor="node-name">节点名称</Label>
+              <Input
+                id="node-name"
+                required
+                maxLength={80}
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="edge-shanghai-01"
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="node-ip">公网 IPv4</Label>
+              <Input
+                id="node-ip"
+                required
+                value={ip}
+                onChange={(event) => setIP(event.target.value)}
+                placeholder="203.0.113.10"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => onOpenChange(false)}
+            >
+              取消
+            </Button>
+            <Button type="submit" disabled={mutation.isPending}>
+              {mutation.isPending ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <Server />
+              )}
+              创建节点
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BulkResultDialog({
+  result,
+  onOpenChange,
+}: {
+  result: BulkUpgradeResult | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog open={Boolean(result)} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>批量升级结果</DialogTitle>
+          <DialogDescription>
+            {result
+              ? `新建 ${result.created}，进行中 ${result.already_active}，已最新 ${result.up_to_date}，受阻 ${result.blocked}`
+              : ""}
+          </DialogDescription>
+        </DialogHeader>
+        {result ? (
+          <div className="max-h-[55vh] overflow-auto border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>节点</TableHead>
+                  <TableHead>结果</TableHead>
+                  <TableHead>说明</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {result.results.map((item) => (
+                  <TableRow key={item.node_id}>
+                    <TableCell className="font-medium">{item.name}</TableCell>
+                    <TableCell>
+                      <StatusBadge
+                        status={bulkStateStatus(item.state)}
+                        label={bulkStateLabel(item.state)}
+                      />
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {item.detail || "--"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        ) : null}
+        <DialogFooter>
+          <Button onClick={() => onOpenChange(false)}>完成</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function activeUpgrade(task?: NodeUpgradeTask) {
+  return task?.status === "queued" || task?.status === "applying";
+}
+function bulkStateLabel(state: string) {
+  return (
+    (
+      {
+        created: "已创建",
+        already_active: "进行中",
+        up_to_date: "已最新",
+        blocked: "受阻",
+      } as Record<string, string>
+    )[state] ?? state
+  );
+}
+function bulkStateStatus(state: string) {
+  return (
+    (
+      {
+        created: "queued",
+        already_active: "applying",
+        up_to_date: "succeeded",
+        blocked: "failed",
+      } as Record<string, string>
+    )[state] ?? state
+  );
+}

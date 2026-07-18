@@ -1,8 +1,8 @@
 # Third-Party Notices
 
-## Lucide Icons 1.16.0
+## Lucide React 1.25.0
 
-The console includes a self-hosted subset of Lucide SVG icons in `internal/control/web/lucide-icons.svg`.
+The React console bundles icons from the `lucide-react` package.
 
 ISC License
 
@@ -22,9 +22,7 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ---
 
-The following Lucide icons are derived from the Feather project:
-
-airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+Some Lucide icons are derived from the Feather project and retain its MIT notice:
 
 The MIT License (MIT) (for the icons listed above)
 
@@ -47,3 +45,11 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## React UI Runtime
+
+The console uses shadcn CLI/component source 4.13.1, Radix UI 1.6.2, and Recharts 3.8.0. These projects are distributed under the MIT License. shadcn components are checked into `frontend/src/components/ui` so local adaptations remain reviewable.
+
+## Geist Variable Font
+
+The console self-hosts Geist through `@fontsource-variable/geist` 5.2.9. The font is distributed under the SIL Open Font License 1.1.

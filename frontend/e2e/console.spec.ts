@@ -83,16 +83,18 @@ const site = {
 };
 
 async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
+  let branding = { name: "CDN Platform", subtitle: "控制面板" };
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (
       url.pathname === "/api/settings/branding" &&
       route.request().method() === "PUT"
     ) {
+      branding = route.request().postDataJSON() as typeof branding;
       await route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: JSON.stringify(route.request().postDataJSON()),
+        body: JSON.stringify(branding),
       });
       return;
     }
@@ -141,7 +143,7 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
         nodes: [],
       },
       "/api/settings": {
-        branding: { name: "CDN Platform", subtitle: "控制面板" },
+        branding,
         dns: { default_ttl_seconds: 60 },
         cloudflare: {
           source: "environment",
@@ -252,6 +254,35 @@ test("list pagination renders at most 20 entries per page", async ({
   await expect(page.getByText("分页站点 20")).toHaveCount(0);
 });
 
+test("sites list shows only the publish status", async ({ page }) => {
+  const tlsRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname.endsWith("/tls-status")) {
+      tlsRequests.push(request.url());
+    }
+  });
+  await mockAPI(page);
+  await page.goto("/#/sites");
+
+  await expect(
+    page.getByRole("columnheader", { name: "发布状态" }),
+  ).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "版本" })).toBeVisible();
+  const row = page.getByRole("row").filter({ hasText: site.name });
+  await expect(row.getByText("V8", { exact: true })).toBeVisible();
+  await expect(row.getByText("Cache Version V2", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(row.getByText("成功", { exact: true })).toHaveCount(1);
+  expect(tlsRequests).toEqual([]);
+
+  await row.getByRole("link", { name: `管理 ${site.name}` }).click();
+  await expect(page.getByText("缓存版本", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText("Cache Version V2", { exact: true }),
+  ).toBeVisible();
+});
+
 test("branding settings update the sidebar immediately", async ({
   page,
 }, testInfo) => {
@@ -267,6 +298,33 @@ test("branding settings update the sidebar immediately", async ({
   const sidebar = page.locator('[data-sidebar="sidebar"]');
   await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("边缘控制台", { exact: true })).toBeVisible();
+
+  await page.route("**/api/session", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ user: "admin", csrf_token: "e2e-csrf" }),
+    });
+  });
+  await page.reload();
+  const bootScreen = page.locator("main");
+  await expect(bootScreen.getByText("正在验证登录状态")).toBeVisible();
+  await expect(
+    bootScreen.getByText("DustK Edge", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    bootScreen.getByText("CDN Platform", { exact: true }),
+  ).toHaveCount(0);
+  await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
+
+  await page.evaluate(() => window.localStorage.clear());
+  await page.reload();
+  await expect(bootScreen.getByText("正在验证登录状态")).toBeVisible();
+  await expect(
+    bootScreen.getByText("CDN Platform", { exact: true }),
+  ).toHaveCount(0);
+  await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
   await page.screenshot({
     path: testInfo.outputPath("branding-settings.png"),
     fullPage: true,

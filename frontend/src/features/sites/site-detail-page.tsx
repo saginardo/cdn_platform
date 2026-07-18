@@ -60,6 +60,7 @@ import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { api, errorMessage } from "@/lib/api";
+import { formatNumber } from "@/lib/format";
 import { useListPagination } from "@/hooks/use-list-pagination";
 import type {
   DeploymentTask,
@@ -1041,15 +1042,24 @@ function SiteOperations({
           </Button>
         ) : null}
         {cacheable ? (
-          <Button
-            type="button"
-            variant="outline"
-            disabled={site.deleting || pending}
-            onClick={onInvalidate}
-          >
-            <RefreshCw />
-            全量缓存失效
-          </Button>
+          <div className="flex flex-wrap items-center justify-between gap-3 border px-3 py-2">
+            <div className="min-w-0">
+              <div className="text-sm">缓存版本</div>
+              <div className="text-xs text-muted-foreground">
+                Cache Version V{formatNumber(site.cache_generation)}
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={site.deleting || pending}
+              onClick={onInvalidate}
+            >
+              <RefreshCw />
+              全量缓存失效
+            </Button>
+          </div>
         ) : null}
         <Button
           type="button"

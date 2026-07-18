@@ -51,10 +51,12 @@ const groups = [
 export function AppSidebar({
   brandName,
   brandSubtitle,
+  brandPending,
   onLogout,
 }: {
   brandName: string;
   brandSubtitle: string;
+  brandPending?: boolean;
   onLogout: () => void;
 }) {
   const location = useLocation();
@@ -66,20 +68,30 @@ export function AppSidebar({
           <SidebarMenuItem>
             <SidebarMenuButton
               size="lg"
-              tooltip={brandName}
+              tooltip={brandName || "控制面板"}
               className="h-11 justify-start px-2"
             >
               <span className="grid size-8 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground">
                 <Globe2 className="size-4" />
               </span>
-              <span className="grid min-w-0 text-left leading-tight">
-                <span className="truncate font-semibold">{brandName}</span>
-                {brandSubtitle ? (
-                  <span className="truncate text-xs text-muted-foreground">
-                    {brandSubtitle}
-                  </span>
-                ) : null}
-              </span>
+              {brandPending ? (
+                <span
+                  className="grid min-w-0 gap-1.5"
+                  aria-label="正在加载品牌"
+                >
+                  <span className="h-3 w-24 bg-sidebar-accent" />
+                  <span className="h-2.5 w-16 bg-sidebar-accent" />
+                </span>
+              ) : (
+                <span className="grid min-w-0 text-left leading-tight">
+                  <span className="truncate font-semibold">{brandName}</span>
+                  {brandSubtitle ? (
+                    <span className="truncate text-xs text-muted-foreground">
+                      {brandSubtitle}
+                    </span>
+                  ) : null}
+                </span>
+              )}
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>

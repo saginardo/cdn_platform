@@ -25,11 +25,6 @@ import { formatDateTime, formatNumber } from "@/lib/format";
 import type { DeploymentTask, PublishStatus, Site } from "@/lib/types";
 import { useListPagination } from "@/hooks/use-list-pagination";
 
-interface TLSStatus {
-  certificate_task: DeploymentTask | null;
-  published_after_certificate: boolean;
-}
-
 export function SitesPage() {
   const query = useQuery({
     queryKey: ["sites"],
@@ -64,8 +59,8 @@ export function SitesPage() {
                       <TableHead className="pl-5">站点</TableHead>
                       <TableHead>协议</TableHead>
                       <TableHead>节点</TableHead>
-                      <TableHead>配置</TableHead>
-                      <TableHead>状态</TableHead>
+                      <TableHead>版本</TableHead>
+                      <TableHead>发布状态</TableHead>
                       <TableHead>更新时间</TableHead>
                       <TableHead className="w-12 pr-5">
                         <span className="sr-only">管理</span>
@@ -87,11 +82,8 @@ export function SitesPage() {
                         <TableCell className="tabular-nums">
                           {formatNumber(site.node_ids.length)}
                         </TableCell>
-                        <TableCell className="text-xs">
-                          <div>草稿 v{formatNumber(site.config_version)}</div>
-                          <div className="text-muted-foreground">
-                            缓存代 {formatNumber(site.cache_generation)}
-                          </div>
+                        <TableCell className="text-sm font-medium tabular-nums">
+                          V{formatNumber(site.config_version)}
                         </TableCell>
                         <TableCell>
                           <SiteStatus site={site} />
@@ -152,46 +144,20 @@ function SiteStatus({ site }: { site: Site }) {
     refetchInterval: (query) =>
       activeTask(query.state.data?.task) ? 2_000 : 20_000,
   });
-  const tls = useQuery({
-    queryKey: ["site-tls", site.id],
-    queryFn: () => api<TLSStatus>(`/api/sites/${encodedID}/tls-status`),
-    enabled: !site.deleting && siteNeedsTLS(site),
-    refetchInterval: (query) =>
-      activeTask(query.state.data?.certificate_task) ? 2_000 : 20_000,
-  });
-
   if (site.deleting) return <StatusBadge status="applying" label="删除中" />;
   if (!site.enabled) return <StatusBadge status="pending" label="已停用" />;
   const publishTask = publish.data?.task;
-  const certificateTask = tls.data?.certificate_task;
   return (
-    <div className="flex min-w-24 flex-col items-start gap-1">
-      <StatusBadge
-        status={
-          publishTask?.status ?? (site.published ? "succeeded" : "pending")
-        }
-        label={publishTask ? undefined : site.published ? "已发布" : "待发布"}
-      />
-      {siteNeedsTLS(site) ? (
-        <StatusBadge
-          status={certificateTask?.status ?? "pending"}
-          label={certificateTask ? undefined : "TLS 未签发"}
-        />
-      ) : null}
-    </div>
+    <StatusBadge
+      status={publishTask?.status ?? (site.published ? "succeeded" : "pending")}
+      label={publishTask ? undefined : site.published ? "已发布" : "待发布"}
+    />
   );
 }
 
 function activeTask(task?: DeploymentTask | null) {
   return Boolean(
     task && ["queued", "dispatching", "applying"].includes(task.status),
-  );
-}
-
-function siteNeedsTLS(site: Site) {
-  return (
-    site.domains.length > 0 ||
-    site.tcp_forwards.some((forward) => forward.listen_tls)
   );
 }
 

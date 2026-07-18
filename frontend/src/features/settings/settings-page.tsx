@@ -41,6 +41,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { cacheBranding, DEFAULT_BRANDING } from "@/hooks/use-branding";
 import { api, errorMessage } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 
@@ -114,11 +115,6 @@ export function SettingsPage() {
   );
 }
 
-const defaultBranding: Settings["branding"] = {
-  name: "CDN Platform",
-  subtitle: "控制面板",
-};
-
 function BrandingForm({ settings }: { settings: Settings }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(settings.branding.name);
@@ -130,6 +126,7 @@ function BrandingForm({ settings }: { settings: Settings }) {
         body: JSON.stringify({ name, subtitle }),
       }),
     onSuccess: (branding) => {
+      cacheBranding(branding);
       queryClient.setQueryData<Settings>(["settings"], (current) =>
         current ? { ...current, branding } : current,
       );
@@ -179,7 +176,7 @@ function BrandingForm({ settings }: { settings: Settings }) {
             </span>
             <span className="grid min-w-0 text-left leading-tight">
               <span className="truncate font-semibold">
-                {name.trim() || defaultBranding.name}
+                {name.trim() || DEFAULT_BRANDING.name}
               </span>
               {subtitle.trim() ? (
                 <span className="truncate text-xs text-muted-foreground">
@@ -203,8 +200,8 @@ function BrandingForm({ settings }: { settings: Settings }) {
             variant="outline"
             disabled={mutation.isPending}
             onClick={() => {
-              setName(defaultBranding.name);
-              setSubtitle(defaultBranding.subtitle);
+              setName(DEFAULT_BRANDING.name);
+              setSubtitle(DEFAULT_BRANDING.subtitle);
             }}
           >
             <RotateCcw />

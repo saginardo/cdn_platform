@@ -21,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DEFAULT_BRANDING, useCachedBranding } from "@/hooks/use-branding";
 import { errorMessage } from "@/lib/api";
 
 interface SetupResult {
@@ -57,6 +58,9 @@ export function AuthScreen({
   const [totp, setTotp] = useState("");
   const [recoveryCode, setRecoveryCode] = useState("");
   const [factor, setFactor] = useState("totp");
+  const cachedBranding = useCachedBranding();
+  const branding =
+    cachedBranding ?? (stage === "boot" ? null : DEFAULT_BRANDING);
 
   async function submitSetup(event: FormEvent) {
     event.preventDefault();
@@ -99,10 +103,21 @@ export function AuthScreen({
           <span className="grid size-10 place-items-center rounded-md bg-primary text-primary-foreground">
             <Globe2 className="size-5" />
           </span>
-          <div>
-            <div className="text-base font-semibold">CDN Platform</div>
-            <div className="text-xs text-muted-foreground">控制面</div>
-          </div>
+          {branding ? (
+            <div>
+              <div className="text-base font-semibold">{branding.name}</div>
+              {branding.subtitle ? (
+                <div className="text-xs text-muted-foreground">
+                  {branding.subtitle}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="grid gap-1.5" aria-label="正在加载品牌">
+              <div className="h-3 w-24 bg-muted" />
+              <div className="h-2.5 w-16 bg-muted" />
+            </div>
+          )}
         </div>
 
         {stage === "boot" ? (

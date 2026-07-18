@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Bell, ChevronRight } from "lucide-react";
-import { Suspense, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
 
 import { AppSidebar } from "@/components/app-sidebar";
@@ -20,6 +20,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/features/auth/auth-provider";
+import { cacheBranding, useCachedBranding } from "@/hooks/use-branding";
 import { api } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 
@@ -40,6 +41,13 @@ export function AppShell() {
     queryKey: ["settings"],
     queryFn: () => api<Settings>("/api/settings"),
   });
+  const cachedBranding = useCachedBranding();
+  const branding = settingsQuery.data?.branding ?? cachedBranding;
+  useEffect(() => {
+    if (settingsQuery.data?.branding) {
+      cacheBranding(settingsQuery.data.branding);
+    }
+  }, [settingsQuery.data?.branding]);
   const location = useLocation();
   const segments = location.pathname.split("/").filter(Boolean);
   const section = segments[0] || "overview";
@@ -50,8 +58,9 @@ export function AppShell() {
       style={{ "--sidebar-width": "13.5rem" } as React.CSSProperties}
     >
       <AppSidebar
-        brandName={settingsQuery.data?.branding?.name || "CDN Platform"}
-        brandSubtitle={settingsQuery.data?.branding?.subtitle ?? "控制面板"}
+        brandName={branding?.name ?? ""}
+        brandSubtitle={branding?.subtitle ?? ""}
+        brandPending={!branding}
         onLogout={() => void logout()}
       />
       <SidebarInset className="min-w-0">

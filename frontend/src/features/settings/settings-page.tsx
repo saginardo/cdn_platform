@@ -73,7 +73,7 @@ export function SettingsPage() {
         {query.error ? <PageError error={query.error} /> : null}
         {query.data ? (
           <Tabs defaultValue="branding" className="space-y-5">
-            <TabsList className="max-w-full overflow-x-auto">
+            <TabsList>
               <TabsTrigger value="branding">品牌</TabsTrigger>
               <TabsTrigger value="general">网络与 DNS</TabsTrigger>
               <TabsTrigger value="notifications">通知</TabsTrigger>

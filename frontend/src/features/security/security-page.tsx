@@ -202,7 +202,7 @@ export function SecurityPage() {
               />
             </section>
             <Tabs defaultValue="policies" className="space-y-4">
-              <TabsList className="max-w-full overflow-x-auto">
+              <TabsList>
                 <TabsTrigger value="policies">访问策略</TabsTrigger>
                 <TabsTrigger value="rate">请求限速</TabsTrigger>
                 <TabsTrigger value="bans">活动封禁</TabsTrigger>

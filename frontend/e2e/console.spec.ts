@@ -400,6 +400,32 @@ test("mobile sidebar closes after hash navigation without horizontal overflow", 
   });
 });
 
+test("security tabs fit on one line without scrollbars", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mockAPI(page);
+  await page.goto("/#/security");
+
+  const tabs = page.locator('[data-slot="tabs-list"]');
+  await expect(tabs.getByRole("tab")).toHaveCount(5);
+  expect(
+    await tabs.evaluate((element) => ({
+      horizontalOverflow: element.scrollWidth > element.clientWidth,
+      overflowX: getComputedStyle(element).overflowX,
+      overflowY: getComputedStyle(element).overflowY,
+      rows: new Set(
+        Array.from(element.children, (child) =>
+          Math.round(child.getBoundingClientRect().top),
+        ),
+      ).size,
+    })),
+  ).toEqual({
+    horizontalOverflow: false,
+    overflowX: "visible",
+    overflowY: "visible",
+    rows: 1,
+  });
+});
+
 test("all primary workspaces and the new-site editor mount without runtime errors", async ({
   page,
 }) => {

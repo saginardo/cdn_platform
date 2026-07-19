@@ -26,6 +26,22 @@ type SecurityEventInputError struct {
 	Err   error
 }
 
+type securityEventPolicy struct {
+	ID                 string
+	Name               string
+	Pattern            string
+	Action             domain.SecurityPolicyAction
+	BanDurationSeconds int
+	RateLimit          bool
+}
+
+type securityEventPolicyValidationError struct {
+	Err error
+}
+
+func (e *securityEventPolicyValidationError) Error() string { return e.Err.Error() }
+func (e *securityEventPolicyValidationError) Unwrap() error { return e.Err }
+
 func (e *SecurityEventInputError) Error() string { return e.Err.Error() }
 func (e *SecurityEventInputError) Unwrap() error { return e.Err }
 
@@ -160,15 +176,13 @@ func (s *Store) RecordSecurityEvents(nodeID string, events []domain.SecurityEven
 		if !errors.Is(err, sql.ErrNoRows) {
 			return accepted, err
 		}
-		policy, err := scanSecurityPolicy(tx.QueryRow(`SELECT `+securityPolicyColumns+` FROM security_policies WHERE id = ?`, input.PolicyID))
+		policy, err := securityEventPolicyForInput(tx, input)
 		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return invalid(index, errors.New("security event policy no longer exists"))
+			var validationError *securityEventPolicyValidationError
+			if errors.As(err, &validationError) {
+				return invalid(index, validationError.Err)
 			}
 			return accepted, err
-		}
-		if !policy.Enabled || input.Action != policy.Action {
-			return invalid(index, errors.New("security event does not match an enabled policy"))
 		}
 		address, err := netip.ParseAddr(strings.TrimSpace(input.ClientIP))
 		if err != nil || !address.Is4() || !address.IsGlobalUnicast() || address.IsPrivate() {
@@ -178,9 +192,11 @@ func (s *Store) RecordSecurityEvents(nodeID string, events []domain.SecurityEven
 		if path == "" || len(path) > 2048 || len(input.Host) > 255 || len(input.Method) > 16 {
 			return invalid(index, errors.New("security event fields are invalid"))
 		}
-		matcher, err := domain.CompileSecurityPattern(policy.Pattern)
-		if err != nil || !matcher.MatchString(path) {
-			return invalid(index, errors.New("security event path does not match its policy"))
+		if !policy.RateLimit {
+			matcher, err := domain.CompileSecurityPattern(policy.Pattern)
+			if err != nil || !matcher.MatchString(path) {
+				return invalid(index, errors.New("security event path does not match its policy"))
+			}
 		}
 		observedAt := input.ObservedAt.UTC()
 		if observedAt.IsZero() || observedAt.After(createdAt.Add(2*time.Minute)) {
@@ -195,13 +211,15 @@ func (s *Store) RecordSecurityEvents(nodeID string, events []domain.SecurityEven
 			expiresAt := observedAt.Add(time.Duration(policy.BanDurationSeconds) * time.Second)
 			banExpiresAt = &expiresAt
 			if expiresAt.After(createdAt) {
-				_, err = tx.Exec(`INSERT INTO security_bans(ip, policy_id, policy_name, trigger_node_id,
-				host, path, method, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(ip) DO UPDATE SET policy_id=excluded.policy_id, policy_name=excluded.policy_name,
-				trigger_node_id=excluded.trigger_node_id, host=excluded.host, path=excluded.path,
-				method=excluded.method, expires_at=CASE WHEN excluded.expires_at > security_bans.expires_at
-				THEN excluded.expires_at ELSE security_bans.expires_at END, updated_at=excluded.updated_at`,
-					address.String(), policy.ID, policy.Name, nodeID, strings.TrimSpace(input.Host), path,
+				securityPolicyID, rateLimitPolicyID := securityEventPolicyReferences(policy)
+				_, err = tx.Exec(`INSERT INTO security_bans(ip, policy_id, rate_limit_policy_id, policy_name, trigger_node_id,
+					host, path, method, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT(ip) DO UPDATE SET policy_id=excluded.policy_id,
+					rate_limit_policy_id=excluded.rate_limit_policy_id, policy_name=excluded.policy_name,
+					trigger_node_id=excluded.trigger_node_id, host=excluded.host, path=excluded.path,
+					method=excluded.method, expires_at=CASE WHEN excluded.expires_at > security_bans.expires_at
+					THEN excluded.expires_at ELSE security_bans.expires_at END, updated_at=excluded.updated_at`,
+					address.String(), securityPolicyID, rateLimitPolicyID, policy.Name, nodeID, strings.TrimSpace(input.Host), path,
 					strings.ToUpper(strings.TrimSpace(input.Method)), stamp(expiresAt), stamp(createdAt), stamp(createdAt))
 				if err != nil {
 					return accepted, err
@@ -212,10 +230,11 @@ func (s *Store) RecordSecurityEvents(nodeID string, events []domain.SecurityEven
 		if banExpiresAt != nil {
 			encodedExpiry = stamp(*banExpiresAt)
 		}
-		_, err = tx.Exec(`INSERT INTO security_events(id, node_id, policy_id, policy_name, client_ip,
+		securityPolicyID, rateLimitPolicyID := securityEventPolicyReferences(policy)
+		_, err = tx.Exec(`INSERT INTO security_events(id, node_id, policy_id, rate_limit_policy_id, policy_name, client_ip,
 			host, path, method, action, observed_at, ban_expires_at, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, eventID, nodeID, policy.ID,
-			policy.Name, address.String(), strings.TrimSpace(input.Host), path,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, eventID, nodeID, securityPolicyID,
+			rateLimitPolicyID, policy.Name, address.String(), strings.TrimSpace(input.Host), path,
 			strings.ToUpper(strings.TrimSpace(input.Method)), policy.Action, stamp(observedAt), encodedExpiry, stamp(createdAt))
 		if err != nil {
 			return accepted, err
@@ -239,6 +258,49 @@ func (s *Store) RecordSecurityEvents(nodeID string, events []domain.SecurityEven
 	return accepted, nil
 }
 
+func securityEventPolicyForInput(tx *sql.Tx, input domain.SecurityEvent) (securityEventPolicy, error) {
+	policy, err := scanSecurityPolicy(tx.QueryRow(`SELECT `+securityPolicyColumns+` FROM security_policies WHERE id = ?`, input.PolicyID))
+	if err == nil {
+		if !policy.Enabled || input.Action != policy.Action {
+			return securityEventPolicy{}, &securityEventPolicyValidationError{
+				Err: errors.New("security event does not match an enabled policy"),
+			}
+		}
+		return securityEventPolicy{
+			ID: policy.ID, Name: policy.Name, Pattern: policy.Pattern, Action: policy.Action,
+			BanDurationSeconds: policy.BanDurationSeconds,
+		}, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return securityEventPolicy{}, err
+	}
+	ratePolicy, err := scanRateLimitPolicy(tx.QueryRow(`SELECT `+rateLimitPolicyColumns+` FROM rate_limit_policies WHERE id = ?`, input.PolicyID))
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return securityEventPolicy{}, &securityEventPolicyValidationError{
+				Err: errors.New("security event policy no longer exists"),
+			}
+		}
+		return securityEventPolicy{}, err
+	}
+	if !ratePolicy.Enabled || !ratePolicy.BanEnabled || input.Action != domain.SecurityActionBan {
+		return securityEventPolicy{}, &securityEventPolicyValidationError{
+			Err: errors.New("security event does not match an enabled policy"),
+		}
+	}
+	return securityEventPolicy{
+		ID: ratePolicy.ID, Name: ratePolicy.Name, Action: domain.SecurityActionBan,
+		BanDurationSeconds: ratePolicy.BanDurationSeconds, RateLimit: true,
+	}, nil
+}
+
+func securityEventPolicyReferences(policy securityEventPolicy) (any, any) {
+	if policy.RateLimit {
+		return nil, policy.ID
+	}
+	return policy.ID, nil
+}
+
 func (s *Store) ListActiveSecurityBans() ([]domain.SecurityBan, error) {
 	return s.listActiveSecurityBans(-1)
 }
@@ -254,7 +316,7 @@ func (s *Store) listActiveSecurityBans(limit int) ([]domain.SecurityBan, error) 
 	if err := s.ReconcileSecurity(); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Query(`SELECT ip, COALESCE(policy_id, ''), policy_name,
+	rows, err := s.db.Query(`SELECT ip, COALESCE(policy_id, rate_limit_policy_id, ''), policy_name,
 		COALESCE(trigger_node_id, ''), host, path, method, expires_at, created_at, updated_at
 		FROM security_bans ORDER BY expires_at DESC, ip LIMIT ?`, limit)
 	if err != nil {
@@ -287,7 +349,7 @@ func (s *Store) ListRecentSecurityEvents(limit int) ([]domain.SecurityEvent, err
 	if limit < 1 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id, COALESCE(node_id, ''), COALESCE(policy_id, ''), policy_name,
+	rows, err := s.db.Query(`SELECT id, COALESCE(node_id, ''), COALESCE(policy_id, rate_limit_policy_id, ''), policy_name,
 		client_ip, host, path, method, action, observed_at, ban_expires_at, created_at
 		FROM security_events ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {

@@ -123,8 +123,18 @@ func TestNormalizeRateLimitPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if policy.Name != "API failures" || policy.Key != RateLimitKeyClientIP ||
-		!slices.Equal(policy.ResponseStatusClasses, []int{4, 5}) {
+		!slices.Equal(policy.ResponseStatusClasses, []int{4, 5}) ||
+		policy.BanAfterConsecutive429 != DefaultRateLimitBanAfterConsecutive429 ||
+		policy.BanDurationSeconds != DefaultRateLimitBanDurationSeconds {
 		t.Fatalf("normalized rate limit policy = %#v", policy)
+	}
+	policy, err = NormalizeRateLimitPolicy(RateLimitPolicy{
+		Name: "ban error bursts", RequestsPerSecond: 5, ResponseConditionEnabled: true,
+		ResponseStatusClasses: []int{5, 4}, BanEnabled: true,
+		BanAfterConsecutive429: 4, BanDurationSeconds: 21600,
+	})
+	if err != nil || !policy.BanEnabled || policy.BanAfterConsecutive429 != 4 || policy.BanDurationSeconds != 21600 {
+		t.Fatalf("normalized rate limit ban policy = %#v, err=%v", policy, err)
 	}
 
 	policy, err = NormalizeRateLimitPolicy(RateLimitPolicy{
@@ -140,6 +150,11 @@ func TestNormalizeRateLimitPolicy(t *testing.T) {
 		{Name: "too high", RequestsPerSecond: MaxRateLimitRPS + 1},
 		{Name: "missing class", RequestsPerSecond: 1, ResponseConditionEnabled: true},
 		{Name: "bad class", RequestsPerSecond: 1, ResponseConditionEnabled: true, ResponseStatusClasses: []int{1}},
+		{Name: "ban without response condition", RequestsPerSecond: 1, BanEnabled: true},
+		{Name: "ban success responses", RequestsPerSecond: 1, ResponseConditionEnabled: true, ResponseStatusClasses: []int{2, 4}, BanEnabled: true},
+		{Name: "ban threshold low", RequestsPerSecond: 1, ResponseConditionEnabled: true, ResponseStatusClasses: []int{4}, BanEnabled: true, BanAfterConsecutive429: -1},
+		{Name: "ban threshold high", RequestsPerSecond: 1, ResponseConditionEnabled: true, ResponseStatusClasses: []int{5}, BanEnabled: true, BanAfterConsecutive429: MaxRateLimitBanAfterConsecutive429 + 1},
+		{Name: "ban duration", RequestsPerSecond: 1, ResponseConditionEnabled: true, ResponseStatusClasses: []int{4}, BanEnabled: true, BanDurationSeconds: 7200},
 	}
 	for _, candidate := range invalid {
 		if _, err := NormalizeRateLimitPolicy(candidate); err == nil {

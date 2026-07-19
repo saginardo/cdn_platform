@@ -269,6 +269,9 @@ export interface RateLimitPolicy {
   requests_per_second: number;
   response_condition_enabled: boolean;
   response_status_classes?: number[];
+  ban_enabled: boolean;
+  ban_after_consecutive_429: number;
+  ban_duration_seconds: number;
   created_at: string;
   updated_at: string;
 }

@@ -12,7 +12,8 @@ import (
 
 const (
 	rateLimitPolicyColumns = `id, name, enabled, requests_per_second,
-		response_condition_enabled, response_status_classes_json, created_at, updated_at`
+		response_condition_enabled, response_status_classes_json, ban_enabled,
+		ban_after_consecutive_429, ban_duration_seconds, created_at, updated_at`
 	maxRateLimitPolicies = 50
 )
 
@@ -63,9 +64,11 @@ func (s *Store) CreateRateLimitPolicy(policy domain.RateLimitPolicy) (domain.Rat
 		return domain.RateLimitPolicy{}, fmt.Errorf("rate limit policy limit of %d reached", maxRateLimitPolicies)
 	}
 	_, err = tx.Exec(`INSERT INTO rate_limit_policies(id, name, enabled, requests_per_second,
-		response_condition_enabled, response_status_classes_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, policy.ID, policy.Name, boolInt(policy.Enabled),
+		response_condition_enabled, response_status_classes_json, ban_enabled,
+		ban_after_consecutive_429, ban_duration_seconds, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, policy.ID, policy.Name, boolInt(policy.Enabled),
 		policy.RequestsPerSecond, boolInt(policy.ResponseConditionEnabled), string(classes),
+		boolInt(policy.BanEnabled), policy.BanAfterConsecutive429, policy.BanDurationSeconds,
 		stamp(policy.CreatedAt), stamp(policy.UpdatedAt))
 	if err != nil {
 		return domain.RateLimitPolicy{}, err
@@ -88,9 +91,11 @@ func (s *Store) UpdateRateLimitPolicy(id string, policy domain.RateLimitPolicy) 
 	}
 	updatedAt := now()
 	result, err := s.db.Exec(`UPDATE rate_limit_policies SET name = ?, enabled = ?, requests_per_second = ?,
-		response_condition_enabled = ?, response_status_classes_json = ?, updated_at = ? WHERE id = ?`,
+		response_condition_enabled = ?, response_status_classes_json = ?, ban_enabled = ?,
+		ban_after_consecutive_429 = ?, ban_duration_seconds = ?, updated_at = ? WHERE id = ?`,
 		policy.Name, boolInt(policy.Enabled), policy.RequestsPerSecond,
-		boolInt(policy.ResponseConditionEnabled), string(classes), stamp(updatedAt), id)
+		boolInt(policy.ResponseConditionEnabled), string(classes), boolInt(policy.BanEnabled),
+		policy.BanAfterConsecutive429, policy.BanDurationSeconds, stamp(updatedAt), id)
 	if err != nil {
 		return domain.RateLimitPolicy{}, err
 	}
@@ -121,10 +126,11 @@ func (s *Store) DeleteRateLimitPolicy(id string) error {
 
 func scanRateLimitPolicy(row scanner) (domain.RateLimitPolicy, error) {
 	var policy domain.RateLimitPolicy
-	var enabled, responseConditionEnabled int
+	var enabled, responseConditionEnabled, banEnabled int
 	var classesJSON, createdAt, updatedAt string
 	err := row.Scan(&policy.ID, &policy.Name, &enabled, &policy.RequestsPerSecond,
-		&responseConditionEnabled, &classesJSON, &createdAt, &updatedAt)
+		&responseConditionEnabled, &classesJSON, &banEnabled, &policy.BanAfterConsecutive429,
+		&policy.BanDurationSeconds, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.RateLimitPolicy{}, ErrNotFound
 	}
@@ -133,6 +139,7 @@ func scanRateLimitPolicy(row scanner) (domain.RateLimitPolicy, error) {
 	}
 	policy.Enabled = enabled != 0
 	policy.ResponseConditionEnabled = responseConditionEnabled != 0
+	policy.BanEnabled = banEnabled != 0
 	policy.Key = domain.RateLimitKeyClientIP
 	if err := json.Unmarshal([]byte(classesJSON), &policy.ResponseStatusClasses); err != nil {
 		return domain.RateLimitPolicy{}, fmt.Errorf("decode rate limit response classes: %w", err)

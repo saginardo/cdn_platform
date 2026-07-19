@@ -61,6 +61,10 @@ log_format cdn_json escape=json '{"request_id":"$request_id","timestamp":"$time_
 {{if .SecurityEnabled}}    access_log /opt/cdn-edge/logs/security.json cdn_security_json if=$cdn_security_policy_id;
     if ($cdn_security_policy_id) { return 444; }
 {{end}}
+{{if .RateLimitBanEnabled}}    set $cdn_rate_limit_ban_policy_id "";
+    set $cdn_rate_limit_ban_seconds 0;
+    access_log /opt/cdn-edge/logs/security.json cdn_rate_limit_ban_json if=$cdn_rate_limit_ban_policy_id;
+{{end}}
     location = /__cdn_health { access_log off; add_header Content-Type text/plain; return 200 "ok\n"; }
 {{if .RateLimitEnabled}}    location / {
         access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
@@ -105,6 +109,10 @@ server {
     {{if $.SecurityEnabled}}access_log /opt/cdn-edge/logs/security.json cdn_security_json if=$cdn_security_policy_id;
     if ($cdn_security_policy_id) { return 444; }
     {{end}}
+    {{if $.RateLimitBanEnabled}}set $cdn_rate_limit_ban_policy_id "";
+    set $cdn_rate_limit_ban_seconds 0;
+    access_log /opt/cdn-edge/logs/security.json cdn_rate_limit_ban_json if=$cdn_rate_limit_ban_policy_id;
+    {{end}}
     {{if $.RateLimitEnabled}}location / {
         access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
         header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
@@ -124,6 +132,10 @@ server {
     keepalive_requests {{$.ClientKeepaliveRequests}};
     {{if $.SecurityEnabled}}access_log /opt/cdn-edge/logs/security.json cdn_security_json if=$cdn_security_policy_id;
     if ($cdn_security_policy_id) { return 444; }
+    {{end}}
+    {{if $.RateLimitBanEnabled}}set $cdn_rate_limit_ban_policy_id "";
+    set $cdn_rate_limit_ban_seconds 0;
+    access_log /opt/cdn-edge/logs/security.json cdn_rate_limit_ban_json if=$cdn_rate_limit_ban_policy_id;
     {{end}}
 
     ssl_certificate /opt/cdn-edge/config/certs/{{.ID}}.crt;
@@ -409,6 +421,7 @@ type renderInput struct {
 	SecurityEnabled              bool
 	SecurityConfig               string
 	RateLimitEnabled             bool
+	RateLimitBanEnabled          bool
 	RateLimitConfig              string
 	ClientKeepaliveTimeout       string
 	ClientKeepaliveRequests      int
@@ -542,6 +555,7 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 		SecurityEnabled:              len(enabledSecurityPolicies(securityPolicies)) > 0 && !dedicatedTCP,
 		SecurityConfig:               renderSecurityConfig(securityPolicies, !dedicatedTCP),
 		RateLimitEnabled:             len(enabledRateLimitPolicies(rateLimitPolicies)) > 0 && !dedicatedTCP,
+		RateLimitBanEnabled:          hasEnabledRateLimitBanPolicy(rateLimitPolicies) && !dedicatedTCP,
 		RateLimitConfig:              renderRateLimitConfig(rateLimitPolicies, !dedicatedTCP),
 		ClientKeepaliveTimeout:       defaultClientKeepaliveTimeout,
 		ClientKeepaliveRequests:      defaultClientKeepaliveRequests,
@@ -678,6 +692,15 @@ func enabledRateLimitPolicies(policies []domain.RateLimitPolicy) []domain.RateLi
 	return result
 }
 
+func hasEnabledRateLimitBanPolicy(policies []domain.RateLimitPolicy) bool {
+	for _, policy := range policies {
+		if policy.Enabled && policy.BanEnabled {
+			return true
+		}
+	}
+	return false
+}
+
 func enabledSecurityPolicies(policies []domain.SecurityPolicy) []domain.SecurityPolicy {
 	result := make([]domain.SecurityPolicy, 0, len(policies))
 	for _, policy := range policies {
@@ -736,8 +759,15 @@ func renderRateLimitConfig(policies []domain.RateLimitPolicy, httpEnabled bool) 
 	if len(policies) == 0 || !httpEnabled {
 		return result.String()
 	}
-	result.WriteString(`lua_shared_dict cdn_rate_limit 20m;
-init_by_lua_block {
+	result.WriteString("lua_shared_dict cdn_rate_limit 20m;\n")
+	if hasEnabledRateLimitBanPolicy(policies) {
+		result.WriteString(`lua_shared_dict cdn_rate_limit_escalation 10m;
+map $request_id $cdn_rate_limit_ban_policy_id { default ""; }
+map $request_id $cdn_rate_limit_ban_seconds { default 0; }
+log_format cdn_rate_limit_ban_json escape=json '{"timestamp":"$time_iso8601","policy_id":"$cdn_rate_limit_ban_policy_id","action":"ban","ban_seconds":$cdn_rate_limit_ban_seconds,"client_ip":"$remote_addr","host":"$host","method":"$request_method","path":"$uri"}';
+`)
+	}
+	result.WriteString(`init_by_lua_block {
     local policies = {
 `)
 	for _, policy := range policies {
@@ -754,6 +784,10 @@ init_by_lua_block {
 				result.WriteString(fmt.Sprintf("[%d] = true", class))
 			}
 			result.WriteString(" }")
+		}
+		if policy.BanEnabled {
+			result.WriteString(fmt.Sprintf(", ban_after = %d, ban_seconds = %d",
+				policy.BanAfterConsecutive429, policy.BanDurationSeconds))
 		}
 		result.WriteString(" },\n")
 	}
@@ -780,7 +814,47 @@ init_by_lua_block {
         return current + previous * (1 - (now - second))
     end
 
-    local function reject()
+    local function escalation_key(kind, policy, client_ip)
+        return kind .. ":" .. policy.id .. ":" .. client_ip
+    end
+
+    local function reset_rejection_streak(policy, client_ip)
+        if policy.ban_after == nil then
+            return
+        end
+        ngx.shared.cdn_rate_limit_escalation:delete(escalation_key("streak", policy, client_ip))
+    end
+
+    local function record_rejection(policy, client_ip)
+        if policy.ban_after == nil then
+            return
+        end
+        local escalation = ngx.shared.cdn_rate_limit_escalation
+        local event_key = escalation_key("event", policy, client_ip)
+        if escalation:get(event_key) then
+            return
+        end
+        local streak_key = escalation_key("streak", policy, client_ip)
+        local strikes = escalation:incr(streak_key, 1, 0, key_ttl)
+        if strikes == nil then
+            return
+        end
+        escalation:expire(streak_key, key_ttl)
+        if strikes < policy.ban_after then
+            return
+        end
+        local recorded = escalation:add(event_key, true, policy.ban_seconds)
+        escalation:delete(streak_key)
+        if not recorded then
+            return
+        end
+        ngx.var.cdn_rate_limit_ban_policy_id = policy.id
+        ngx.var.cdn_rate_limit_ban_seconds = tostring(policy.ban_seconds)
+    end
+
+    local function reject(policy, client_ip)
+        ngx.ctx.cdn_rate_limit_rejected = true
+        record_rejection(policy, client_ip)
         ngx.header["Retry-After"] = "1"
         ngx.header["Cache-Control"] = "no-store"
         return ngx.exit(429)
@@ -801,13 +875,16 @@ init_by_lua_block {
             local rate = window_rate(dict, policy, client_ip, now, count_requests)
             if rate ~= nil and ((count_requests and rate > policy.limit) or
                 (not count_requests and rate >= policy.limit)) then
-                return reject()
+                return reject(policy, client_ip)
+            end
+            if rate ~= nil then
+                reset_rejection_streak(policy, client_ip)
             end
         end
     end
 
     local function response()
-        if ngx.is_subrequest then
+        if ngx.is_subrequest or ngx.ctx.cdn_rate_limit_rejected then
             return
         end
         local client_ip = ngx.var.remote_addr
@@ -867,6 +944,9 @@ func RateLimitRevisionMarker(policies []domain.RateLimitPolicy) string {
 		RequestsPerSecond        int
 		ResponseConditionEnabled bool
 		ResponseStatusClasses    []int
+		BanEnabled               bool
+		BanAfterConsecutive429   int
+		BanDurationSeconds       int
 	}
 	ordered := append([]domain.RateLimitPolicy(nil), policies...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].ID < ordered[j].ID })
@@ -880,6 +960,9 @@ func RateLimitRevisionMarker(policies []domain.RateLimitPolicy) string {
 			RequestsPerSecond:        policy.RequestsPerSecond,
 			ResponseConditionEnabled: policy.ResponseConditionEnabled,
 			ResponseStatusClasses:    append([]int(nil), policy.ResponseStatusClasses...),
+			BanEnabled:               policy.BanEnabled,
+			BanAfterConsecutive429:   policy.BanAfterConsecutive429,
+			BanDurationSeconds:       policy.BanDurationSeconds,
 		})
 	}
 	encoded, _ := json.Marshal(revision)

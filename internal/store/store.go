@@ -320,12 +320,16 @@ CREATE TABLE IF NOT EXISTS node_uninstall_jobs (
 	  requests_per_second INTEGER NOT NULL,
 	  response_condition_enabled INTEGER NOT NULL DEFAULT 0,
 	  response_status_classes_json TEXT NOT NULL DEFAULT '[]',
+	  ban_enabled INTEGER NOT NULL DEFAULT 0,
+	  ban_after_consecutive_429 INTEGER NOT NULL DEFAULT 3,
+	  ban_duration_seconds INTEGER NOT NULL DEFAULT 3600,
 	  created_at TEXT NOT NULL,
 	  updated_at TEXT NOT NULL
 	);
 	CREATE TABLE IF NOT EXISTS security_bans (
 	  ip TEXT PRIMARY KEY,
 	  policy_id TEXT REFERENCES security_policies(id) ON DELETE SET NULL,
+	  rate_limit_policy_id TEXT REFERENCES rate_limit_policies(id) ON DELETE SET NULL,
 	  policy_name TEXT NOT NULL,
 	  trigger_node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
 	  host TEXT NOT NULL DEFAULT '',
@@ -339,6 +343,7 @@ CREATE TABLE IF NOT EXISTS node_uninstall_jobs (
 	  id TEXT PRIMARY KEY,
 	  node_id TEXT REFERENCES nodes(id) ON DELETE SET NULL,
 	  policy_id TEXT REFERENCES security_policies(id) ON DELETE SET NULL,
+	  rate_limit_policy_id TEXT REFERENCES rate_limit_policies(id) ON DELETE SET NULL,
 	  policy_name TEXT NOT NULL,
 	  client_ip TEXT NOT NULL,
 	  host TEXT NOT NULL DEFAULT '',

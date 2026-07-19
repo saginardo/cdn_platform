@@ -334,6 +334,7 @@ export function SecurityPage() {
                         <TableHead>计数 Key</TableHead>
                         <TableHead>阈值</TableHead>
                         <TableHead>响应条件</TableHead>
+                        <TableHead>升级动作</TableHead>
                         <TableHead>状态</TableHead>
                         <TableHead className="text-right">操作</TableHead>
                       </TableRow>
@@ -354,6 +355,11 @@ export function SecurityPage() {
                                   ?.map((code) => `${code}xx`)
                                   .join("、") || "无有效条件"
                               : "全部请求"}
+                          </TableCell>
+                          <TableCell>
+                            {item.ban_enabled
+                              ? `连续 ${formatNumber(item.ban_after_consecutive_429)} 次 429 · 封禁 ${durationLabel(item.ban_duration_seconds)}`
+                              : "仅返回 429"}
                           </TableCell>
                           <TableCell>
                             <StatusBadge
@@ -855,6 +861,13 @@ function RateDialogShell({
   const [classes, setClasses] = useState<number[]>(
     existing?.response_status_classes ?? [4, 5],
   );
+  const [banEnabled, setBanEnabled] = useState(existing?.ban_enabled ?? false);
+  const [banAfter, setBanAfter] = useState(
+    existing?.ban_after_consecutive_429 ?? 3,
+  );
+  const [banDuration, setBanDuration] = useState(
+    existing?.ban_duration_seconds ?? 3600,
+  );
   const mutation = useMutation({
     mutationFn: () =>
       api<SecurityOverview>(
@@ -869,6 +882,9 @@ function RateDialogShell({
             requests_per_second: rps,
             response_condition_enabled: conditional,
             response_status_classes: conditional ? classes : [],
+            ban_enabled: banEnabled,
+            ban_after_consecutive_429: banAfter,
+            ban_duration_seconds: banDuration,
           }),
         },
       ),
@@ -885,7 +901,7 @@ function RateDialogShell({
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent>
+      <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-xl">
         <form onSubmit={submit}>
           <DialogHeader>
             <DialogTitle>
@@ -934,6 +950,7 @@ function RateDialogShell({
               <Switch
                 id="rate-conditional"
                 checked={conditional}
+                disabled={banEnabled}
                 onCheckedChange={setConditional}
               />
             </div>
@@ -946,6 +963,7 @@ function RateDialogShell({
                   >
                     <Checkbox
                       checked={classes.includes(code)}
+                      disabled={banEnabled && code < 4}
                       onCheckedChange={(checked) =>
                         setClasses(
                           checked
@@ -959,6 +977,66 @@ function RateDialogShell({
                 ))}
               </div>
             ) : null}
+            <div className="flex items-center justify-between border px-3 py-2 sm:col-span-2">
+              <div>
+                <Label htmlFor="rate-ban-enabled">连续超限后封禁 IP</Label>
+                <p className="text-xs text-muted-foreground">
+                  达到连续 429 次数后触发边缘封禁
+                </p>
+              </div>
+              <Switch
+                id="rate-ban-enabled"
+                checked={banEnabled}
+                onCheckedChange={(checked) => {
+                  setBanEnabled(checked);
+                  if (checked) {
+                    setConditional(true);
+                    setClasses((current) => {
+                      const errorClasses = current.filter(
+                        (code) => code === 4 || code === 5,
+                      );
+                      return errorClasses.length ? errorClasses : [4, 5];
+                    });
+                  }
+                }}
+              />
+            </div>
+            {banEnabled ? (
+              <>
+                <Field label="连续 429 次数" id="rate-ban-after">
+                  <Input
+                    id="rate-ban-after"
+                    type="number"
+                    min={1}
+                    max={100}
+                    required
+                    value={banAfter}
+                    onChange={(event) =>
+                      setBanAfter(Number(event.target.value))
+                    }
+                  />
+                </Field>
+                <div className="grid gap-2">
+                  <Label>封禁时间</Label>
+                  <Select
+                    value={String(banDuration)}
+                    onValueChange={(value) => setBanDuration(Number(value))}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="3600">1 小时</SelectItem>
+                      <SelectItem value="21600">6 小时</SelectItem>
+                      <SelectItem value="43200">12 小时</SelectItem>
+                      <SelectItem value="86400">24 小时</SelectItem>
+                      <SelectItem value="259200">3 天</SelectItem>
+                      <SelectItem value="604800">7 天</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </>
+            ) : null}
           </div>
           <DialogFooter>
             <Button
@@ -970,7 +1048,15 @@ function RateDialogShell({
             </Button>
             <Button
               type="submit"
-              disabled={mutation.isPending || (conditional && !classes.length)}
+              disabled={
+                mutation.isPending ||
+                (conditional && !classes.length) ||
+                (banEnabled &&
+                  (!conditional ||
+                    classes.some((code) => code !== 4 && code !== 5) ||
+                    banAfter < 1 ||
+                    banAfter > 100))
+              }
             >
               {mutation.isPending ? (
                 <LoaderCircle className="animate-spin" />

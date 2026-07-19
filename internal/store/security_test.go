@@ -106,6 +106,53 @@ func TestSecurityPolicyAndBanLifecycle(t *testing.T) {
 	}
 }
 
+func TestRateLimitBanEventLifecycle(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("rate-limit-edge", "203.0.113.91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := database.CreateRateLimitPolicy(domain.RateLimitPolicy{
+		Name: "error bursts", Enabled: true, RequestsPerSecond: 5,
+		ResponseConditionEnabled: true, ResponseStatusClasses: []int{4, 5},
+		BanEnabled: true, BanAfterConsecutive429: 3, BanDurationSeconds: 3600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.SecurityEvent{
+		ID: "77777777-7777-4777-8777-777777777777", PolicyID: policy.ID,
+		ClientIP: "9.9.9.9", Host: "cdn.example.test", Path: "/api/failures",
+		Method: "GET", Action: domain.SecurityActionBan, BanDurationSeconds: 3600,
+		ObservedAt: time.Now().UTC(),
+	}
+	if accepted, err := database.RecordSecurityEvents(node.ID, []domain.SecurityEvent{event}); err != nil || accepted != 1 {
+		t.Fatalf("record rate limit event accepted=%d, err=%v", accepted, err)
+	}
+	bans, err := database.ListActiveSecurityBans()
+	if err != nil || len(bans) != 1 || bans[0].IP != event.ClientIP || bans[0].PolicyID != policy.ID || bans[0].PolicyName != policy.Name {
+		t.Fatalf("rate limit bans = %#v, err=%v", bans, err)
+	}
+	events, err := database.ListRecentSecurityEvents(10)
+	if err != nil || len(events) != 1 || events[0].PolicyID != policy.ID || events[0].PolicyName != policy.Name {
+		t.Fatalf("rate limit events = %#v, err=%v", events, err)
+	}
+
+	policy.BanEnabled = false
+	if _, err := database.UpdateRateLimitPolicy(policy.ID, policy); err != nil {
+		t.Fatal(err)
+	}
+	event.ID = "88888888-8888-4888-8888-888888888888"
+	event.ClientIP = "8.8.4.4"
+	if _, err := database.RecordSecurityEvents(node.ID, []domain.SecurityEvent{event}); err == nil {
+		t.Fatal("disabled rate limit ban policy accepted an event")
+	}
+}
+
 func TestBuiltinSecurityPolicyMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "control.db")
 	database, err := Open(path)

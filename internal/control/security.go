@@ -50,6 +50,9 @@ type rateLimitPolicyRequest struct {
 	RequestsPerSecond        int    `json:"requests_per_second"`
 	ResponseConditionEnabled bool   `json:"response_condition_enabled"`
 	ResponseStatusClasses    []int  `json:"response_status_classes"`
+	BanEnabled               bool   `json:"ban_enabled"`
+	BanAfterConsecutive429   int    `json:"ban_after_consecutive_429"`
+	BanDurationSeconds       int    `json:"ban_duration_seconds"`
 }
 
 func (s *Server) securityOverview(deploymentErr error) (securityOverviewResponse, error) {
@@ -86,7 +89,8 @@ func (s *Server) securityOverview(deploymentErr error) (securityOverviewResponse
 		configured, rateLimitConfigured := false, false
 		if nodeState, _, stateErr := s.Store.NodeState(node.ID); stateErr == nil {
 			configured = nginx.HasSecurityRevision(nodeState.NginxConfig, policies)
-			rateLimitConfigured = nginx.HasRateLimitRevision(nodeState.NginxConfig, rateLimitPolicies)
+			nodeRateLimitPolicies := rateLimitPoliciesForCapabilities(rateLimitPolicies, node.Capabilities)
+			rateLimitConfigured = nginx.HasRateLimitRevision(nodeState.NginxConfig, nodeRateLimitPolicies)
 		} else if !errors.Is(stateErr, store.ErrNotFound) {
 			return securityOverviewResponse{}, stateErr
 		}
@@ -130,6 +134,9 @@ func rateLimitPolicyFromRequest(input rateLimitPolicyRequest) domain.RateLimitPo
 		Name: input.Name, Enabled: input.Enabled, RequestsPerSecond: input.RequestsPerSecond,
 		ResponseConditionEnabled: input.ResponseConditionEnabled,
 		ResponseStatusClasses:    input.ResponseStatusClasses,
+		BanEnabled:               input.BanEnabled,
+		BanAfterConsecutive429:   input.BanAfterConsecutive429,
+		BanDurationSeconds:       input.BanDurationSeconds,
 	}
 }
 

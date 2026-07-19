@@ -23,6 +23,26 @@ var schemaMigrations = []schemaMigration{
 	{Version: 6, Name: "message-dismissal", Apply: migrateMessageDismissal},
 	{Version: 7, Name: "branding-settings", Apply: migrateBrandingSettings},
 	{Version: 8, Name: "ephemeral-machine-status-and-cache-limits", Apply: migrateCacheLimits},
+	{Version: 9, Name: "rate-limit-ban-escalation", Apply: migrateRateLimitBanEscalation},
+}
+
+func migrateRateLimitBanEscalation(tx *sql.Tx) error {
+	for _, column := range []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"rate_limit_policies", "ban_enabled", "ban_enabled INTEGER NOT NULL DEFAULT 0"},
+		{"rate_limit_policies", "ban_after_consecutive_429", "ban_after_consecutive_429 INTEGER NOT NULL DEFAULT 3"},
+		{"rate_limit_policies", "ban_duration_seconds", "ban_duration_seconds INTEGER NOT NULL DEFAULT 3600"},
+		{"security_bans", "rate_limit_policy_id", "rate_limit_policy_id TEXT REFERENCES rate_limit_policies(id) ON DELETE SET NULL"},
+		{"security_events", "rate_limit_policy_id", "rate_limit_policy_id TEXT REFERENCES rate_limit_policies(id) ON DELETE SET NULL"},
+	} {
+		if err := addColumnIfMissing(tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func migrateCacheLimits(tx *sql.Tx) error {

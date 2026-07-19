@@ -139,6 +139,46 @@ func TestEdgeSecurityEventsReportsRejectedEventIndex(t *testing.T) {
 	}
 }
 
+func TestEdgeRateLimitBanEventIsAccepted(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("rate-limit-edge", "203.0.113.92")
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := database.CreateRateLimitPolicy(domain.RateLimitPolicy{
+		Name: "error burst", Enabled: true, RequestsPerSecond: 5,
+		ResponseConditionEnabled: true, ResponseStatusClasses: []int{4, 5},
+		BanEnabled: true, BanAfterConsecutive429: 3, BanDurationSeconds: 3600,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := domain.EdgeSecurityEventBatch{Events: []domain.SecurityEvent{{
+		ID: "99999999-9999-4999-8999-999999999999", PolicyID: policy.ID,
+		ClientIP: "9.9.9.9", Host: "cdn.example.test", Path: "/api/failures", Method: "GET",
+		Action: domain.SecurityActionBan, BanDurationSeconds: 3600, ObservedAt: time.Now().UTC(),
+	}}}
+	payload, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/edge/v1/security-events", bytes.NewReader(payload))
+	request = request.WithContext(context.WithValue(request.Context(), edgeContextKey{}, node.ID))
+	response := httptest.NewRecorder()
+	(&Server{Store: database}).edgeSecurityEvents(response, request)
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", response.Code, response.Body.String())
+	}
+	bans, err := database.ListActiveSecurityBans()
+	if err != nil || len(bans) != 1 || bans[0].IP != "9.9.9.9" || bans[0].PolicyID != policy.ID {
+		t.Fatalf("rate limit bans = %#v, err=%v", bans, err)
+	}
+}
+
 func TestSecurityOverviewReportsCoverage(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
@@ -171,9 +211,10 @@ func TestRateLimitPolicyAPI(t *testing.T) {
 	server := &Server{Store: database, Publisher: Publisher{Store: database}}
 
 	request := httptest.NewRequest(http.MethodPost, "/api/security/rate-limit-policies", strings.NewReader(`{
-		"name":"API errors","enabled":true,"requests_per_second":8,
-		"response_condition_enabled":true,"response_status_classes":[5,4]
-	}`))
+			"name":"API errors","enabled":true,"requests_per_second":8,
+			"response_condition_enabled":true,"response_status_classes":[5,4],
+			"ban_enabled":true,"ban_after_consecutive_429":3,"ban_duration_seconds":3600
+		}`))
 	response := httptest.NewRecorder()
 	server.createRateLimitPolicy(response, request)
 	if response.Code != http.StatusCreated {
@@ -184,14 +225,16 @@ func TestRateLimitPolicyAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(overview.RateLimitPolicies) != 1 || overview.RateLimitPolicies[0].Key != domain.RateLimitKeyClientIP ||
-		overview.RateLimitPolicies[0].ResponseStatusClasses[0] != 4 {
+		overview.RateLimitPolicies[0].ResponseStatusClasses[0] != 4 || !overview.RateLimitPolicies[0].BanEnabled ||
+		overview.RateLimitPolicies[0].BanAfterConsecutive429 != 3 || overview.RateLimitPolicies[0].BanDurationSeconds != 3600 {
 		t.Fatalf("create response = %#v", overview.RateLimitPolicies)
 	}
 	policyID := overview.RateLimitPolicies[0].ID
 
 	request = httptest.NewRequest(http.MethodPut, "/api/security/rate-limit-policies/"+policyID, strings.NewReader(`{
-		"name":"All traffic","enabled":true,"requests_per_second":30,
-		"response_condition_enabled":false,"response_status_classes":[4,5]
+			"name":"All traffic","enabled":true,"requests_per_second":30,
+			"response_condition_enabled":false,"response_status_classes":[4,5],
+			"ban_enabled":false,"ban_after_consecutive_429":3,"ban_duration_seconds":3600
 	}`))
 	request.SetPathValue("id", policyID)
 	response = httptest.NewRecorder()
@@ -205,8 +248,9 @@ func TestRateLimitPolicyAPI(t *testing.T) {
 	}
 
 	request = httptest.NewRequest(http.MethodPut, "/api/security/rate-limit-policies/"+policyID, strings.NewReader(`{
-		"name":"Invalid","enabled":true,"requests_per_second":30,
-		"response_condition_enabled":true,"response_status_classes":[]
+			"name":"Invalid","enabled":true,"requests_per_second":30,
+			"response_condition_enabled":true,"response_status_classes":[],
+			"ban_enabled":true,"ban_after_consecutive_429":3,"ban_duration_seconds":3600
 	}`))
 	request.SetPathValue("id", policyID)
 	response = httptest.NewRecorder()
@@ -224,5 +268,26 @@ func TestRateLimitPolicyAPI(t *testing.T) {
 	}
 	if _, err := database.RateLimitPolicy(policyID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("deleted policy lookup = %v", err)
+	}
+}
+
+func TestRateLimitBanPoliciesRequireRateAndSecurityCapabilities(t *testing.T) {
+	policies := []domain.RateLimitPolicy{{
+		ID: "99999999-9999-4999-8999-999999999999", Name: "errors", Enabled: true,
+		RequestsPerSecond: 5, ResponseConditionEnabled: true, ResponseStatusClasses: []int{4, 5},
+		BanEnabled: true, BanAfterConsecutive429: 3, BanDurationSeconds: 3600,
+	}}
+	if got := rateLimitPoliciesForCapabilities(policies, nil); got != nil {
+		t.Fatalf("node without rate limit capability received policies: %#v", got)
+	}
+	rateOnly := rateLimitPoliciesForCapabilities(policies, []string{domain.EdgeCapabilityRateLimit})
+	if len(rateOnly) != 1 || rateOnly[0].BanEnabled || !policies[0].BanEnabled {
+		t.Fatalf("rate-only policy downgrade = %#v, original=%#v", rateOnly, policies)
+	}
+	fullyCapable := rateLimitPoliciesForCapabilities(policies, []string{
+		domain.EdgeCapabilityRateLimit, domain.EdgeCapabilitySecurity,
+	})
+	if len(fullyCapable) != 1 || !fullyCapable[0].BanEnabled {
+		t.Fatalf("fully capable policies = %#v", fullyCapable)
 	}
 }

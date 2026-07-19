@@ -91,7 +91,7 @@ func TestLatestMigrationDropsMachineStatusAndAddsCacheDefaults(t *testing.T) {
 	if _, err := database.db.Exec(`CREATE TABLE node_machine_status (node_id TEXT PRIMARY KEY)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version = 8`); err != nil {
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version >= 8`); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Migrate(); err != nil {
@@ -121,6 +121,57 @@ func TestLatestMigrationDropsMachineStatusAndAddsCacheDefaults(t *testing.T) {
 		if !found {
 			t.Fatalf("missing %s.%s after migration", table, column)
 		}
+	}
+}
+
+func TestRateLimitBanEscalationMigrationAddsLegacyColumns(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`PRAGMA foreign_keys = ON;
+		CREATE TABLE rate_limit_policies (id TEXT PRIMARY KEY);
+		CREATE TABLE security_bans (ip TEXT PRIMARY KEY);
+		CREATE TABLE security_events (id TEXT PRIMARY KEY);`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateRateLimitBanEscalation(tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for table, columns := range map[string][]string{
+		"rate_limit_policies": {"ban_enabled", "ban_after_consecutive_429", "ban_duration_seconds"},
+		"security_bans":       {"rate_limit_policy_id"},
+		"security_events":     {"rate_limit_policy_id"},
+	} {
+		for _, column := range columns {
+			found, err := columnExists(database, table, column)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !found {
+				t.Fatalf("missing migrated column %s.%s", table, column)
+			}
+		}
+	}
+	if _, err := database.Exec(`INSERT INTO rate_limit_policies(id) VALUES ('policy')`); err != nil {
+		t.Fatal(err)
+	}
+	var enabled, after, duration int
+	if err := database.QueryRow(`SELECT ban_enabled, ban_after_consecutive_429, ban_duration_seconds
+		FROM rate_limit_policies WHERE id = 'policy'`).Scan(&enabled, &after, &duration); err != nil {
+		t.Fatal(err)
+	}
+	if enabled != 0 || after != 3 || duration != 3600 {
+		t.Fatalf("migrated defaults = enabled:%d after:%d duration:%d", enabled, after, duration)
 	}
 }
 

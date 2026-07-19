@@ -10,11 +10,15 @@ import (
 )
 
 const (
-	EdgeCapabilitySecurity  = "edge_security_v1"
-	EdgeCapabilityRateLimit = "edge_rate_limit_v1"
-	RateLimitKeyClientIP    = "client_ip"
-	MinRateLimitRPS         = 1
-	MaxRateLimitRPS         = 100000
+	EdgeCapabilitySecurity                 = "edge_security_v1"
+	EdgeCapabilityRateLimit                = "edge_rate_limit_v1"
+	RateLimitKeyClientIP                   = "client_ip"
+	MinRateLimitRPS                        = 1
+	MaxRateLimitRPS                        = 100000
+	DefaultRateLimitBanAfterConsecutive429 = 3
+	MinRateLimitBanAfterConsecutive429     = 1
+	MaxRateLimitBanAfterConsecutive429     = 100
+	DefaultRateLimitBanDurationSeconds     = 3600
 
 	DefaultSecurityPolicyID      = "00000000-0000-4000-8000-000000000001"
 	DefaultSecurityPolicyPattern = `(?i)^/+(?:[^/]+/)*(?:\.env(?:[._~-][A-Za-z0-9][A-Za-z0-9._~-]*)?|\.git(?:config|-credentials)?(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.(?:aws|azure|docker|svn|hg|ssh|kube|gnupg|terraform)|\.ht(?:access|passwd)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|\.DS_Store|\.(?:npmrc|pypirc|netrc)|\.(?:bash|zsh|mysql|psql|rediscli|python)_history|id_(?:rsa|dsa|ecdsa|ed25519)(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?|terraform\.tfstate(?:\.backup)?|wp-config\.php(?:[._~-](?:old|bak|backup|save|txt|new|swp|orig|copy|disabled|zip|gz|tgz|tar|7z|rar|[0-9]+))?)(?:/|$)`
@@ -53,6 +57,9 @@ type RateLimitPolicy struct {
 	RequestsPerSecond        int       `json:"requests_per_second"`
 	ResponseConditionEnabled bool      `json:"response_condition_enabled"`
 	ResponseStatusClasses    []int     `json:"response_status_classes,omitempty"`
+	BanEnabled               bool      `json:"ban_enabled"`
+	BanAfterConsecutive429   int       `json:"ban_after_consecutive_429"`
+	BanDurationSeconds       int       `json:"ban_duration_seconds"`
 	CreatedAt                time.Time `json:"created_at"`
 	UpdatedAt                time.Time `json:"updated_at"`
 }
@@ -162,14 +169,30 @@ func NormalizeSecurityPolicy(policy SecurityPolicy) (SecurityPolicy, error) {
 func NormalizeRateLimitPolicy(policy RateLimitPolicy) (RateLimitPolicy, error) {
 	policy.Name = strings.TrimSpace(policy.Name)
 	policy.Key = RateLimitKeyClientIP
+	if policy.BanAfterConsecutive429 == 0 {
+		policy.BanAfterConsecutive429 = DefaultRateLimitBanAfterConsecutive429
+	}
+	if policy.BanDurationSeconds == 0 {
+		policy.BanDurationSeconds = DefaultRateLimitBanDurationSeconds
+	}
 	if policy.Name == "" || len(policy.Name) > 80 {
 		return RateLimitPolicy{}, errors.New("rate limit policy name must be 1-80 characters")
 	}
 	if policy.RequestsPerSecond < MinRateLimitRPS || policy.RequestsPerSecond > MaxRateLimitRPS {
 		return RateLimitPolicy{}, errors.New("rate limit requests per second is out of range")
 	}
+	if policy.BanAfterConsecutive429 < MinRateLimitBanAfterConsecutive429 ||
+		policy.BanAfterConsecutive429 > MaxRateLimitBanAfterConsecutive429 {
+		return RateLimitPolicy{}, errors.New("rate limit consecutive 429 ban threshold is out of range")
+	}
+	if !ValidSecurityBanDuration(policy.BanDurationSeconds) {
+		return RateLimitPolicy{}, errors.New("rate limit ban duration is not supported")
+	}
 	if !policy.ResponseConditionEnabled {
 		policy.ResponseStatusClasses = nil
+		if policy.BanEnabled {
+			return RateLimitPolicy{}, errors.New("rate limit IP ban requires a response condition")
+		}
 		return policy, nil
 	}
 	if len(policy.ResponseStatusClasses) == 0 {
@@ -187,6 +210,13 @@ func NormalizeRateLimitPolicy(policy RateLimitPolicy) (RateLimitPolicy, error) {
 		}
 	}
 	policy.ResponseStatusClasses = normalized
+	if policy.BanEnabled {
+		for _, class := range policy.ResponseStatusClasses {
+			if class != 4 && class != 5 {
+				return RateLimitPolicy{}, errors.New("rate limit IP ban response conditions are limited to 4xx and 5xx")
+			}
+		}
+	}
 	return policy, nil
 }
 

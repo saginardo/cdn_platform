@@ -63,6 +63,20 @@ func TestDecodeSecurityLogAndApplyLocalBan(t *testing.T) {
 	}
 }
 
+func TestDecodeRateLimitBanLog(t *testing.T) {
+	policyID := "99999999-9999-4999-8999-999999999999"
+	event, err := decodeSecurityLog([]byte(fmt.Sprintf(
+		`{"timestamp":"%s","policy_id":"%s","action":"ban","ban_seconds":3600,"client_ip":"9.9.9.9","host":"cdn.example.test","method":"POST","path":"/api/failures"}`,
+		time.Now().UTC().Format(time.RFC3339), policyID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.PolicyID != policyID || event.ClientIP != "9.9.9.9" || event.Action != domain.SecurityActionBan ||
+		event.BanDurationSeconds != 3600 || event.Path != "/api/failures" {
+		t.Fatalf("decoded rate limit event = %#v", event)
+	}
+}
+
 func TestDecodeSecurityLogRejectsPrivateIPAndDuration(t *testing.T) {
 	base := time.Now().UTC().Format(time.RFC3339)
 	for _, line := range []string{

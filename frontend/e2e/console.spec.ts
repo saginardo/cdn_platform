@@ -501,6 +501,60 @@ test("security tabs fit on one line without scrollbars", async ({ page }) => {
   });
 });
 
+test("rate limit errors can escalate from 429 to an IP ban", async ({
+  page,
+}) => {
+  const securityOverview = {
+    policies: [],
+    rate_limit_policies: [],
+    bans: [],
+    active_ban_count: 0,
+    events: [],
+    nodes: [],
+  };
+  await mockAPI(page, {
+    "/api/security": securityOverview,
+    "/api/security/rate-limit-policies": securityOverview,
+  });
+  await page.goto("/#/security");
+  await page.getByRole("tab", { name: "请求限速" }).click();
+  await page.getByRole("button", { name: "新增" }).click();
+
+  await page.getByLabel("名称").fill("API 错误突发");
+  await page.getByLabel("每秒请求上限").fill("8");
+  await page.getByRole("switch", { name: "连续超限后封禁 IP" }).click();
+  await expect(
+    page.getByRole("switch", { name: "仅统计指定响应" }),
+  ).toBeChecked();
+  await expect(
+    page.getByRole("switch", { name: "仅统计指定响应" }),
+  ).toBeDisabled();
+  await expect(page.getByRole("checkbox", { name: "2xx" })).toBeDisabled();
+  await expect(page.getByRole("checkbox", { name: "4xx" })).toBeChecked();
+  await expect(page.getByRole("checkbox", { name: "5xx" })).toBeChecked();
+  await page.getByLabel("连续 429 次数").fill("4");
+  const banDuration = page.getByText("封禁时间", { exact: true }).locator("..");
+  await banDuration.getByRole("combobox").click();
+  await page.getByRole("option", { name: "6 小时" }).click();
+
+  const requestPromise = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname === "/api/security/rate-limit-policies" &&
+      request.method() === "POST",
+  );
+  await page.getByRole("button", { name: "保存并发布" }).click();
+  const request = await requestPromise;
+  expect(request.postDataJSON()).toMatchObject({
+    name: "API 错误突发",
+    requests_per_second: 8,
+    response_condition_enabled: true,
+    response_status_classes: [4, 5],
+    ban_enabled: true,
+    ban_after_consecutive_429: 4,
+    ban_duration_seconds: 21600,
+  });
+});
+
 test("log rows truncate long paths, color errors, and open request details", async ({
   page,
 }) => {

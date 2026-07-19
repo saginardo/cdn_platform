@@ -272,10 +272,7 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 		if slices.Contains(node.Capabilities, domain.EdgeCapabilitySecurity) {
 			nodeSecurityPolicies = securityPolicies
 		}
-		var nodeRateLimitPolicies []domain.RateLimitPolicy
-		if slices.Contains(node.Capabilities, domain.EdgeCapabilityRateLimit) {
-			nodeRateLimitPolicies = rateLimitPolicies
-		}
+		nodeRateLimitPolicies := rateLimitPoliciesForCapabilities(rateLimitPolicies, node.Capabilities)
 		var config string
 		if slices.Contains(node.Capabilities, domain.EdgeCapabilityPerSiteCache) {
 			config, err = nginx.RenderWithOptions(nodeSites, nodeSecurityPolicies, nodeRateLimitPolicies, settings.CacheDefaultSizeGB)
@@ -320,6 +317,20 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 		}
 	}
 	return updates, targets, nil
+}
+
+func rateLimitPoliciesForCapabilities(policies []domain.RateLimitPolicy, capabilities []string) []domain.RateLimitPolicy {
+	if !slices.Contains(capabilities, domain.EdgeCapabilityRateLimit) {
+		return nil
+	}
+	if slices.Contains(capabilities, domain.EdgeCapabilitySecurity) {
+		return policies
+	}
+	result := append([]domain.RateLimitPolicy(nil), policies...)
+	for index := range result {
+		result[index].BanEnabled = false
+	}
+	return result
 }
 
 func (p Publisher) decryptPublicationMaterials(materials []publicationMaterial, affected map[string]struct{}) ([]renderedPublication, error) {

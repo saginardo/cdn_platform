@@ -1,7 +1,9 @@
 package nginx
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -41,7 +44,8 @@ func rateLimitPoliciesForTest() []domain.RateLimitPolicy {
 		{
 			ID: "22222222-2222-4222-8222-222222222222", Name: "error responses",
 			Enabled: true, RequestsPerSecond: 5, ResponseConditionEnabled: true,
-			ResponseStatusClasses: []int{5, 4},
+			ResponseStatusClasses: []int{5, 4}, BanEnabled: true,
+			BanAfterConsecutive429: 3, BanDurationSeconds: 3600,
 		},
 	}
 }
@@ -90,8 +94,11 @@ func TestRenderWithRateLimitPolicies(t *testing.T) {
 		"# CDN rate limit revision:", "lua_shared_dict cdn_rate_limit 20m;", "init_by_lua_block",
 		`id = "11111111-1111-4111-8111-111111111111", limit = 20`,
 		`id = "22222222-2222-4222-8222-222222222222", limit = 5, statuses = { [4] = true, [5] = true }`,
+		"ban_after = 3, ban_seconds = 3600", "lua_shared_dict cdn_rate_limit_escalation 10m;",
+		"log_format cdn_rate_limit_ban_json", "cdn_rate_limit_ban_policy_id",
 		"dict:incr(current_key, 1, 0, key_ttl)", "count_requests and rate > policy.limit",
 		"not count_requests and rate >= policy.limit", "policy.statuses[status_class]",
+		"record_rejection(policy, client_ip)", "ngx.ctx.cdn_rate_limit_rejected",
 		`ngx.header["Retry-After"] = "1"`, "ngx.exit(429)",
 		"access_by_lua_block", "header_filter_by_lua_block",
 	} {
@@ -106,6 +113,11 @@ func TestRenderWithRateLimitPolicies(t *testing.T) {
 	changed[0].RequestsPerSecond++
 	if HasRateLimitRevision(configuration, changed) {
 		t.Fatal("rate limit revision ignored a threshold change")
+	}
+	changed = append([]domain.RateLimitPolicy(nil), policies...)
+	changed[1].BanAfterConsecutive429++
+	if HasRateLimitRevision(configuration, changed) {
+		t.Fatal("rate limit revision ignored a ban threshold change")
 	}
 	if strings.Index(configuration, "[4] = true") > strings.Index(configuration, "[5] = true") {
 		t.Fatal("response status classes were not normalized before rendering")
@@ -354,7 +366,7 @@ server {
     }
 }
 `
-		statuses := runRateLimitNginxConfiguration(t, luaModule, ndkModule, configuration)
+		statuses := runRateLimitNginxConfiguration(t, luaModule, ndkModule, configuration).Statuses
 		limited := false
 		for _, status := range statuses {
 			limited = limited || status == http.StatusTooManyRequests
@@ -364,6 +376,58 @@ server {
 		}
 		if !limited {
 			t.Fatalf("named proxy rate limit did not run: %v", statuses)
+		}
+	})
+	t.Run("consecutive 429 escalates once", func(t *testing.T) {
+		policy := domain.RateLimitPolicy{
+			ID: "66666666-6666-4666-8666-666666666666", Name: "error burst", Enabled: true,
+			RequestsPerSecond: 1, ResponseConditionEnabled: true, ResponseStatusClasses: []int{4, 5},
+			BanEnabled: true, BanAfterConsecutive429: 3, BanDurationSeconds: 3600,
+		}
+		configuration, err := RenderWithSecurityAndRateLimit(nil, nil, []domain.RateLimitPolicy{policy})
+		if err != nil {
+			t.Fatal(err)
+		}
+		configuration = strings.Replace(configuration, "listen 80 default_server;", "listen __RATE_LIMIT_TEST_LISTEN__;", 1)
+		result := runRateLimitNginxConfiguration(t, luaModule, ndkModule, configuration)
+		if len(result.Statuses) != 10 || result.Statuses[0] != http.StatusNotFound {
+			t.Fatalf("unexpected escalation statuses %v", result.Statuses)
+		}
+		for index, status := range result.Statuses[1:] {
+			if status != http.StatusTooManyRequests {
+				t.Fatalf("request %d status = %d, want 429: %v", index+2, status, result.Statuses)
+			}
+			if result.RetryAfter[index+1] != "1" || result.CacheControl[index+1] != "no-store" {
+				t.Fatalf("request %d limit headers retry=%q cache=%q", index+2,
+					result.RetryAfter[index+1], result.CacheControl[index+1])
+			}
+		}
+		if !slices.Equal(result.BanEventCounts[:4], []int{0, 0, 0, 1}) {
+			t.Fatalf("ban event counts through third 429 = %v, want [0 0 0 1]", result.BanEventCounts[:4])
+		}
+		for request, count := range result.BanEventCounts[4:] {
+			if count != 1 {
+				t.Fatalf("request %d ban event count = %d, want 1", request+5, count)
+			}
+		}
+		contents, err := os.ReadFile(result.SecurityLogPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(strings.TrimSpace(string(contents)), "\n")
+		if len(lines) != 1 {
+			t.Fatalf("rate limit ban events = %d, want 1:\n%s", len(lines), contents)
+		}
+		var event struct {
+			PolicyID   string `json:"policy_id"`
+			Action     string `json:"action"`
+			BanSeconds int    `json:"ban_seconds"`
+		}
+		if err := json.Unmarshal([]byte(lines[0]), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.PolicyID != policy.ID || event.Action != "ban" || event.BanSeconds != 3600 {
+			t.Fatalf("rate limit ban event = %#v", event)
 		}
 	})
 }
@@ -377,10 +441,18 @@ func runRateLimitNginx(t *testing.T, luaModule, ndkModule string, policy domain.
 	configuration = strings.Replace(configuration, "content_by_lua_block { return ngx.exit(404) }",
 		fmt.Sprintf("content_by_lua_block { return ngx.exit(%d) }", responseStatus), 1)
 	configuration = strings.Replace(configuration, "listen 80 default_server;", "listen __RATE_LIMIT_TEST_LISTEN__;", 1)
-	return runRateLimitNginxConfiguration(t, luaModule, ndkModule, configuration)
+	return runRateLimitNginxConfiguration(t, luaModule, ndkModule, configuration).Statuses
 }
 
-func runRateLimitNginxConfiguration(t *testing.T, luaModule, ndkModule, configuration string) []int {
+type rateLimitNginxResult struct {
+	Statuses        []int
+	RetryAfter      []string
+	CacheControl    []string
+	BanEventCounts  []int
+	SecurityLogPath string
+}
+
+func runRateLimitNginxConfiguration(t *testing.T, luaModule, ndkModule, configuration string) rateLimitNginxResult {
 	t.Helper()
 	binary, err := exec.LookPath("nginx")
 	if err != nil {
@@ -396,6 +468,8 @@ func runRateLimitNginxConfiguration(t *testing.T, luaModule, ndkModule, configur
 	}
 	configuration = strings.Replace(configuration, "__RATE_LIMIT_TEST_LISTEN__", "127.0.0.1:"+strconv.Itoa(port), 1)
 	directory := t.TempDir()
+	securityLogPath := filepath.Join(directory, "security.json")
+	configuration = strings.ReplaceAll(configuration, "/opt/cdn-edge/logs/security.json", securityLogPath)
 	packagePath := os.Getenv("NGINX_LUA_PACKAGE_PATH")
 	var luaPathDirective string
 	if packagePath != "" {
@@ -442,14 +516,29 @@ http {
 		time.Sleep(20 * time.Millisecond)
 	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	statuses := make([]int, 0, 10)
+	result := rateLimitNginxResult{
+		Statuses: make([]int, 0, 10), RetryAfter: make([]string, 0, 10),
+		CacheControl: make([]string, 0, 10), BanEventCounts: make([]int, 0, 10),
+		SecurityLogPath: securityLogPath,
+	}
 	for range 10 {
 		response, err := client.Get("http://" + address + "/test")
 		if err != nil {
 			t.Fatal(err)
 		}
-		statuses = append(statuses, response.StatusCode)
+		result.Statuses = append(result.Statuses, response.StatusCode)
+		result.RetryAfter = append(result.RetryAfter, response.Header.Get("Retry-After"))
+		result.CacheControl = append(result.CacheControl, response.Header.Get("Cache-Control"))
 		_ = response.Body.Close()
+		contents, err := os.ReadFile(securityLogPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		count := 0
+		if len(bytes.TrimSpace(contents)) > 0 {
+			count = bytes.Count(bytes.TrimSpace(contents), []byte("\n")) + 1
+		}
+		result.BanEventCounts = append(result.BanEventCounts, count)
 	}
-	return statuses
+	return result
 }

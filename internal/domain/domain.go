@@ -69,6 +69,9 @@ const (
 	DefaultDNSTTLSeconds            = 60
 	MinDNSTTLSeconds                = 60
 	MaxDNSTTLSeconds                = 300
+	DefaultCacheMaxSizeGB           = 1
+	MinCacheMaxSizeGB               = 1
+	MaxCacheMaxSizeGB               = 1024
 )
 
 const (
@@ -77,6 +80,7 @@ const (
 	EdgeCapabilityCacheUsage     = "cache_usage_v1"
 	EdgeCapabilityMachineStatus  = "machine_status_v1"
 	EdgeCapabilityNginxFragments = "nginx_fragments_v1"
+	EdgeCapabilityPerSiteCache   = "per_site_cache_v1"
 )
 
 type TCPForward struct {
@@ -107,6 +111,7 @@ type Site struct {
 	DNSTTLSeconds           *int         `json:"dns_ttl_seconds"`
 	TCPOnly                 bool         `json:"tcp_only"`
 	TCPForwards             []TCPForward `json:"tcp_forwards"`
+	CacheMaxSizeGB          *int         `json:"cache_max_size_gb"`
 	CacheGeneration         int64        `json:"cache_generation"`
 	ConfigVersion           int64        `json:"config_version"`
 	Published               bool         `json:"published"`
@@ -190,6 +195,7 @@ type DesiredState struct {
 	NginxStreamConfig string                `json:"nginx_stream_config,omitempty"`
 	NginxFragments    *NginxConfigFragments `json:"nginx_fragments,omitempty"`
 	PublicPorts       []int                 `json:"public_ports"`
+	CacheMaxBytes     int64                 `json:"cache_max_bytes,omitempty"`
 	Certificates      map[string]TLSBundle  `json:"certificates,omitempty"`
 }
 
@@ -257,15 +263,28 @@ type TLSBundle struct {
 }
 
 type AccessLogEvent struct {
-	Timestamp   time.Time `json:"timestamp"`
-	NodeID      string    `json:"node_id"`
-	SiteID      string    `json:"site_id"`
-	ClientIP    string    `json:"client_ip"`
-	Method      string    `json:"method"`
-	Path        string    `json:"path"`
-	Status      int       `json:"status"`
-	Bytes       int64     `json:"bytes"`
-	DurationMS  int64     `json:"duration_ms"`
-	Upstream    string    `json:"upstream"`
-	CacheStatus string    `json:"cache_status"`
+	ID                   string    `json:"id"`
+	Timestamp            time.Time `json:"timestamp"`
+	NodeID               string    `json:"node_id"`
+	SiteID               string    `json:"site_id"`
+	ClientIP             string    `json:"client_ip"`
+	Host                 string    `json:"host"`
+	Scheme               string    `json:"scheme"`
+	Protocol             string    `json:"protocol"`
+	Method               string    `json:"method"`
+	Path                 string    `json:"path"`
+	Status               int       `json:"status"`
+	RequestBytes         int64     `json:"request_bytes"`
+	Bytes                int64     `json:"bytes"`
+	DurationMS           int64     `json:"duration_ms"`
+	Upstream             string    `json:"upstream"`
+	UpstreamStatus       string    `json:"upstream_status"`
+	UpstreamResponseTime string    `json:"upstream_response_time"`
+	CacheStatus          string    `json:"cache_status"`
+	UserAgent            string    `json:"user_agent"`
+	Referer              string    `json:"referer"`
+	ContentType          string    `json:"content_type"`
+	ResponseContentType  string    `json:"response_content_type"`
+	Accept               string    `json:"accept"`
+	Range                string    `json:"range"`
 }

@@ -31,6 +31,7 @@ done
 started_at=$(date --iso-8601=seconds)
 error_file=$(mktemp /tmp/cdn-backup-error.XXXXXX)
 trap 'rm -f "$error_file"' EXIT
+retention_only=0
 
 record_status() {
   local state="${1:?backup state is required}"
@@ -45,7 +46,11 @@ record_status() {
 for ((attempt = 1; attempt <= max_attempts; attempt++)); do
   : >"$error_file"
   record_status running "$attempt"
-  if "$backup_command" 2> >(tee "$error_file" >&2); then
+  command=("$backup_command")
+  if ((retention_only)); then
+    command+=(retention)
+  fi
+  if "${command[@]}" 2> >(tee "$error_file" >&2); then
     record_status succeeded "$attempt"
     exit 0
   else
@@ -55,6 +60,9 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
 		record_status skipped "$attempt"
 		echo "backup skipped while an online restore cutover is pending" >&2
 		exit 75
+	fi
+	if ((exit_code == 76)); then
+		retention_only=1
 	fi
 
   detail=$(tail -n 20 "$error_file")
@@ -72,6 +80,10 @@ for ((attempt = 1; attempt <= max_attempts; attempt++)); do
   fi
   delay="${retry_delays[$delay_index]}"
   record_status retrying "$attempt" "$detail"
-  echo "backup attempt $attempt/$max_attempts failed; retrying in ${delay}s" >&2
+  if ((retention_only)); then
+    echo "backup snapshot succeeded; retention attempt $attempt/$max_attempts failed; retrying in ${delay}s" >&2
+  else
+    echo "backup attempt $attempt/$max_attempts failed; retrying in ${delay}s" >&2
+  fi
   sleep "$delay" & wait $!
 done

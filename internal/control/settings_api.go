@@ -56,6 +56,25 @@ func (s *Server) updateDNSSettings(response http.ResponseWriter, request *http.R
 	writeJSON(response, http.StatusOK, s.Settings.View().DNS)
 }
 
+func (s *Server) updateCacheSettings(response http.ResponseWriter, request *http.Request) {
+	if s.Settings == nil {
+		writeError(response, http.StatusServiceUnavailable, errors.New("settings are not configured"))
+		return
+	}
+	var input struct {
+		DefaultSizeGB int `json:"default_size_gb"`
+	}
+	if !readJSON(response, request, &input) {
+		return
+	}
+	if err := s.Settings.SaveCacheDefaultSizeGB(input.DefaultSizeGB); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	s.audit(request, adminID(request.Context()), "update_cache", "settings", "cache", fmt.Sprintf("default_size_gb=%d", input.DefaultSizeGB))
+	writeJSON(response, http.StatusOK, s.Settings.View().Cache)
+}
+
 type cloudflareSettingsRequest struct {
 	Token string `json:"token"`
 }

@@ -39,7 +39,7 @@ printf '%s\n' "$*" "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_DEFAULT_R
 	if len(lines) != 10 {
 		t.Fatalf("validator environment lines = %q", lines)
 	}
-	if lines[0] != "snapshots --latest 1" || lines[1] != runtime.Settings.AccessKeyID || lines[2] != runtime.SecretAccessKey || lines[3] != runtime.Settings.Region || lines[4] != runtime.Settings.Repository || lines[5] != "" || lines[6] == "" || lines[7] == "" || lines[8] != runtime.ResticPassword || lines[9] != "600" {
+	if lines[0] != "snapshots --no-lock --latest 1" || lines[1] != runtime.Settings.AccessKeyID || lines[2] != runtime.SecretAccessKey || lines[3] != runtime.Settings.Region || lines[4] != runtime.Settings.Repository || lines[5] != "" || lines[6] == "" || lines[7] == "" || lines[8] != runtime.ResticPassword || lines[9] != "600" {
 		t.Fatalf("validator environment = %q", lines)
 	}
 	if strings.Contains(string(contents), "stale-") {

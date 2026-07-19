@@ -64,7 +64,10 @@ type BackupSettingsView struct {
 
 type SettingsView struct {
 	Branding domain.BrandingSettings `json:"branding"`
-	DNS      struct {
+	Cache    struct {
+		DefaultSizeGB int `json:"default_size_gb"`
+	} `json:"cache"`
+	DNS struct {
 		DefaultTTLSeconds int `json:"default_ttl_seconds"`
 	} `json:"dns"`
 	Cloudflare CloudflareSettingsView `json:"cloudflare"`
@@ -80,6 +83,7 @@ type SettingsManager struct {
 	mu           sync.RWMutex
 	env          EnvironmentSettings
 	dnsTTL       int
+	cacheSizeGB  int
 	branding     domain.BrandingSettings
 	token        string
 	tokenDB      bool
@@ -99,12 +103,13 @@ func NewSettingsManager(database *store.Store, cipher *Cipher, environment Envir
 	environment.CloudflareAPIToken = strings.TrimSpace(environment.CloudflareAPIToken)
 	environment.SMTP = normalizeSMTPProfile(environment.SMTP)
 	environment.Backup = domain.NormalizeBackupSettings(environment.Backup)
-	manager := &SettingsManager{Store: database, Cipher: cipher, env: environment, dnsTTL: domain.DefaultDNSTTLSeconds}
+	manager := &SettingsManager{Store: database, Cipher: cipher, env: environment, dnsTTL: domain.DefaultDNSTTLSeconds, cacheSizeGB: domain.DefaultCacheMaxSizeGB}
 	persisted, err := database.ControlSettings()
 	if err != nil {
 		return nil, err
 	}
 	manager.dnsTTL = persisted.DNSDefaultTTLSeconds
+	manager.cacheSizeGB = persisted.CacheDefaultSizeGB
 	manager.branding = domain.NormalizeBrandingSettings(persisted.Branding)
 	manager.token = environment.CloudflareAPIToken
 	if ciphertext, err := database.Secret(store.SecretCloudflareAPIToken); err == nil {
@@ -173,6 +178,7 @@ func (m *SettingsManager) View() SettingsView {
 	defer m.mu.RUnlock()
 	var view SettingsView
 	view.Branding = m.branding
+	view.Cache.DefaultSizeGB = m.cacheSizeGB
 	view.DNS.DefaultTTLSeconds = m.dnsTTL
 	view.Cloudflare.OverrideConfigured = m.tokenDB
 	view.Cloudflare.EnvironmentSet = m.env.CloudflareAPIToken != ""
@@ -263,6 +269,27 @@ func (m *SettingsManager) SaveDNSDefaultTTL(seconds int) error {
 	}
 	m.mu.Lock()
 	m.dnsTTL = seconds
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *SettingsManager) CacheDefaultSizeGB() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.cacheSizeGB
+}
+
+func (m *SettingsManager) SaveCacheDefaultSizeGB(size int) error {
+	m.updateMu.Lock()
+	defer m.updateMu.Unlock()
+	if err := domain.ValidateCacheMaxSizeGB(size); err != nil {
+		return err
+	}
+	if err := m.Store.SaveCacheDefaultSizeGB(size); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.cacheSizeGB = size
 	m.mu.Unlock()
 	return nil
 }

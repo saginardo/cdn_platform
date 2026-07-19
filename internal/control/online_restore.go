@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -195,7 +194,7 @@ func (m *OnlineRestoreManager) ListSnapshots(ctx context.Context) ([]OnlineResto
 		return nil, err
 	}
 	defer cleanup()
-	output, err := m.runRestic(ctx, runtime, runtimeDir, "snapshots", "--json", "--tag", "cdn-control-compose")
+	output, err := m.runRestic(ctx, runtime, runtimeDir, "snapshots", "--no-lock", "--json", "--tag", "cdn-control-compose")
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +451,7 @@ func (m *OnlineRestoreManager) listSnapshotsWithRuntime(ctx context.Context, run
 		return nil, err
 	}
 	defer cleanup()
-	output, err := m.runRestic(ctx, runtime, runtimeDir, "snapshots", "--json", "--tag", "cdn-control-compose")
+	output, err := m.runRestic(ctx, runtime, runtimeDir, "snapshots", "--no-lock", "--json", "--tag", "cdn-control-compose")
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +478,7 @@ func (m *OnlineRestoreManager) resticRuntime(runtime BackupRuntime) (string, fun
 
 func (m *OnlineRestoreManager) runRestic(ctx context.Context, runtime BackupRuntime, runtimeDir string, arguments ...string) ([]byte, error) {
 	passwordPath := filepath.Join(runtimeDir, "repository-password")
-	command := exec.CommandContext(ctx, m.config.ResticBinary, arguments...)
+	command := resticCommandContext(ctx, m.config.ResticBinary, arguments...)
 	command.Env = backupCommandEnvironment(runtime, runtimeDir, passwordPath)
 	output, err := command.CombinedOutput()
 	if err == nil {

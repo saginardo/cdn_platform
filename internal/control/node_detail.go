@@ -111,18 +111,14 @@ func (s *Server) nodeDetail(response http.ResponseWriter, request *http.Request)
 }
 
 func (s *Server) nodeMachineStatus(node domain.Node, at time.Time) nodeMachineStatusResponse {
-	report, err := s.Store.GetNodeMachineStatus(node.ID)
-	if err == nil {
+	s.machineStatusMu.RLock()
+	report, found := s.machineStatuses[node.ID]
+	s.machineStatusMu.RUnlock()
+	if found {
 		report.CollectedAt = report.CollectedAt.UTC()
 		return nodeMachineStatusResponse{
 			Available: true, Stale: report.CollectedAt.Before(at.Add(-nodeMachineFreshness)), Report: &report,
 		}
-	}
-	if !errors.Is(err, store.ErrNotFound) {
-		if s.Logger != nil {
-			s.Logger.Warn("node machine status unavailable", "node_id", node.ID, "error", err)
-		}
-		return nodeMachineStatusResponse{UnavailableReason: "机器状态暂不可用"}
 	}
 	for _, capability := range node.Capabilities {
 		if capability == domain.EdgeCapabilityMachineStatus {
@@ -130,6 +126,19 @@ func (s *Server) nodeMachineStatus(node domain.Node, at time.Time) nodeMachineSt
 		}
 	}
 	return nodeMachineStatusResponse{UnavailableReason: "升级边缘代理后可查看机器状态"}
+}
+
+func (s *Server) recordNodeMachineStatus(nodeID string, report domain.MachineStatus) {
+	report.CollectedAt = report.CollectedAt.UTC()
+	s.machineStatusMu.Lock()
+	defer s.machineStatusMu.Unlock()
+	if current, found := s.machineStatuses[nodeID]; found && report.CollectedAt.Before(current.CollectedAt) {
+		return
+	}
+	if s.machineStatuses == nil {
+		s.machineStatuses = make(map[string]domain.MachineStatus)
+	}
+	s.machineStatuses[nodeID] = report
 }
 
 func (s *Server) nodeCacheStatus(response http.ResponseWriter, request *http.Request) {

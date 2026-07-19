@@ -2,6 +2,7 @@ package logstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,34 @@ func TestRecentDecodesJSONEachRow(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Path != "/a" || events[0].CacheStatus != "HIT" {
 		t.Fatalf("unexpected events: %#v", events)
+	}
+}
+
+func TestGetReturnsExtendedRequestDetails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		query := request.URL.Query().Get("query")
+		if !strings.Contains(query, "WHERE request_id = {request_id:String}") || request.URL.Query().Get("param_request_id") != "request-1" {
+			t.Fatalf("unexpected detail query: %s", request.URL.RawQuery)
+		}
+		_, _ = io.WriteString(response, `{"request_id":"request-1","timestamp":"2026-07-18 10:20:30.123","node_id":"node-1","site_id":"site-1","client_ip":"203.0.113.5","host":"cdn.example.test","scheme":"https","protocol":"HTTP/2.0","method":"GET","path":"/asset.js","status":404,"request_bytes":512,"bytes":2048,"duration_ms":37,"upstream":"192.0.2.10:443","upstream_status":"404","upstream_response_time":"0.036","cache_status":"MISS","user_agent":"test-agent","referer":"https://example.test/","request_content_type":"application/json","response_content_type":"text/javascript","request_accept":"*/*","request_range":"bytes=0-1023"}`+"\n")
+	}))
+	defer server.Close()
+
+	event, err := (ClickHouse{Endpoint: server.URL}).Get(context.Background(), "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.ID != "request-1" || event.RequestBytes != 512 || event.Bytes != 2048 || event.UserAgent != "test-agent" || event.ResponseContentType != "text/javascript" || event.Range != "bytes=0-1023" {
+		t.Fatalf("unexpected detail event: %#v", event)
+	}
+}
+
+func TestGetReturnsNotFoundForEmptyResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	_, err := (ClickHouse{Endpoint: server.URL}).Get(context.Background(), "missing")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing detail error = %v", err)
 	}
 }
 
@@ -216,11 +245,19 @@ func TestAppendUsesClickHouseDateTimeFormat(t *testing.T) {
 		body = string(contents)
 	}))
 	defer server.Close()
-	err := (ClickHouse{Endpoint: server.URL}).Append(context.Background(), []domain.AccessLogEvent{{Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 123000000, time.UTC), SiteID: "site", NodeID: "node"}})
+	err := (ClickHouse{Endpoint: server.URL}).Append(context.Background(), []domain.AccessLogEvent{{
+		ID: "request-1", Timestamp: time.Date(2026, 1, 2, 3, 4, 5, 123000000, time.UTC), SiteID: "site", NodeID: "node",
+		RequestBytes: 512, UserAgent: "test-agent", ContentType: "application/json", Range: "bytes=0-10",
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(body, `"timestamp":"2026-01-02 03:04:05.123"`) {
 		t.Fatalf("unexpected insert body: %s", body)
+	}
+	for _, expected := range []string{`"request_id":"request-1"`, `"request_bytes":512`, `"user_agent":"test-agent"`, `"request_content_type":"application/json"`, `"request_range":"bytes=0-10"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("insert body is missing %s: %s", expected, body)
+		}
 	}
 }

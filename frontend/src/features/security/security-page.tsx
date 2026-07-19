@@ -763,6 +763,8 @@ function PolicyDialogShell({
                     <SelectItem value="21600">6 小时</SelectItem>
                     <SelectItem value="43200">12 小时</SelectItem>
                     <SelectItem value="86400">24 小时</SelectItem>
+                    <SelectItem value="259200">3 天</SelectItem>
+                    <SelectItem value="604800">7 天</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1074,6 +1076,8 @@ function durationLabel(seconds?: number) {
         21600: "6 小时",
         43200: "12 小时",
         86400: "24 小时",
+        259200: "3 天",
+        604800: "7 天",
       } as Record<number, string>
     )[Number(seconds)] ?? "--"
   );

@@ -417,6 +417,9 @@ func TestApplyWritesVersionedNginxFragmentDirectories(t *testing.T) {
 	if !slicesContain(agent.Config.Capabilities, domain.EdgeCapabilityNginxFragments) {
 		t.Fatalf("agent capabilities = %#v", agent.Config.Capabilities)
 	}
+	if !slicesContain(agent.Config.Capabilities, domain.EdgeCapabilityPerSiteCache) {
+		t.Fatalf("agent capabilities = %#v", agent.Config.Capabilities)
+	}
 }
 
 func TestFragmentApplyFailureRestoresIndexesAndRemovesStagedVersion(t *testing.T) {

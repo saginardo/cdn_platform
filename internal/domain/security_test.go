@@ -71,7 +71,7 @@ func TestDefaultSecurityPolicyIDsAndDurations(t *testing.T) {
 	if IsBuiltinSecurityPolicyID("11111111-1111-4111-8111-111111111111") {
 		t.Fatal("custom policy ID was recognized as built-in")
 	}
-	for _, seconds := range []int{3600, 21600, 43200, 86400} {
+	for _, seconds := range []int{3600, 21600, 43200, 86400, 259200, 604800} {
 		if !ValidSecurityBanDuration(seconds) {
 			t.Errorf("duration %d is not accepted", seconds)
 		}

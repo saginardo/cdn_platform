@@ -42,6 +42,10 @@ func TestCacheUsageCollectorReportsDiskUsage(t *testing.T) {
 	if collector.Snapshot().UsedBytes == 1 {
 		t.Fatal("snapshot mutation changed the collector state")
 	}
+	collector.SetTotalBytes(7 << 30)
+	if updated := collector.Snapshot(); updated == nil || updated.TotalBytes != 7<<30 {
+		t.Fatalf("updated cache capacity = %#v", updated)
+	}
 }
 
 func TestCacheUsageCollectorTreatsMissingCacheAsEmpty(t *testing.T) {

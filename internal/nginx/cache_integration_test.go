@@ -56,14 +56,17 @@ func TestRenderedStaticAssetsCacheAcrossCookies(t *testing.T) {
 	}
 	directory := t.TempDir()
 	cacheDirectory := filepath.Join(directory, "cache")
+	cacheSitesDirectory := filepath.Join(cacheDirectory, "sites")
 	if err := os.Chmod(directory, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(cacheDirectory, 0o777); err != nil {
+	if err := os.MkdirAll(cacheSitesDirectory, 0o777); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(cacheDirectory, 0o777); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{cacheDirectory, cacheSitesDirectory} {
+		if err := os.Chmod(path, 0o777); err != nil {
+			t.Fatal(err)
+		}
 	}
 	configuration, nginxPort := prepareCacheIntegrationConfiguration(t, configuration, directory)
 	path := filepath.Join(directory, "nginx.conf")

@@ -139,6 +139,7 @@ export interface Site {
   dns_ttl_seconds: number | null;
   tcp_only: boolean;
   tcp_forwards: TCPForward[];
+  cache_max_size_gb: number | null;
   cache_generation: number;
   config_version: number;
   published: boolean;
@@ -212,17 +213,30 @@ export interface Overview {
 }
 
 export interface AccessLog {
+  id: string;
   timestamp: string;
   node_id: string;
   site_id: string;
   client_ip: string;
+  host: string;
+  scheme: string;
+  protocol: string;
   method: string;
   path: string;
   status: number;
+  request_bytes: number;
   bytes: number;
   duration_ms: number;
   upstream: string;
+  upstream_status: string;
+  upstream_response_time: string;
   cache_status: string;
+  user_agent: string;
+  referer: string;
+  content_type: string;
+  response_content_type: string;
+  accept: string;
+  range: string;
 }
 
 export interface LogPage {
@@ -308,6 +322,7 @@ export interface Settings {
     name: string;
     subtitle: string;
   };
+  cache: { default_size_gb: number };
   dns: { default_ttl_seconds: number };
   cloudflare: {
     source: string;

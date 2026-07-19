@@ -33,6 +33,7 @@ type SMTPSettings struct {
 
 type ControlSettings struct {
 	DNSDefaultTTLSeconds int
+	CacheDefaultSizeGB   int
 	Branding             domain.BrandingSettings
 	SMTP                 SMTPSettings
 	BackupOverride       bool
@@ -50,6 +51,7 @@ type BackupSettingsSnapshot struct {
 func (s *Store) ControlSettings() (ControlSettings, error) {
 	settings := ControlSettings{
 		DNSDefaultTTLSeconds: domain.DefaultDNSTTLSeconds,
+		CacheDefaultSizeGB:   domain.DefaultCacheMaxSizeGB,
 		Branding:             domain.DefaultBrandingSettings(),
 		Backup: domain.BackupSettings{
 			Region:             domain.DefaultBackupRegion,
@@ -59,11 +61,11 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 	}
 	var smtpOverride, smtpEnabled, backupOverride int
 	var recipients, updatedAt string
-	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security,
+	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, cache_default_size_gb, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security,
 		backup_override, backup_repository, backup_access_key_id, backup_region, backup_time, backup_random_delay_seconds,
 		brand_name, brand_subtitle, updated_at
-		FROM control_settings WHERE id = 1`).
-		Scan(&settings.DNSDefaultTTLSeconds, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &settings.SMTP.Security,
+			FROM control_settings WHERE id = 1`).
+		Scan(&settings.DNSDefaultTTLSeconds, &settings.CacheDefaultSizeGB, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &settings.SMTP.Security,
 			&backupOverride, &settings.Backup.Repository, &settings.Backup.AccessKeyID, &settings.Backup.Region, &settings.Backup.BackupTime, &settings.Backup.RandomDelaySeconds,
 			&settings.Branding.Name, &settings.Branding.Subtitle, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -74,6 +76,9 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 	}
 	if err := domain.ValidateDNSTTLSeconds(settings.DNSDefaultTTLSeconds); err != nil {
 		return ControlSettings{}, fmt.Errorf("stored DNS TTL: %w", err)
+	}
+	if err := domain.ValidateCacheMaxSizeGB(settings.CacheDefaultSizeGB); err != nil {
+		return ControlSettings{}, fmt.Errorf("stored cache default: %w", err)
 	}
 	if err := json.Unmarshal([]byte(recipients), &settings.SMTP.Recipients); err != nil {
 		return ControlSettings{}, fmt.Errorf("decode SMTP recipients: %w", err)
@@ -192,6 +197,15 @@ func (s *Store) SaveDNSDefaultTTL(seconds int) error {
 	}
 	_, err := s.db.Exec(`INSERT INTO control_settings(id, dns_default_ttl_seconds, updated_at) VALUES (1, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET dns_default_ttl_seconds=excluded.dns_default_ttl_seconds, updated_at=excluded.updated_at`, seconds, stamp(now()))
+	return err
+}
+
+func (s *Store) SaveCacheDefaultSizeGB(size int) error {
+	if err := domain.ValidateCacheMaxSizeGB(size); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`INSERT INTO control_settings(id, cache_default_size_gb, updated_at) VALUES (1, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET cache_default_size_gb=excluded.cache_default_size_gb, updated_at=excluded.updated_at`, size, stamp(now()))
 	return err
 }
 

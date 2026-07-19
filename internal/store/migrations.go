@@ -22,6 +22,25 @@ var schemaMigrations = []schemaMigration{
 	{Version: 5, Name: "message-center", Apply: migrateMessageCenter},
 	{Version: 6, Name: "message-dismissal", Apply: migrateMessageDismissal},
 	{Version: 7, Name: "branding-settings", Apply: migrateBrandingSettings},
+	{Version: 8, Name: "ephemeral-machine-status-and-cache-limits", Apply: migrateCacheLimits},
+}
+
+func migrateCacheLimits(tx *sql.Tx) error {
+	for _, column := range []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"sites", "cache_max_size_gb", "cache_max_size_gb INTEGER"},
+		{"control_settings", "cache_default_size_gb", "cache_default_size_gb INTEGER NOT NULL DEFAULT 1"},
+		{"node_states", "cache_max_bytes", "cache_max_bytes INTEGER NOT NULL DEFAULT 1073741824"},
+	} {
+		if err := addColumnIfMissing(tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`DROP TABLE IF EXISTS node_machine_status`)
+	return err
 }
 
 func migrateBrandingSettings(tx *sql.Tx) error {
@@ -166,6 +185,7 @@ func migrateCoreSchema(tx *sql.Tx) error {
 		{"sites", "dns_ttl_seconds", "dns_ttl_seconds INTEGER"},
 		{"sites", "tcp_only", "tcp_only INTEGER NOT NULL DEFAULT 0"},
 		{"sites", "tcp_forwards_json", "tcp_forwards_json TEXT NOT NULL DEFAULT '[]'"},
+		{"sites", "cache_max_size_gb", "cache_max_size_gb INTEGER"},
 		{"sites", "deleting", "deleting INTEGER NOT NULL DEFAULT 0"},
 		{"nodes", "applied_version", "applied_version INTEGER NOT NULL DEFAULT 0"},
 		{"nodes", "capabilities_json", "capabilities_json TEXT NOT NULL DEFAULT '[]'"},
@@ -178,9 +198,11 @@ func migrateCoreSchema(tx *sql.Tx) error {
 		{"control_settings", "backup_region", "backup_region TEXT NOT NULL DEFAULT 'us-east-1'"},
 		{"control_settings", "backup_time", "backup_time TEXT NOT NULL DEFAULT '03:25'"},
 		{"control_settings", "backup_random_delay_seconds", "backup_random_delay_seconds INTEGER NOT NULL DEFAULT 1200"},
+		{"control_settings", "cache_default_size_gb", "cache_default_size_gb INTEGER NOT NULL DEFAULT 1"},
 		// JSON null distinguishes a pre-capability state from an intentional empty listener set.
 		{"node_states", "public_ports_json", "public_ports_json TEXT NOT NULL DEFAULT 'null'"},
 		{"node_states", "nginx_stream_config", "nginx_stream_config TEXT NOT NULL DEFAULT ''"},
+		{"node_states", "cache_max_bytes", "cache_max_bytes INTEGER NOT NULL DEFAULT 1073741824"},
 	}
 	for _, column := range columns {
 		if err := addColumnIfMissing(tx, column.table, column.name, column.definition); err != nil {

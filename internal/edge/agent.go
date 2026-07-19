@@ -121,6 +121,7 @@ func New(config Config) (*Agent, error) {
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityCacheUsage)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityMachineStatus)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityNginxFragments)
+	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityPerSiteCache)
 	config.SecurityFirewall = defaultSecurityFirewall(config.SecurityFirewall)
 	if config.SecurityFirewall != nil {
 		config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilitySecurity)
@@ -399,6 +400,11 @@ func (a *Agent) apply(state domain.DesiredState) error {
 		restoreConfigurationFiles(configurationBackups)
 		return a.applyFailed(state.Version, "config_write_failed", fmt.Errorf("write Nginx stream configuration: %w", err), nil)
 	}
+	if err := prepareManagedCacheLayout(nginx.DefaultCachePath, state.NginxConfig); err != nil {
+		restoreBackups(backups)
+		a.restorePreviousConfigs(configurationBackups)
+		return a.applyFailed(state.Version, "cache_layout_failed", err, nil)
+	}
 	if err := a.Config.Runner.Test(); err != nil {
 		restoreBackups(backups)
 		a.restorePreviousConfigs(configurationBackups)
@@ -431,11 +437,19 @@ func (a *Agent) apply(state domain.DesiredState) error {
 		return a.applyFailed(state.Version, "nginx_not_listening", fmt.Errorf("Nginx did not retain all required public listeners after applying configuration: %s", formatPorts(ports)), nil)
 	}
 	fragmentsActivated = true
+	if a.cacheUsage != nil {
+		a.cacheUsage.SetTotalBytes(state.CacheMaxBytes)
+	}
+	cacheCleanupErr := reconcileInstalledCacheLayout(nginx.DefaultCachePath, state.NginxConfig)
 	if err := atomicWriteFile(filepath.Join(a.Config.StateDir, "applied-version"), []byte(fmt.Sprintf("%d\n", state.Version)), 0o640); err != nil {
 		return a.applyFailed(state.Version, "applied_version_write_failed", err, nil)
 	}
 	a.cleanupOldFragmentDirectories(activeFragmentDirectories)
-	a.lastApplyReport = &domain.ApplyReport{Version: state.Version, Status: domain.ApplySucceeded, Detail: "Nginx is listening on " + formatPorts(ports)}
+	detail := "Nginx is listening on " + formatPorts(ports)
+	if cacheCleanupErr != nil {
+		detail += "; cache cleanup warning: " + cacheCleanupErr.Error()
+	}
+	a.lastApplyReport = &domain.ApplyReport{Version: state.Version, Status: domain.ApplySucceeded, Detail: detail}
 	return nil
 }
 

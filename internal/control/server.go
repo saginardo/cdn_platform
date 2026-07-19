@@ -28,6 +28,7 @@ import (
 	"cdn-platform/internal/integrations"
 	"cdn-platform/internal/logstore"
 	"cdn-platform/internal/store"
+	"github.com/google/uuid"
 )
 
 //go:embed web/dist
@@ -62,6 +63,8 @@ type Server struct {
 	TrustedProxyCIDRs  []*net.IPNet
 	Logger             *slog.Logger
 	RestartControl     func()
+	machineStatusMu    sync.RWMutex
+	machineStatuses    map[string]domain.MachineStatus
 	loginMu            sync.Mutex
 	loginHits          map[string][]time.Time
 }
@@ -86,8 +89,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/messages/{id}/read", s.requireAdmin(s.markMessageRead))
 	mux.HandleFunc("DELETE /api/messages/{id}", s.requireAdmin(s.deleteMessage))
 	mux.HandleFunc("GET /api/logs", s.requireAdmin(s.searchLogs))
+	mux.HandleFunc("GET /api/logs/{id}", s.requireAdmin(s.getLog))
 	mux.HandleFunc("GET /api/settings", s.requireAdmin(s.getSettings))
 	mux.HandleFunc("PUT /api/settings/branding", s.requireAdmin(s.updateBrandingSettings))
+	mux.HandleFunc("PUT /api/settings/cache", s.requireAdmin(s.updateCacheSettings))
 	mux.HandleFunc("PUT /api/settings/dns", s.requireAdmin(s.updateDNSSettings))
 	mux.HandleFunc("PUT /api/settings/cloudflare", s.requireAdmin(s.updateCloudflareSettings))
 	mux.HandleFunc("DELETE /api/settings/cloudflare", s.requireAdmin(s.clearCloudflareSettings))
@@ -595,6 +600,7 @@ type siteRequest struct {
 	DNSTTLSeconds           optionalNullableInt  `json:"dns_ttl_seconds"`
 	TCPOnly                 *bool                `json:"tcp_only"`
 	TCPForwards             *[]domain.TCPForward `json:"tcp_forwards"`
+	CacheMaxSizeGB          optionalNullableInt  `json:"cache_max_size_gb"`
 	Enabled                 *bool                `json:"enabled"`
 }
 
@@ -649,7 +655,14 @@ func (input siteRequest) site(id string, current *domain.Site) domain.Site {
 	if input.TCPForwards != nil {
 		tcpForwards = append([]domain.TCPForward(nil), (*input.TCPForwards)...)
 	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, TCPOnly: tcpOnly, TCPForwards: tcpForwards, Enabled: enabled}
+	var cacheMaxSizeGB *int
+	if input.CacheMaxSizeGB.Present {
+		cacheMaxSizeGB = input.CacheMaxSizeGB.Value
+	} else if current != nil && current.CacheMaxSizeGB != nil {
+		value := *current.CacheMaxSizeGB
+		cacheMaxSizeGB = &value
+	}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, TCPOnly: tcpOnly, TCPForwards: tcpForwards, CacheMaxSizeGB: cacheMaxSizeGB, Enabled: enabled}
 }
 
 func (input siteRequest) validateClientMaxBodySize() error {
@@ -666,6 +679,13 @@ func (input siteRequest) validateReadWriteTimeout() error {
 	return domain.ValidateReadWriteTimeoutSeconds(*input.ReadWriteTimeoutSeconds)
 }
 
+func (input siteRequest) validateCacheMaxSize() error {
+	if !input.CacheMaxSizeGB.Present || input.CacheMaxSizeGB.Value == nil {
+		return nil
+	}
+	return domain.ValidateCacheMaxSizeGB(*input.CacheMaxSizeGB.Value)
+}
+
 func (s *Server) createSite(response http.ResponseWriter, request *http.Request) {
 	var input siteRequest
 	if !readJSON(response, request, &input) {
@@ -676,6 +696,10 @@ func (s *Server) createSite(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	if err := input.validateReadWriteTimeout(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	if err := input.validateCacheMaxSize(); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
@@ -703,6 +727,10 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	if err := input.validateReadWriteTimeout(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	if err := input.validateCacheMaxSize(); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
@@ -975,6 +1003,42 @@ func (s *Server) searchLogs(response http.ResponseWriter, request *http.Request)
 		Logs: result.Events, From: query.From, To: query.To, Offset: query.Offset,
 		PageSize: logSearchPageSize, HasMore: result.HasMore,
 	})
+}
+
+func (s *Server) getLog(response http.ResponseWriter, request *http.Request) {
+	id := strings.TrimSpace(request.PathValue("id"))
+	if !validLogEntryID(id) {
+		writeError(response, http.StatusBadRequest, errors.New("log entry ID is invalid"))
+		return
+	}
+	if s.Logs == nil {
+		writeError(response, http.StatusNotFound, logstore.ErrNotFound)
+		return
+	}
+	event, err := s.Logs.Get(request.Context(), id)
+	if errors.Is(err, logstore.ErrNotFound) {
+		writeError(response, http.StatusNotFound, err)
+		return
+	}
+	if err != nil {
+		writeError(response, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, event)
+}
+
+func validLogEntryID(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func parseLogSearchQuery(request *http.Request, now time.Time) (logstore.LogQuery, error) {
@@ -1260,10 +1324,7 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 		}
 	}
 	if input.MachineStatus != nil {
-		if err := s.Store.RecordNodeMachineStatus(nodeID, *input.MachineStatus); err != nil {
-			writeStoreError(response, err)
-			return
-		}
+		s.recordNodeMachineStatus(nodeID, *input.MachineStatus)
 	}
 	writeJSON(response, http.StatusOK, map[string]bool{"ok": true})
 }
@@ -1315,7 +1376,24 @@ func (s *Server) writeLogs(response http.ResponseWriter, request *http.Request) 
 			continue
 		}
 		events[index].NodeID = nodeID
+		events[index].ID = strings.TrimSpace(events[index].ID)
+		if !validLogEntryID(events[index].ID) {
+			events[index].ID = uuid.NewString()
+		}
 		events[index].Path = strings.SplitN(events[index].Path, "?", 2)[0]
+		events[index].Path = truncateLogValue(events[index].Path, 4096)
+		events[index].Host = truncateLogValue(events[index].Host, 255)
+		events[index].Scheme = truncateLogValue(events[index].Scheme, 16)
+		events[index].Protocol = truncateLogValue(events[index].Protocol, 32)
+		events[index].Upstream = truncateLogValue(events[index].Upstream, 1024)
+		events[index].UpstreamStatus = truncateLogValue(events[index].UpstreamStatus, 256)
+		events[index].UpstreamResponseTime = truncateLogValue(events[index].UpstreamResponseTime, 256)
+		events[index].UserAgent = truncateLogValue(events[index].UserAgent, 4096)
+		events[index].Referer = truncateLogValue(events[index].Referer, 4096)
+		events[index].ContentType = truncateLogValue(events[index].ContentType, 1024)
+		events[index].ResponseContentType = truncateLogValue(events[index].ResponseContentType, 1024)
+		events[index].Accept = truncateLogValue(events[index].Accept, 2048)
+		events[index].Range = truncateLogValue(events[index].Range, 1024)
 		if events[index].Timestamp.IsZero() {
 			events[index].Timestamp = time.Now().UTC()
 		}
@@ -1326,6 +1404,15 @@ func (s *Server) writeLogs(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	writeJSON(response, http.StatusAccepted, map[string]int{"accepted": len(accepted)})
+}
+
+func truncateLogValue(value string, maximum int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) > maximum {
+		return string(runes[:maximum])
+	}
+	return value
 }
 
 func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {

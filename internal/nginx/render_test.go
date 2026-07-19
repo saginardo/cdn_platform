@@ -14,7 +14,8 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=5g use_temp_path=off", "listen 443 ssl default_server;", "ssl_reject_handshake on;", "client_max_body_size 128m;", "keepalive_timeout 300s;", "keepalive_requests 1000;", "keepalive 30;", "proxy_connect_timeout 10s;", "recursive_error_pages on;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "map $uri $cdn_is_static_asset", `map "$cdn_is_static_asset:$cdn_has_cookie" $cdn_cookie_cache_bypass`, `map "$cdn_is_static_asset:$cdn_has_auth" $cdn_upstream_cookie`, "proxy_cache_bypass $cdn_has_auth $cdn_cookie_cache_bypass", "proxy_no_cache $cdn_has_auth $cdn_cookie_cache_bypass $upstream_http_set_cookie", "proxy_set_header Cookie $cdn_upstream_cookie", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Upgrade \"\";", "proxy_set_header Connection \"\";", "location @cdn_http_site-1", "location @cdn_stream_site-1", "location @cdn_backup_site-1", "location @cdn_stream_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health", `return 200 "site=site-1\n";`} {
+	token := cacheToken("site-1")
+	for _, expected := range []string{"proxy_cache_path /opt/cdn-edge/cache/sites/" + token + " levels=1:2 keys_zone=cdn_cache_" + token + ":10m inactive=7d max_size=1g use_temp_path=off", "proxy_cache cdn_cache_" + token, "listen 443 ssl default_server;", "ssl_reject_handshake on;", "client_max_body_size 128m;", "keepalive_timeout 300s;", "keepalive_requests 1000;", "keepalive 30;", "proxy_connect_timeout 10s;", "recursive_error_pages on;", "ssl_certificate /opt/cdn-edge/config/certs/site-1.crt", "access_log /opt/cdn-edge/logs/access.json cdn_json", `"request_id":"$request_id"`, `"user_agent":"$http_user_agent"`, "proxy_cache_lock on", "proxy_cache_background_update on", "proxy_cache_use_stale error timeout", "map $uri $cdn_is_static_asset", `map "$cdn_is_static_asset:$cdn_has_cookie" $cdn_cookie_cache_bypass`, `map "$cdn_is_static_asset:$cdn_has_auth" $cdn_upstream_cookie`, "proxy_cache_bypass $cdn_has_auth $cdn_cookie_cache_bypass", "proxy_no_cache $cdn_has_auth $cdn_cookie_cache_bypass $upstream_http_set_cookie", "proxy_set_header Cookie $cdn_upstream_cookie", "upstream origin_site-1_primary", "upstream origin_site-1_backup", "proxy_ssl_name origin.example.test", "proxy_ssl_name backup.example.test", "proxy_set_header Host backup.example.test", "proxy_set_header Upgrade \"\";", "proxy_set_header Connection \"\";", "location @cdn_http_site-1", "location @cdn_stream_site-1", "location @cdn_backup_site-1", "location @cdn_stream_backup_site-1", "site-1:7:$scheme$host$request_uri", "location = /__cdn_health", `return 200 "site=site-1\n";`} {
 		if !strings.Contains(configuration, expected) {
 			t.Fatalf("missing %q from config:\n%s", expected, configuration)
 		}
@@ -52,6 +53,58 @@ func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {
 	}
 	if strings.Contains(configuration, "max_size=50g") {
 		t.Fatalf("configuration still uses the retired 50g default:\n%s", configuration)
+	}
+}
+
+func TestRenderUsesIndependentPerSiteCacheLimits(t *testing.T) {
+	override := 7
+	sites := []domain.Site{
+		{ID: "site-a", Name: "a", Domains: []string{"a.example.test"}, PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true},
+		{ID: "site-b", Name: "b", Domains: []string{"b.example.test"}, PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, CacheMaxSizeGB: &override, Enabled: true},
+	}
+	configuration, err := RenderWithOptions(sites, nil, nil, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, expectedSize := range []string{"3g", "7g"} {
+		token := cacheToken(sites[index].ID)
+		for _, expected := range []string{
+			"/opt/cdn-edge/cache/sites/" + token,
+			"keys_zone=cdn_cache_" + token + ":10m",
+			"max_size=" + expectedSize,
+			"proxy_cache cdn_cache_" + token,
+		} {
+			if !strings.Contains(configuration, expected) {
+				t.Fatalf("missing %q from config:\n%s", expected, configuration)
+			}
+		}
+	}
+	total, err := TotalCacheMaxBytes(sites, 3)
+	if err != nil || total != 10<<30 {
+		t.Fatalf("cache total = %d, err=%v", total, err)
+	}
+}
+
+func TestRenderWithLegacyCacheUsesOneExistingSharedPath(t *testing.T) {
+	override := 7
+	sites := []domain.Site{
+		{ID: "site-a", Name: "a", Domains: []string{"a.example.test"}, PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true},
+		{ID: "site-b", Name: "b", Domains: []string{"b.example.test"}, PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, CacheMaxSizeGB: &override, Enabled: true},
+	}
+	configuration, err := RenderWithLegacyCache(sites, nil, nil, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"proxy_cache_path /opt/cdn-edge/cache levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size=10g",
+		"proxy_cache cdn_cache;",
+	} {
+		if !strings.Contains(configuration, expected) {
+			t.Fatalf("missing %q from legacy-compatible config:\n%s", expected, configuration)
+		}
+	}
+	if strings.Count(configuration, "proxy_cache_path ") != 1 || strings.Contains(configuration, "/cache/sites/") {
+		t.Fatalf("legacy-compatible config contains an independent cache path:\n%s", configuration)
 	}
 }
 

@@ -48,12 +48,25 @@ func (c *cacheUsageCollector) collect(ctx context.Context) error {
 		return err
 	}
 	usage := &domain.CacheStorageUsage{
-		UsedBytes: usedBytes, TotalBytes: c.totalBytes, CollectedAt: time.Now().UTC(),
+		UsedBytes: usedBytes, CollectedAt: time.Now().UTC(),
 	}
 	c.mu.Lock()
+	usage.TotalBytes = c.totalBytes
 	c.usage = usage
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *cacheUsageCollector) SetTotalBytes(totalBytes int64) {
+	if totalBytes <= 0 {
+		return
+	}
+	c.mu.Lock()
+	c.totalBytes = totalBytes
+	if c.usage != nil {
+		c.usage.TotalBytes = totalBytes
+	}
+	c.mu.Unlock()
 }
 
 func (c *cacheUsageCollector) Snapshot() *domain.CacheStorageUsage {

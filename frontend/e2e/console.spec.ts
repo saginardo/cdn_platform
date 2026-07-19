@@ -73,6 +73,7 @@ const site = {
   dns_ttl_seconds: null,
   tcp_only: false,
   tcp_forwards: [],
+  cache_max_size_gb: null,
   cache_generation: 2,
   config_version: 8,
   published: true,
@@ -82,8 +83,64 @@ const site = {
   updated_at: now.toISOString(),
 };
 
+const accessLogs = [
+  {
+    id: "request-404",
+    timestamp: now.toISOString(),
+    node_id: "node-1",
+    site_id: "site-1",
+    client_ip: "203.0.113.25",
+    host: "cdn.example.com",
+    scheme: "https",
+    protocol: "HTTP/2.0",
+    method: "GET",
+    path: "/assets/releases/2026/07/18/a-very-long-directory-name/another-very-long-directory-name/application.bundle.js",
+    status: 404,
+    request_bytes: 2048,
+    bytes: 8192,
+    duration_ms: 37,
+    upstream: "192.0.2.10:443",
+    upstream_status: "404",
+    upstream_response_time: "0.036",
+    cache_status: "MISS",
+    user_agent: "Mozilla/5.0 (Playwright request detail test)",
+    referer: "https://cdn.example.com/releases",
+    content_type: "application/json",
+    response_content_type: "text/html; charset=utf-8",
+    accept: "text/html,application/xhtml+xml",
+    range: "bytes=0-4095",
+  },
+  {
+    id: "request-502",
+    timestamp: series[22].time,
+    node_id: "node-1",
+    site_id: "site-1",
+    client_ip: "203.0.113.26",
+    host: "cdn.example.com",
+    scheme: "https",
+    protocol: "HTTP/2.0",
+    method: "GET",
+    path: "/api/unavailable",
+    status: 502,
+    request_bytes: 512,
+    bytes: 128,
+    duration_ms: 1001,
+    upstream: "192.0.2.10:443",
+    upstream_status: "502",
+    upstream_response_time: "1.000",
+    cache_status: "MISS",
+    user_agent: "curl/8.10.1",
+    referer: "",
+    content_type: "",
+    response_content_type: "text/plain",
+    accept: "*/*",
+    range: "",
+  },
+];
+
 async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
   let branding = { name: "CDN Platform", subtitle: "控制面板" };
+  let cacheDefaultSizeGB = 1;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (
@@ -95,6 +152,21 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(branding),
+      });
+      return;
+    }
+    if (
+      url.pathname === "/api/settings/cache" &&
+      route.request().method() === "PUT"
+    ) {
+      const input = route.request().postDataJSON() as {
+        default_size_gb: number;
+      };
+      cacheDefaultSizeGB = input.default_size_gb;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ default_size_gb: cacheDefaultSizeGB }),
       });
       return;
     }
@@ -127,13 +199,15 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       },
       "/api/nodes": [],
       "/api/logs": {
-        logs: [],
+        logs: accessLogs,
         from: series[22].time,
         to: now.toISOString(),
         offset: 0,
         page_size: 20,
         has_more: false,
       },
+      "/api/logs/request-404": accessLogs[0],
+      "/api/logs/request-502": accessLogs[1],
       "/api/security": {
         policies: [],
         rate_limit_policies: [],
@@ -144,6 +218,7 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       },
       "/api/settings": {
         branding,
+        cache: { default_size_gb: cacheDefaultSizeGB },
         dns: { default_ttl_seconds: 60 },
         cloudflare: {
           source: "environment",
@@ -424,6 +499,73 @@ test("security tabs fit on one line without scrollbars", async ({ page }) => {
     overflowY: "visible",
     rows: 1,
   });
+});
+
+test("log rows truncate long paths, color errors, and open request details", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await mockAPI(page);
+  await page.goto("/#/logs");
+
+  const notFoundRow = page.getByRole("row", {
+    name: new RegExp(`查看请求 GET ${accessLogs[0].path}`),
+  });
+  const longPath = notFoundRow.locator("code");
+  await expect(longPath).toHaveAttribute("title", accessLogs[0].path);
+  expect(
+    await longPath.evaluate(
+      (element) => element.scrollWidth > element.clientWidth,
+    ),
+  ).toBe(true);
+  const requestCell = notFoundRow.locator("td").nth(1);
+  const statusCell = notFoundRow.locator("td").nth(2);
+  const [requestBox, statusBox] = await Promise.all([
+    requestCell.boundingBox(),
+    statusCell.boundingBox(),
+  ]);
+  expect(requestBox?.x).toBeDefined();
+  expect(statusBox?.x).toBeDefined();
+  expect((requestBox?.x ?? 0) + (requestBox?.width ?? 0)).toBeLessThanOrEqual(
+    (statusBox?.x ?? 0) + 1,
+  );
+  await expect(notFoundRow.getByText("404", { exact: true })).toHaveClass(
+    /bg-amber-50/,
+  );
+  const badGatewayRow = page.getByRole("row", {
+    name: new RegExp(`查看请求 GET ${accessLogs[1].path}`),
+  });
+  await expect(badGatewayRow.getByText("502", { exact: true })).toHaveClass(
+    /bg-red-50/,
+  );
+
+  await notFoundRow.click();
+  await expect(
+    page.getByRole("heading", { name: "请求详情", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByText(accessLogs[0].user_agent)).toBeVisible();
+  await expect(page.getByText("请求大小", { exact: true })).toBeVisible();
+  await expect(page.getByText("响应大小", { exact: true })).toBeVisible();
+  await expect(page.getByText("Range", { exact: true })).toBeVisible();
+  await expect(page.getByText("bytes=0-4095", { exact: true })).toBeVisible();
+});
+
+test("cache defaults are configurable and inherited by site editors", async ({
+  page,
+}) => {
+  await mockAPI(page);
+  await page.goto("/#/settings");
+  await page.getByRole("tab", { name: "网络与 DNS" }).click();
+  const cacheSize = page.getByLabel("全局默认上限（GB）");
+  await expect(cacheSize).toHaveValue("1");
+  await cacheSize.fill("4");
+  await page.getByRole("button", { name: "保存缓存配置" }).click();
+  await expect(page.getByText("全局缓存上限已保存")).toBeVisible();
+
+  await page.goto("/#/sites/site-1");
+  await expect(page.getByText("当前全局默认 4 GB")).toBeVisible();
+  await expect(page.getByLabel("继承全局缓存上限")).toBeChecked();
+  await expect(page.getByLabel("站点缓存上限（GB）")).toBeDisabled();
 });
 
 test("all primary workspaces and the new-site editor mount without runtime errors", async ({

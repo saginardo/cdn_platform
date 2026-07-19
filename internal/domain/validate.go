@@ -28,6 +28,11 @@ func NormalizeAndValidateSite(site *Site) error {
 			return err
 		}
 	}
+	if site.CacheMaxSizeGB != nil {
+		if err := ValidateCacheMaxSizeGB(*site.CacheMaxSizeGB); err != nil {
+			return err
+		}
+	}
 	if len(site.Domains) == 0 {
 		return fmt.Errorf("at least one domain is required")
 	}
@@ -213,6 +218,26 @@ func ValidateDNSTTLSeconds(value int) error {
 		return fmt.Errorf("DNS TTL must be between %d and %d seconds", MinDNSTTLSeconds, MaxDNSTTLSeconds)
 	}
 	return nil
+}
+
+func ValidateCacheMaxSizeGB(value int) error {
+	if value < MinCacheMaxSizeGB || value > MaxCacheMaxSizeGB {
+		return fmt.Errorf("cache maximum size must be between %d and %d GB", MinCacheMaxSizeGB, MaxCacheMaxSizeGB)
+	}
+	return nil
+}
+
+func EffectiveCacheMaxSizeGB(site Site, defaultSize int) (int, error) {
+	if err := ValidateCacheMaxSizeGB(defaultSize); err != nil {
+		return 0, err
+	}
+	if site.CacheMaxSizeGB == nil {
+		return defaultSize, nil
+	}
+	if err := ValidateCacheMaxSizeGB(*site.CacheMaxSizeGB); err != nil {
+		return 0, err
+	}
+	return *site.CacheMaxSizeGB, nil
 }
 
 func ValidateOrigin(origin *Origin) error {

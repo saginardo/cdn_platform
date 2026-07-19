@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Cloud,
   Globe2,
+  HardDrive,
   LoaderCircle,
   Mail,
   Palette,
@@ -86,6 +87,10 @@ export function SettingsPage() {
               />
             </TabsContent>
             <TabsContent value="general" className="grid gap-4 lg:grid-cols-2">
+              <CacheForm
+                key={`cache-${query.data.cache.default_size_gb}`}
+                settings={query.data}
+              />
               <DNSForm
                 key={`dns-${query.data.dns.default_ttl_seconds}`}
                 settings={query.data}
@@ -264,6 +269,64 @@ function DNSForm({ settings }: { settings: Settings }) {
               <Save />
             )}
             保存 DNS
+          </Button>
+        </div>
+      </form>
+    </FormCard>
+  );
+}
+
+function CacheForm({ settings }: { settings: Settings }) {
+  const queryClient = useQueryClient();
+  const [size, setSize] = useState(settings.cache.default_size_gb);
+  const mutation = useMutation({
+    mutationFn: () =>
+      api("/api/settings/cache", {
+        method: "PUT",
+        body: JSON.stringify({ default_size_gb: size }),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["settings"] });
+      toast.success("全局缓存上限已保存");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  return (
+    <FormCard
+      title="缓存"
+      description="站点默认磁盘配额"
+      icon={<HardDrive />}
+      source="控制面设置"
+    >
+      <form
+        className="grid gap-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          mutation.mutate();
+        }}
+      >
+        <Field label="全局默认上限（GB）" id="cache-size">
+          <Input
+            id="cache-size"
+            type="number"
+            min={1}
+            max={1024}
+            required
+            value={size}
+            onChange={(event) => setSize(Number(event.target.value))}
+          />
+        </Field>
+        <p className="text-xs text-muted-foreground">
+          继承该值的站点在下次发布时生效。
+        </p>
+        <div>
+          <Button type="submit" disabled={mutation.isPending}>
+            {mutation.isPending ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <Save />
+            )}
+            保存缓存配置
           </Button>
         </div>
       </form>

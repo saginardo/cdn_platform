@@ -23,6 +23,11 @@ const LogsPage = lazy(() =>
     default: module.LogsPage,
   })),
 );
+const LogDetailPage = lazy(() =>
+  import("@/features/logs/log-detail-page").then((module) => ({
+    default: module.LogDetailPage,
+  })),
+);
 const SecurityPage = lazy(() =>
   import("@/features/security/security-page").then((module) => ({
     default: module.SecurityPage,
@@ -89,6 +94,7 @@ export default function App() {
                       element={<OverviewSitePage />}
                     />
                     <Route path="/logs" element={<LogsPage />} />
+                    <Route path="/logs/:logId" element={<LogDetailPage />} />
                     <Route path="/security" element={<SecurityPage />} />
                     <Route path="/nodes" element={<NodesPage />} />
                     <Route path="/nodes/:nodeId" element={<NodeDetailPage />} />

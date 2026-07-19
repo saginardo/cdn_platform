@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -171,7 +170,7 @@ func (v ResticBackupRepositoryValidator) Validate(ctx context.Context, runtime B
 	if err := os.WriteFile(passwordPath, []byte(runtime.ResticPassword), 0o600); err != nil {
 		return fmt.Errorf("create Restic validation password file: %w", err)
 	}
-	command := exec.CommandContext(ctx, binary, "snapshots", "--latest", "1")
+	command := resticCommandContext(ctx, binary, "snapshots", "--no-lock", "--latest", "1")
 	command.Env = backupCommandEnvironment(runtime, cacheDir, passwordPath)
 	output, err := command.CombinedOutput()
 	if err == nil {

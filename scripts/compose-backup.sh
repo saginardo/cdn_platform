@@ -2,6 +2,12 @@
 set -euo pipefail
 umask 077
 
+phase="${1:-all}"
+if [[ "$phase" != "all" && "$phase" != "retention" ]]; then
+  echo "usage: compose-backup.sh [retention]" >&2
+  exit 2
+fi
+
 restore_root="${ONLINE_RESTORE_ROOT:-/var/lib/cdn-platform-restore}"
 mkdir -p "$restore_root"
 operation_lock="$restore_root/operations.lock"
@@ -34,42 +40,58 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for required in "$data_dir/control.db" "$RESTIC_PASSWORD_FILE"; do
+required_inputs=("$RESTIC_PASSWORD_FILE")
+if [[ "$phase" == "all" ]]; then
+  required_inputs+=("$data_dir/control.db")
+fi
+for required in "${required_inputs[@]}"; do
   if [[ ! -r "$required" ]]; then
     echo "required backup input is not readable: $required" >&2
     exit 2
   fi
 done
 
-rm -rf "$control_staging" "$clickhouse_staging"
-mkdir -p "$control_staging"
-sqlite3 "$data_dir/control.db" ".backup '$control_staging/control.db'"
-chmod 0600 "$control_staging/control.db"
+if [[ "$phase" == "all" ]]; then
+  rm -rf "$control_staging" "$clickhouse_staging"
+  mkdir -p "$control_staging"
+  sqlite3 "$data_dir/control.db" ".backup '$control_staging/control.db'"
+  chmod 0600 "$control_staging/control.db"
 
-archive_inputs=()
-for directory in pki letsencrypt; do
-  if [[ -d "$data_dir/$directory" ]]; then
-    archive_inputs+=("$directory")
+  archive_inputs=()
+  for directory in pki letsencrypt; do
+    if [[ -d "$data_dir/$directory" ]]; then
+      archive_inputs+=("$directory")
+    fi
+  done
+  if ((${#archive_inputs[@]})); then
+    tar --create --gzip --file "$control_staging/control-secrets.tar.gz" --directory "$data_dir" "${archive_inputs[@]}"
+  else
+    tar --create --gzip --file "$control_staging/control-secrets.tar.gz" --files-from /dev/null
   fi
-done
-if ((${#archive_inputs[@]})); then
-  tar --create --gzip --file "$control_staging/control-secrets.tar.gz" --directory "$data_dir" "${archive_inputs[@]}"
-else
-  tar --create --gzip --file "$control_staging/control-secrets.tar.gz" --files-from /dev/null
+  tar --create --gzip --file "$control_staging/control-tls.tar.gz" \
+    --exclude='./before-restore-*' --exclude='./.online-restore-*' \
+    --directory "$tls_dir" .
+
+  backup_query="BACKUP DATABASE ${clickhouse_database} TO Disk('backups', '${snapshot_name}')"
+  curl --fail-with-body --silent --show-error --data-binary "$backup_query" "$clickhouse_url/"
+
+  restic backup \
+    "$control_staging" \
+    "$clickhouse_staging" \
+    /deployment/config/control.env \
+    /deployment/config/backup.env \
+    /deployment/compose.yaml \
+    /deployment/Dockerfile \
+    --tag cdn-control-compose
 fi
-tar --create --gzip --file "$control_staging/control-tls.tar.gz" \
-  --exclude='./before-restore-*' --exclude='./.online-restore-*' \
-  --directory "$tls_dir" .
 
-backup_query="BACKUP DATABASE ${clickhouse_database} TO Disk('backups', '${snapshot_name}')"
-curl --fail-with-body --silent --show-error --data-binary "$backup_query" "$clickhouse_url/"
-
-restic backup \
-  "$control_staging" \
-  "$clickhouse_staging" \
-  /deployment/config/control.env \
-  /deployment/config/backup.env \
-  /deployment/compose.yaml \
-  /deployment/Dockerfile \
-  --tag cdn-control-compose
-restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune
+if restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --prune; then
+  exit 0
+else
+  exit_code=$?
+fi
+if [[ "$phase" == "all" ]]; then
+  echo "backup snapshot succeeded but retention failed" >&2
+  exit 76
+fi
+exit "$exit_code"

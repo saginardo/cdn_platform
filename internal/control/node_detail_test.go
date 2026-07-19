@@ -155,7 +155,9 @@ func TestEdgeHeartbeatRecordsMachineStatusForNodeDetail(t *testing.T) {
 
 	futureReport := controlTestMachineStatus(time.Now().UTC().Add(time.Hour))
 	futureReport.Version = "future"
-	futurePayload, err := json.Marshal(heartbeatRequest{MachineStatus: &futureReport})
+	futurePayload, err := json.Marshal(heartbeatRequest{
+		Capabilities: []string{domain.EdgeCapabilityMachineStatus}, MachineStatus: &futureReport,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,9 +168,9 @@ func TestEdgeHeartbeatRecordsMachineStatusForNodeDetail(t *testing.T) {
 	if futureResponse.Code != http.StatusOK {
 		t.Fatalf("future heartbeat status = %d, body=%s", futureResponse.Code, futureResponse.Body.String())
 	}
-	stored, err := database.GetNodeMachineStatus(node.ID)
-	if err != nil || stored.Version != "13.5" {
-		t.Fatalf("future report replaced machine status: %#v, err=%v", stored, err)
+	stored := server.nodeMachineStatus(node, time.Now().UTC())
+	if !stored.Available || stored.Report == nil || stored.Report.Version != "13.5" {
+		t.Fatalf("future report replaced machine status: %#v", stored)
 	}
 
 	invalidReport := controlTestMachineStatus(time.Now().UTC())
@@ -183,6 +185,15 @@ func TestEdgeHeartbeatRecordsMachineStatusForNodeDetail(t *testing.T) {
 	server.heartbeat(invalidResponse, invalid)
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("invalid heartbeat status = %d, body=%s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+
+	node, err = database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := (&Server{Store: database}).nodeMachineStatus(node, time.Now().UTC())
+	if restarted.Available || restarted.UnavailableReason != "等待边缘节点首次上报机器状态" {
+		t.Fatalf("machine status survived server restart: %#v", restarted)
 	}
 }
 

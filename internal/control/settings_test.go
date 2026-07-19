@@ -40,7 +40,7 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 		t.Fatal(err)
 	}
 	view := manager.View()
-	if view.Cloudflare.Source != SettingsSourceEnvironment || view.SMTP.Source != SettingsSourceEnvironment || view.Backup.Source != SettingsSourceEnvironment || view.DNS.DefaultTTLSeconds != 60 {
+	if view.Cloudflare.Source != SettingsSourceEnvironment || view.SMTP.Source != SettingsSourceEnvironment || view.Backup.Source != SettingsSourceEnvironment || view.DNS.DefaultTTLSeconds != 60 || view.Cache.DefaultSizeGB != 1 {
 		t.Fatalf("unexpected environment view: %#v", view)
 	}
 	if view.Branding != domain.DefaultBrandingSettings() {
@@ -81,6 +81,12 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 	if err := manager.SaveDNSDefaultTTL(180); err != nil {
 		t.Fatal(err)
 	}
+	if err := manager.SaveCacheDefaultSizeGB(6); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SaveCacheDefaultSizeGB(1025); err == nil {
+		t.Fatal("accepted invalid cache default")
+	}
 	backupSecret := "database-backup-secret"
 	backupPassword := "database-restic-password"
 	backup := domain.BackupSettings{Repository: "s3:https://db.r2.example.test/db-backup", AccessKeyID: "db-access", Region: "auto", BackupTime: "04:15", RandomDelaySeconds: 300}
@@ -105,7 +111,7 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 		t.Fatal(err)
 	}
 	view = reloaded.View()
-	if view.Cloudflare.Source != SettingsSourceDatabase || view.SMTP.Source != SettingsSourceDatabase || view.SMTP.PasswordConfigured != true || view.Backup.Source != SettingsSourceDatabase || !view.Backup.Configured || view.DNS.DefaultTTLSeconds != 180 {
+	if view.Cloudflare.Source != SettingsSourceDatabase || view.SMTP.Source != SettingsSourceDatabase || view.SMTP.PasswordConfigured != true || view.Backup.Source != SettingsSourceDatabase || !view.Backup.Configured || view.DNS.DefaultTTLSeconds != 180 || view.Cache.DefaultSizeGB != 6 {
 		t.Fatalf("unexpected reloaded view: %#v", view)
 	}
 	if view.Branding != branding {

@@ -156,6 +156,7 @@ func TestOnlineRestoreStagesCommitsAndAppliesVerifiedSnapshot(t *testing.T) {
 set -euo pipefail
 case "$1" in
   snapshots)
+	printf '%s\n' "$*" >>"$RESTIC_CALLS"
     printf '[{"id":"%s","short_id":"aaaaaaaa","time":"2026-07-18T01:02:03Z","tags":["cdn-control-compose"]}]' "$SNAPSHOT_ID"
     ;;
   restore)
@@ -175,6 +176,8 @@ esac
 	}
 	t.Setenv("SNAPSHOT_ID", snapshotID)
 	t.Setenv("FIXTURE_ROOT", fixtureRoot)
+	resticCalls := filepath.Join(temporary, "restic-calls")
+	t.Setenv("RESTIC_CALLS", resticCalls)
 
 	settingsDatabase, err := store.Open(filepath.Join(temporary, "settings.db"))
 	if err != nil {
@@ -215,6 +218,13 @@ esac
 	}
 	if len(snapshots) != 1 || snapshots[0].ID != snapshotID {
 		t.Fatalf("snapshots = %#v", snapshots)
+	}
+	calls, err := os.ReadFile(resticCalls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), "snapshots --no-lock --json --tag cdn-control-compose") {
+		t.Fatalf("snapshot listing acquired a repository lock: %s", calls)
 	}
 	job, err := manager.Start(snapshotID, snapshotID[:8])
 	if err != nil {

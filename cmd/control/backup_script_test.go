@@ -98,6 +98,65 @@ printf '%s\n' "$*" >>"$STATUS_LOG"
 	}
 }
 
+func TestBackupRunScriptRetriesRetentionWithoutRepeatingSnapshot(t *testing.T) {
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary := t.TempDir()
+	statusLog := filepath.Join(temporary, "status.log")
+	phaseLog := filepath.Join(temporary, "phases.log")
+	retentionAttempts := filepath.Join(temporary, "retention-attempts")
+	writeExecutable(t, filepath.Join(temporary, "cdn-control"), `#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STATUS_LOG"
+`)
+	backupCommand := filepath.Join(temporary, "backup")
+	writeExecutable(t, backupCommand, `#!/usr/bin/env bash
+if [[ "${1-}" != "retention" ]]; then
+  echo snapshot >>"$PHASE_LOG"
+  echo "retention failed after snapshot" >&2
+  exit 76
+fi
+echo retention >>"$PHASE_LOG"
+attempt=0
+if [[ -s "$RETENTION_ATTEMPTS" ]]; then attempt=$(<"$RETENTION_ATTEMPTS"); fi
+attempt=$((attempt + 1))
+printf '%s' "$attempt" >"$RETENTION_ATTEMPTS"
+if ((attempt < 2)); then
+  echo "retention still locked" >&2
+  exit 11
+fi
+`)
+	command := exec.Command("bash", filepath.Join(repositoryRoot, "scripts", "compose-backup-run.sh"))
+	command.Env = append(os.Environ(),
+		"PATH="+temporary+":"+os.Getenv("PATH"),
+		"STATUS_LOG="+statusLog,
+		"PHASE_LOG="+phaseLog,
+		"RETENTION_ATTEMPTS="+retentionAttempts,
+		"BACKUP_COMMAND="+backupCommand,
+		"BACKUP_STATUS_FILE="+filepath.Join(temporary, "backup.json"),
+		"BACKUP_MAX_ATTEMPTS=3",
+		"BACKUP_RETRY_DELAYS_SECONDS=0,0",
+	)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("backup wrapper: %v\n%s", err, output)
+	}
+	phases, err := os.ReadFile(phaseLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(phases) != "snapshot\nretention\nretention\n" {
+		t.Fatalf("backup phases = %q", phases)
+	}
+	statuses, err := os.ReadFile(statusLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(statuses), " succeeded 3 3 ") {
+		t.Fatalf("status log = %s", statuses)
+	}
+}
+
 func TestBackupRunScriptRecordsRestoreSkipWithoutRetry(t *testing.T) {
 	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {

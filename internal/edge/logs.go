@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cdn-platform/internal/domain"
+	"github.com/google/uuid"
 )
 
 const maxLogQueueBytes int64 = 256 << 20
@@ -153,16 +154,29 @@ func (f *LogForwarder) offset() int64 {
 }
 
 type nginxLog struct {
-	Timestamp       string      `json:"timestamp"`
-	SiteID          string      `json:"site_id"`
-	ClientIP        string      `json:"client_ip"`
-	Method          string      `json:"method"`
-	Path            string      `json:"path"`
-	Status          int         `json:"status"`
-	Bytes           int64       `json:"bytes"`
-	DurationSeconds json.Number `json:"duration_seconds"`
-	Upstream        string      `json:"upstream"`
-	CacheStatus     string      `json:"cache_status"`
+	RequestID            string      `json:"request_id"`
+	Timestamp            string      `json:"timestamp"`
+	SiteID               string      `json:"site_id"`
+	ClientIP             string      `json:"client_ip"`
+	Host                 string      `json:"host"`
+	Scheme               string      `json:"scheme"`
+	Protocol             string      `json:"protocol"`
+	Method               string      `json:"method"`
+	Path                 string      `json:"path"`
+	Status               int         `json:"status"`
+	RequestBytes         int64       `json:"request_bytes"`
+	Bytes                int64       `json:"bytes"`
+	DurationSeconds      json.Number `json:"duration_seconds"`
+	Upstream             string      `json:"upstream"`
+	UpstreamStatus       string      `json:"upstream_status"`
+	UpstreamResponseTime string      `json:"upstream_response_time"`
+	CacheStatus          string      `json:"cache_status"`
+	UserAgent            string      `json:"user_agent"`
+	Referer              string      `json:"referer"`
+	ContentType          string      `json:"content_type"`
+	ResponseContentType  string      `json:"response_content_type"`
+	Accept               string      `json:"accept"`
+	Range                string      `json:"range"`
 }
 
 func decodeNginxLog(line []byte) (domain.AccessLogEvent, error) {
@@ -177,7 +191,20 @@ func decodeNginxLog(line []byte) (domain.AccessLogEvent, error) {
 		return domain.AccessLogEvent{}, err
 	}
 	duration, _ := raw.DurationSeconds.Float64()
-	return domain.AccessLogEvent{Timestamp: timestamp, SiteID: raw.SiteID, ClientIP: raw.ClientIP, Method: raw.Method, Path: strings.SplitN(raw.Path, "?", 2)[0], Status: raw.Status, Bytes: raw.Bytes, DurationMS: int64(duration * 1000), Upstream: raw.Upstream, CacheStatus: raw.CacheStatus}, nil
+	requestID := strings.TrimSpace(raw.RequestID)
+	if requestID == "" {
+		requestID = uuid.NewString()
+	}
+	return domain.AccessLogEvent{
+		ID: requestID, Timestamp: timestamp, SiteID: raw.SiteID, ClientIP: raw.ClientIP,
+		Host: raw.Host, Scheme: raw.Scheme, Protocol: raw.Protocol, Method: raw.Method,
+		Path: strings.SplitN(raw.Path, "?", 2)[0], Status: raw.Status, RequestBytes: raw.RequestBytes,
+		Bytes: raw.Bytes, DurationMS: int64(duration * 1000), Upstream: raw.Upstream,
+		UpstreamStatus: raw.UpstreamStatus, UpstreamResponseTime: raw.UpstreamResponseTime,
+		CacheStatus: raw.CacheStatus, UserAgent: raw.UserAgent, Referer: raw.Referer,
+		ContentType: raw.ContentType, ResponseContentType: raw.ResponseContentType,
+		Accept: raw.Accept, Range: raw.Range,
+	}, nil
 }
 
 func joinLines(lines [][]byte) []byte {

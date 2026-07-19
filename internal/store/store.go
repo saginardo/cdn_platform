@@ -118,6 +118,7 @@ CREATE TABLE IF NOT EXISTS sites (
 	dns_ttl_seconds INTEGER,
 	tcp_only INTEGER NOT NULL DEFAULT 0,
 	tcp_forwards_json TEXT NOT NULL DEFAULT '[]',
+	cache_max_size_gb INTEGER,
   cache_generation INTEGER NOT NULL DEFAULT 1,
   config_version INTEGER NOT NULL DEFAULT 1,
   published INTEGER NOT NULL DEFAULT 0,
@@ -152,6 +153,7 @@ CREATE TABLE IF NOT EXISTS node_states (
 	nginx_stream_config TEXT NOT NULL DEFAULT '',
 	nginx_fragments_json TEXT NOT NULL DEFAULT 'null',
   public_ports_json TEXT NOT NULL DEFAULT '[]',
+	cache_max_bytes INTEGER NOT NULL DEFAULT 1073741824,
   certificate_ciphertext BLOB,
   private_key_ciphertext BLOB,
   updated_at TEXT NOT NULL
@@ -234,6 +236,7 @@ CREATE TABLE IF NOT EXISTS control_settings (
   backup_region TEXT NOT NULL DEFAULT 'us-east-1',
   backup_time TEXT NOT NULL DEFAULT '03:25',
   backup_random_delay_seconds INTEGER NOT NULL DEFAULT 1200,
+	cache_default_size_gb INTEGER NOT NULL DEFAULT 1,
   brand_name TEXT NOT NULL DEFAULT 'CDN Platform',
   brand_subtitle TEXT NOT NULL DEFAULT '控制面板',
   updated_at TEXT NOT NULL
@@ -250,12 +253,6 @@ CREATE TABLE IF NOT EXISTS node_cache_storage (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
   used_bytes INTEGER NOT NULL,
   total_bytes INTEGER NOT NULL,
-  collected_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS node_machine_status (
-  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
-  status_json TEXT NOT NULL,
   collected_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -1176,8 +1173,8 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 	if err := validateSiteNodes(tx, site.Nodes); err != nil {
 		return err
 	}
-	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_generation, config_version, published, enabled, deleting, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, boolInt(site.TCPOnly), string(tcpForwards), site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.CreatedAt), stamp(site.UpdatedAt))
+	_, err = tx.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_max_size_gb, cache_generation, config_version, published, enabled, deleting, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		site.ID, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, boolInt(site.TCPOnly), string(tcpForwards), site.CacheMaxSizeGB, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.CreatedAt), stamp(site.UpdatedAt))
 	if err != nil {
 		return err
 	}
@@ -1188,11 +1185,11 @@ func (s *Store) insertSite(site domain.Site, zoneID string) error {
 }
 
 func (s *Store) GetSite(id string) (domain.Site, string, error) {
-	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites WHERE id = ?`, id))
+	return scanSite(s.db.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_max_size_gb, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites WHERE id = ?`, id))
 }
 
 func (s *Store) ListSites() ([]domain.Site, error) {
-	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json, backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_max_size_gb, cache_generation, config_version, published, enabled, deleting, created_at, updated_at FROM sites ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -1212,10 +1209,10 @@ func scanSite(row scanner) (domain.Site, string, error) {
 	var site domain.Site
 	var zoneID, domains, nodes, primary, streamPaths, tcpForwards string
 	var backup sql.NullString
-	var dnsTTL sql.NullInt64
+	var dnsTTL, cacheMaxSizeGB sql.NullInt64
 	var passthrough, tcpOnly, published, enabled, deleting int
 	var createdAt, updatedAt string
-	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.ReadWriteTimeoutSeconds, &dnsTTL, &tcpOnly, &tcpForwards, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &deleting, &createdAt, &updatedAt)
+	err := row.Scan(&site.ID, &site.Name, &zoneID, &domains, &nodes, &primary, &backup, &streamPaths, &passthrough, &site.ClientMaxBodySizeMB, &site.ReadWriteTimeoutSeconds, &dnsTTL, &tcpOnly, &tcpForwards, &cacheMaxSizeGB, &site.CacheGeneration, &site.ConfigVersion, &published, &enabled, &deleting, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Site{}, "", ErrNotFound
 	}
@@ -1259,6 +1256,10 @@ func scanSite(row scanner) (domain.Site, string, error) {
 	if dnsTTL.Valid {
 		value := int(dnsTTL.Int64)
 		site.DNSTTLSeconds = &value
+	}
+	if cacheMaxSizeGB.Valid {
+		value := int(cacheMaxSizeGB.Int64)
+		site.CacheMaxSizeGB = &value
 	}
 	site.Published = published != 0
 	site.Enabled = enabled != 0
@@ -1319,7 +1320,7 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	if err := replaceSiteDomainClaims(tx, site.ID, reservedDomains); err != nil {
 		return domain.Site{}, err
 	}
-	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, dns_ttl_seconds=?, tcp_only=?, tcp_forwards_json=?, cache_generation=?, config_version=?, published=?, enabled=?, deleting=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, boolInt(site.TCPOnly), string(tcpForwards), site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.UpdatedAt), site.ID)
+	_, err = tx.Exec(`UPDATE sites SET name=?, zone_id=?, domains_json=?, node_ids_json=?, primary_origin_json=?, backup_origin_json=?, stream_paths_json=?, passthrough=?, client_max_body_size_mb=?, read_write_timeout_seconds=?, dns_ttl_seconds=?, tcp_only=?, tcp_forwards_json=?, cache_max_size_gb=?, cache_generation=?, config_version=?, published=?, enabled=?, deleting=?, updated_at=? WHERE id=?`, site.Name, zoneID, string(domains), string(nodes), string(primary), backup, string(streamPaths), boolInt(site.Passthrough), site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.DNSTTLSeconds, boolInt(site.TCPOnly), string(tcpForwards), site.CacheMaxSizeGB, site.CacheGeneration, site.ConfigVersion, boolInt(site.Published), boolInt(site.Enabled), boolInt(site.Deleting), stamp(site.UpdatedAt), site.ID)
 	if err != nil {
 		return domain.Site{}, err
 	}
@@ -1814,7 +1815,7 @@ func saveNodeStatesTx(tx *sql.Tx, updates []NodeStateUpdate, updatedAt string) e
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO node_states(node_id, version, nginx_config, nginx_stream_config, nginx_fragments_json, public_ports_json, certificate_ciphertext, private_key_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(node_id) DO UPDATE SET version=excluded.version, nginx_config=excluded.nginx_config, nginx_stream_config=excluded.nginx_stream_config, nginx_fragments_json=excluded.nginx_fragments_json, public_ports_json=excluded.public_ports_json, certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=NULL, updated_at=excluded.updated_at`, update.NodeID, update.State.Version, update.State.NginxConfig, update.State.NginxStreamConfig, string(fragments), string(ports), update.CertificatesCiphertext, updatedAt); err != nil {
+		if _, err := tx.Exec(`INSERT INTO node_states(node_id, version, nginx_config, nginx_stream_config, nginx_fragments_json, public_ports_json, cache_max_bytes, certificate_ciphertext, private_key_ciphertext, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?) ON CONFLICT(node_id) DO UPDATE SET version=excluded.version, nginx_config=excluded.nginx_config, nginx_stream_config=excluded.nginx_stream_config, nginx_fragments_json=excluded.nginx_fragments_json, public_ports_json=excluded.public_ports_json, cache_max_bytes=excluded.cache_max_bytes, certificate_ciphertext=excluded.certificate_ciphertext, private_key_ciphertext=NULL, updated_at=excluded.updated_at`, update.NodeID, update.State.Version, update.State.NginxConfig, update.State.NginxStreamConfig, string(fragments), string(ports), update.State.CacheMaxBytes, update.CertificatesCiphertext, updatedAt); err != nil {
 			return err
 		}
 	}
@@ -1825,7 +1826,7 @@ func (s *Store) NodeState(nodeID string) (domain.DesiredState, []byte, error) {
 	var state domain.DesiredState
 	var certificates []byte
 	var fragments, ports string
-	err := s.db.QueryRow(`SELECT version, nginx_config, nginx_stream_config, nginx_fragments_json, public_ports_json, certificate_ciphertext FROM node_states WHERE node_id = ?`, nodeID).Scan(&state.Version, &state.NginxConfig, &state.NginxStreamConfig, &fragments, &ports, &certificates)
+	err := s.db.QueryRow(`SELECT version, nginx_config, nginx_stream_config, nginx_fragments_json, public_ports_json, cache_max_bytes, certificate_ciphertext FROM node_states WHERE node_id = ?`, nodeID).Scan(&state.Version, &state.NginxConfig, &state.NginxStreamConfig, &fragments, &ports, &state.CacheMaxBytes, &certificates)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.DesiredState{}, nil, ErrNotFound
 	}

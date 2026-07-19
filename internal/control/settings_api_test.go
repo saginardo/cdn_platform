@@ -96,6 +96,14 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	if response.Code != http.StatusOK || settings.DNSDefaultTTL() != 180 {
 		t.Fatalf("valid TTL = %d %s", response.Code, response.Body.String())
 	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/cache", map[string]any{"default_size_gb": 0}, true)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid cache default = %d %s", response.Code, response.Body.String())
+	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/cache", map[string]any{"default_size_gb": 4}, true)
+	if response.Code != http.StatusOK || settings.CacheDefaultSizeGB() != 4 {
+		t.Fatalf("valid cache default = %d %s", response.Code, response.Body.String())
+	}
 	response = settingsRequest(t, server, http.MethodPut, "/api/settings/cloudflare", map[string]any{"token": "bad-token"}, true)
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("invalid token = %d %s", response.Code, response.Body.String())
@@ -163,6 +171,9 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	}
 	if !strings.Contains(body, `"branding":{"name":"DustK CDN","subtitle":"运营面板"}`) {
 		t.Fatalf("settings response lacks branding: %s", body)
+	}
+	if !strings.Contains(body, `"cache":{"default_size_gb":4}`) {
+		t.Fatalf("settings response lacks cache default: %s", body)
 	}
 
 	response = settingsRequest(t, server, http.MethodDelete, "/api/settings/cloudflare", nil, true)

@@ -25,6 +25,15 @@ type searchLogStore struct {
 	err   error
 }
 
+func (s *searchLogStore) Get(_ context.Context, id string) (domain.AccessLogEvent, error) {
+	for _, event := range s.page.Events {
+		if event.ID == id {
+			return event, nil
+		}
+	}
+	return domain.AccessLogEvent{}, logstore.ErrNotFound
+}
+
 type appendLogStore struct {
 	logstore.Noop
 	events []domain.AccessLogEvent
@@ -41,11 +50,25 @@ func (s *searchLogStore) Search(_ context.Context, query logstore.LogQuery) (log
 }
 
 func TestLogSearchRouteRequiresAdmin(t *testing.T) {
+	for _, path := range []string{"/api/logs", "/api/logs/request-1"} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		(&Server{}).Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: unexpected response status: %d", path, response.Code)
+		}
+	}
+}
+
+func TestLogDetailReturnsEntry(t *testing.T) {
+	entry := domain.AccessLogEvent{ID: "request-1", Method: "GET", Path: "/long/path", UserAgent: "test-agent"}
+	logs := &searchLogStore{page: logstore.LogPage{Events: []domain.AccessLogEvent{entry}}}
+	request := httptest.NewRequest(http.MethodGet, "/api/logs/request-1", nil)
+	request.SetPathValue("id", "request-1")
 	response := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodGet, "/api/logs", nil)
-	(&Server{}).Handler().ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("unexpected response status: %d", response.Code)
+	(&Server{Logs: logs}).getLog(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"user_agent":"test-agent"`) {
+		t.Fatalf("unexpected detail response: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
@@ -166,7 +189,10 @@ func TestEdgeLogsAcceptPublishedAssignmentWhileDraftMoveIsPending(t *testing.T) 
 
 	logs := &appendLogStore{}
 	server := &Server{Store: database, Logs: logs}
-	body, err := json.Marshal([]domain.AccessLogEvent{{SiteID: site.ID, Method: http.MethodGet, Path: "/"}})
+	body, err := json.Marshal([]domain.AccessLogEvent{{
+		ID: "invalid/id", SiteID: site.ID, Method: http.MethodGet, Path: "/asset.js?token=secret",
+		Status: 200, RequestBytes: 512, Bytes: 1024, UserAgent: strings.Repeat("x", 5000),
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,5 +202,8 @@ func TestEdgeLogsAcceptPublishedAssignmentWhileDraftMoveIsPending(t *testing.T) 
 	server.writeLogs(response, request)
 	if response.Code != http.StatusAccepted || len(logs.events) != 1 || logs.events[0].NodeID != oldNode.ID || logs.events[0].SiteID != site.ID {
 		t.Fatalf("published-assignment logs were rejected: status=%d events=%#v body=%s", response.Code, logs.events, response.Body.String())
+	}
+	if !validLogEntryID(logs.events[0].ID) || logs.events[0].ID == "invalid/id" || logs.events[0].Path != "/asset.js" || len([]rune(logs.events[0].UserAgent)) != 4096 {
+		t.Fatalf("uploaded log was not normalized: %#v", logs.events[0])
 	}
 }

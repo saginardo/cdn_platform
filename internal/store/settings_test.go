@@ -23,7 +23,7 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.DNSDefaultTTLSeconds != domain.DefaultDNSTTLSeconds || settings.SMTP.Override {
+	if settings.DNSDefaultTTLSeconds != domain.DefaultDNSTTLSeconds || settings.CacheDefaultSizeGB != domain.DefaultCacheMaxSizeGB || settings.SMTP.Override {
 		t.Fatalf("unexpected defaults: %#v", settings)
 	}
 	if settings.BackupOverride || settings.Backup.Region != domain.DefaultBackupRegion || settings.Backup.BackupTime != domain.DefaultBackupTime {
@@ -42,6 +42,12 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if err := database.SaveDNSDefaultTTL(301); err == nil {
 		t.Fatal("accepted DNS TTL above maximum")
 	}
+	if err := database.SaveCacheDefaultSizeGB(8); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveCacheDefaultSizeGB(0); err == nil {
+		t.Fatal("accepted cache default below minimum")
+	}
 	smtp := SMTPSettings{Enabled: true, Host: "smtp.example.test", Port: 465, Username: "mailer", FromAddress: "cdn@example.test", Recipients: []string{"ops@example.test"}, Security: "tls"}
 	if err := database.SaveSMTPSettings(smtp, []byte("encrypted-password"), true); err != nil {
 		t.Fatal(err)
@@ -50,7 +56,7 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.DNSDefaultTTLSeconds != 120 || settings.Branding != branding || !settings.SMTP.Override || settings.SMTP.Host != smtp.Host || len(settings.SMTP.Recipients) != 1 {
+	if settings.DNSDefaultTTLSeconds != 120 || settings.CacheDefaultSizeGB != 8 || settings.Branding != branding || !settings.SMTP.Override || settings.SMTP.Host != smtp.Host || len(settings.SMTP.Recipients) != 1 {
 		t.Fatalf("unexpected saved settings: %#v", settings)
 	}
 	stored, err := database.Secret(SecretSMTPPassword)

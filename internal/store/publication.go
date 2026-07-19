@@ -126,8 +126,8 @@ func (s *Store) CommitSitePublication(siteID string, expectedConfigVersion int64
 	defer tx.Rollback()
 
 	site, _, err := scanSite(tx.QueryRow(`SELECT id, name, zone_id, domains_json, node_ids_json,
-		primary_origin_json, backup_origin_json, stream_paths_json, passthrough,
-		client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_generation, config_version,
+			primary_origin_json, backup_origin_json, stream_paths_json, passthrough,
+			client_max_body_size_mb, read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_max_size_gb, cache_generation, config_version,
 		published, enabled, deleting, created_at, updated_at FROM sites WHERE id = ?`, siteID))
 	if err != nil {
 		return domain.Site{}, err
@@ -227,8 +227,8 @@ func publishedSiteDomains(tx *sql.Tx, siteID string) ([]string, error) {
 // introduced; future migrations leave existing snapshots untouched.
 func backfillSitePublicationsTx(tx *sql.Tx) error {
 	rows, err := tx.Query(`SELECT id, name, zone_id, domains_json, node_ids_json, primary_origin_json,
-		backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb,
-		read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json,
+			backup_origin_json, stream_paths_json, passthrough, client_max_body_size_mb,
+			read_write_timeout_seconds, dns_ttl_seconds, tcp_only, tcp_forwards_json, cache_max_size_gb,
 		cache_generation, config_version, published, enabled, deleting, created_at, updated_at
 		FROM sites ORDER BY name`)
 	if err != nil {

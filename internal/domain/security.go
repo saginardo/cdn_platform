@@ -30,7 +30,7 @@ const (
 	SecurityActionBan   SecurityPolicyAction = "ban"
 )
 
-var SecurityBanDurations = []int{3600, 21600, 43200, 86400}
+var SecurityBanDurations = []int{3600, 21600, 43200, 86400, 259200, 604800}
 
 type SecurityPolicy struct {
 	ID                 string               `json:"id"`

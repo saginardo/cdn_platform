@@ -81,3 +81,65 @@ func TestMigrationHistoryRejectsGaps(t *testing.T) {
 		t.Fatal("migration history gap was accepted")
 	}
 }
+
+func TestLatestMigrationDropsMachineStatusAndAddsCacheDefaults(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.db.Exec(`CREATE TABLE node_machine_status (node_id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version = 8`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var machineTableCount int
+	if err := database.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'node_machine_status'`).Scan(&machineTableCount); err != nil {
+		t.Fatal(err)
+	}
+	if machineTableCount != 0 {
+		t.Fatal("machine status table remains after migration")
+	}
+	settings, err := database.ControlSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.CacheDefaultSizeGB != 1 {
+		t.Fatalf("cache default = %d, want 1", settings.CacheDefaultSizeGB)
+	}
+	for table, column := range map[string]string{
+		"sites": "cache_max_size_gb", "node_states": "cache_max_bytes",
+	} {
+		found, err := columnExists(database.db, table, column)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !found {
+			t.Fatalf("missing %s.%s after migration", table, column)
+		}
+	}
+}
+
+func columnExists(database *sql.DB, table, column string) (bool, error) {
+	rows, err := database.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
+}

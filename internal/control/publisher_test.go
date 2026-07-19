@@ -79,6 +79,56 @@ func TestPublishRequiresCertificateAndThenMarksPublished(t *testing.T) {
 	}
 }
 
+func TestPublishUsesCacheLayoutSupportedByEachNode(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, _ := NewEncryptionKey()
+	cipher, _ := NewCipher(key)
+	legacyNode, err := database.CreateNode("legacy-edge", "203.0.113.10")
+	if err != nil {
+		t.Fatal(err)
+	}
+	capableNode, err := database.CreateNode("per-site-edge", "203.0.113.11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeCapabilities(capableNode.ID, []string{domain.EdgeCapabilityPerSiteCache}); err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "site", Domains: []string{"cdn.example.test"}, Nodes: []string{legacyNode.ID, capableNode.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := Publisher{Store: database, Cipher: cipher}
+	certificate, privateKey, notAfter := testCertificate(t, site.Domains...)
+	if err := publisher.StoreCertificate(site.ID, certificate, privateKey, notAfter); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := publisher.PublishSite(site.ID); err != nil {
+		t.Fatal(err)
+	}
+	legacyState, _, err := database.NodeState(legacyNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capableState, _, err := database.NodeState(capableNode.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(legacyState.NginxConfig, "proxy_cache_path /opt/cdn-edge/cache ") || strings.Contains(legacyState.NginxConfig, "/cache/sites/") {
+		t.Fatalf("legacy node did not receive the shared cache layout:\n%s", legacyState.NginxConfig)
+	}
+	if !strings.Contains(capableState.NginxConfig, "/opt/cdn-edge/cache/sites/") {
+		t.Fatalf("capable node did not receive the per-site cache layout:\n%s", capableState.NginxConfig)
+	}
+}
+
 func TestPublishTCPOnlySiteBuildsStreamStateWithoutHTTPPorts(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

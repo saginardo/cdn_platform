@@ -20,7 +20,7 @@ type SiteConfig struct {
 
 const (
 	DefaultCachePath                          = "/opt/cdn-edge/cache"
-	DefaultCacheMaxBytes                int64 = 5 << 30
+	DefaultCacheMaxBytes                int64 = 1 << 30
 	defaultClientKeepaliveTimeout             = "300s"
 	defaultClientKeepaliveRequests            = 1000
 	defaultUpstreamConnectTimeout             = "10s"
@@ -50,8 +50,9 @@ map "$request_method:$cdn_is_websocket:$cdn_accepts_event_stream:$cdn_forced_str
     ~^[^:]+:[01]:[01]:1$ 1;
 }
 
-proxy_cache_path {{.CachePath}} levels=1:2 keys_zone=cdn_cache:100m inactive=7d max_size={{.CacheMaxSize}} use_temp_path=off;
-log_format cdn_json escape=json '{"timestamp":"$time_iso8601","site_id":"$cdn_site_id","client_ip":"$remote_addr","method":"$request_method","path":"$uri","status":$status,"bytes":$body_bytes_sent,"duration_seconds":$request_time,"upstream":"$upstream_addr","cache_status":"$upstream_cache_status"}';
+{{range .CachePaths}}proxy_cache_path {{.Path}} levels=1:2 keys_zone={{.Zone}}:{{.ZoneSize}} inactive=7d max_size={{.MaxSize}} use_temp_path=off;
+{{end}}
+log_format cdn_json escape=json '{"request_id":"$request_id","timestamp":"$time_iso8601","site_id":"$cdn_site_id","client_ip":"$remote_addr","host":"$host","scheme":"$scheme","protocol":"$server_protocol","method":"$request_method","path":"$uri","status":$status,"request_bytes":$request_length,"bytes":$body_bytes_sent,"duration_seconds":$request_time,"upstream":"$upstream_addr","upstream_status":"$upstream_status","upstream_response_time":"$upstream_response_time","cache_status":"$upstream_cache_status","user_agent":"$http_user_agent","referer":"$http_referer","content_type":"$http_content_type","response_content_type":"$sent_http_content_type","accept":"$http_accept","range":"$http_range"}';
 {{end}}
 
 {{if .DefaultHTTP}}server {
@@ -200,7 +201,7 @@ server {
 	recursive_error_pages on;
 	{{end}}
 	{{if .CacheEnabled}}
-	proxy_cache cdn_cache;
+		proxy_cache {{.CacheZone}};
 	proxy_cache_key "{{.ID}}:{{.CacheGeneration}}:$scheme$host$request_uri";
     proxy_cache_methods GET HEAD;
     proxy_cache_bypass $cdn_has_auth $cdn_cookie_cache_bypass;
@@ -388,18 +389,27 @@ type renderedSite struct {
 	ClientMaxBodySizeMB int
 	ReadWriteTimeout    string
 	CacheEnabled        bool
+	CachePath           string
+	CacheZone           string
+	CacheMaxSize        string
 	AlwaysUnbuffered    bool
+}
+
+type renderedCachePath struct {
+	Path     string
+	Zone     string
+	ZoneSize string
+	MaxSize  string
 }
 
 type renderInput struct {
 	Sites                        []renderedSite
+	CachePaths                   []renderedCachePath
 	DefaultHTTP                  bool
 	SecurityEnabled              bool
 	SecurityConfig               string
 	RateLimitEnabled             bool
 	RateLimitConfig              string
-	CachePath                    string
-	CacheMaxSize                 string
 	ClientKeepaliveTimeout       string
 	ClientKeepaliveRequests      int
 	UpstreamConnectTimeout       string
@@ -416,6 +426,21 @@ func RenderWithSecurity(sites []domain.Site, securityPolicies []domain.SecurityP
 }
 
 func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy) (string, error) {
+	return RenderWithOptions(sites, securityPolicies, rateLimitPolicies, domain.DefaultCacheMaxSizeGB)
+}
+
+func RenderWithOptions(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy, defaultCacheSizeGB int) (string, error) {
+	return renderWithCacheLayout(sites, securityPolicies, rateLimitPolicies, defaultCacheSizeGB, true)
+}
+
+func RenderWithLegacyCache(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy, defaultCacheSizeGB int) (string, error) {
+	return renderWithCacheLayout(sites, securityPolicies, rateLimitPolicies, defaultCacheSizeGB, false)
+}
+
+func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy, defaultCacheSizeGB int, perSiteCache bool) (string, error) {
+	if err := domain.ValidateCacheMaxSizeGB(defaultCacheSizeGB); err != nil {
+		return "", err
+	}
 	var err error
 	if rateLimitPolicies != nil {
 		rateLimitPolicies, err = normalizeRateLimitPolicies(rateLimitPolicies)
@@ -424,6 +449,8 @@ func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []doma
 		}
 	}
 	items := make([]renderedSite, 0, len(sites))
+	cachePaths := make([]renderedCachePath, 0, len(sites))
+	sharedCacheSizeGB := 0
 	dedicatedTCP := false
 	for _, site := range sites {
 		if site.TCPOnly {
@@ -456,6 +483,23 @@ func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []doma
 			AlwaysUnbuffered: site.Passthrough || domain.IsWebSocketScheme(primary.Scheme),
 		}
 		item.CacheEnabled = item.CacheEnabled && !site.Passthrough
+		if item.CacheEnabled {
+			cacheSizeGB, err := domain.EffectiveCacheMaxSizeGB(site, defaultCacheSizeGB)
+			if err != nil {
+				return "", fmt.Errorf("site %s: %w", site.Name, err)
+			}
+			if perSiteCache {
+				token := cacheToken(site.ID)
+				item.CachePath = DefaultCachePath + "/sites/" + token
+				item.CacheZone = "cdn_cache_" + token
+				cachePaths = append(cachePaths, renderedCachePath{Path: item.CachePath, Zone: item.CacheZone, ZoneSize: "10m", MaxSize: fmt.Sprintf("%dg", cacheSizeGB)})
+			} else {
+				item.CachePath = DefaultCachePath
+				item.CacheZone = "cdn_cache"
+				sharedCacheSizeGB += cacheSizeGB
+			}
+			item.CacheMaxSize = fmt.Sprintf("%dg", cacheSizeGB)
+		}
 		if item.HostHeader == "" {
 			item.HostHeader = primary.Hostname()
 		}
@@ -483,6 +527,9 @@ func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []doma
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+	if !perSiteCache && sharedCacheSizeGB > 0 {
+		cachePaths = append(cachePaths, renderedCachePath{Path: DefaultCachePath, Zone: "cdn_cache", ZoneSize: "100m", MaxSize: fmt.Sprintf("%dg", sharedCacheSizeGB)})
+	}
 	template, err := template.New("nginx").Parse(configTemplate)
 	if err != nil {
 		return "", err
@@ -490,13 +537,12 @@ func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []doma
 	var out bytes.Buffer
 	if err := template.Execute(&out, renderInput{
 		Sites:                        items,
+		CachePaths:                   cachePaths,
 		DefaultHTTP:                  !dedicatedTCP,
 		SecurityEnabled:              len(enabledSecurityPolicies(securityPolicies)) > 0 && !dedicatedTCP,
 		SecurityConfig:               renderSecurityConfig(securityPolicies, !dedicatedTCP),
 		RateLimitEnabled:             len(enabledRateLimitPolicies(rateLimitPolicies)) > 0 && !dedicatedTCP,
 		RateLimitConfig:              renderRateLimitConfig(rateLimitPolicies, !dedicatedTCP),
-		CachePath:                    DefaultCachePath,
-		CacheMaxSize:                 fmt.Sprintf("%dg", DefaultCacheMaxBytes/(1<<30)),
 		ClientKeepaliveTimeout:       defaultClientKeepaliveTimeout,
 		ClientKeepaliveRequests:      defaultClientKeepaliveRequests,
 		UpstreamConnectTimeout:       defaultUpstreamConnectTimeout,
@@ -506,6 +552,39 @@ func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []doma
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func TotalCacheMaxBytes(sites []domain.Site, defaultCacheSizeGB int) (int64, error) {
+	if err := domain.ValidateCacheMaxSizeGB(defaultCacheSizeGB); err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, site := range sites {
+		if !site.Enabled || site.TCPOnly || site.Passthrough {
+			continue
+		}
+		origin, err := parseOrigin(site.PrimaryOrigin)
+		if err != nil {
+			return 0, fmt.Errorf("site %s primary origin: %w", site.Name, err)
+		}
+		if origin.Scheme != "http" && origin.Scheme != "https" {
+			continue
+		}
+		sizeGB, err := domain.EffectiveCacheMaxSizeGB(site, defaultCacheSizeGB)
+		if err != nil {
+			return 0, fmt.Errorf("site %s: %w", site.Name, err)
+		}
+		total += int64(sizeGB) << 30
+	}
+	if total == 0 {
+		return int64(defaultCacheSizeGB) << 30, nil
+	}
+	return total, nil
+}
+
+func cacheToken(siteID string) string {
+	digest := sha256.Sum256([]byte(siteID))
+	return fmt.Sprintf("%x", digest[:8])
 }
 
 func SplitHTTPConfig(configuration string) (string, []domain.NginxConfigFragment, error) {

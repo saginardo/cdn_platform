@@ -121,7 +121,6 @@ func New(config Config) (*Agent, error) {
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityCacheUsage)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityMachineStatus)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityNginxFragments)
-	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityPerSiteCache)
 	config.SecurityFirewall = defaultSecurityFirewall(config.SecurityFirewall)
 	if config.SecurityFirewall != nil {
 		config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilitySecurity)

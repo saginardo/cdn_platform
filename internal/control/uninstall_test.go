@@ -65,6 +65,73 @@ func TestPrepareNodeUninstallWithdrawsDNSAndReportsSiteBlockers(t *testing.T) {
 	}
 }
 
+func TestCanceledNodeUninstallIsIdleAndCanBePreparedAgain(t *testing.T) {
+	server, database, cookie := newNodeUninstallTestServer(t)
+	node, err := database.CreateNode("edge-canceled", "203.0.113.42")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name:          "retained-site",
+		Domains:       []string{"retained.example.test"},
+		Nodes:         []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		Enabled:       true,
+	}, "zone-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeDraining); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared := serveNodeUninstallAdmin(t, server, cookie, http.MethodPost, "/api/nodes/"+node.ID+"/uninstall", nil)
+	if prepared.Code != http.StatusCreated {
+		t.Fatalf("prepare response = %d %s", prepared.Code, prepared.Body.String())
+	}
+	canceled := serveNodeUninstallAdmin(t, server, cookie, http.MethodDelete, "/api/nodes/"+node.ID+"/uninstall", nil)
+	if canceled.Code != http.StatusOK {
+		t.Fatalf("cancel response = %d %s", canceled.Code, canceled.Body.String())
+	}
+	var canceledStatus nodeUninstallStatusResponse
+	if err := json.Unmarshal(canceled.Body.Bytes(), &canceledStatus); err != nil {
+		t.Fatal(err)
+	}
+	if canceledStatus.Job == nil || canceledStatus.Job.Status != store.NodeUninstallCanceled {
+		t.Fatalf("canceled job = %#v", canceledStatus.Job)
+	}
+	if len(canceledStatus.Blockers) != 0 || canceledStatus.CanGenerateCommand || canceledStatus.ReadyInSeconds != 0 {
+		t.Fatalf("canceled workflow is still active: %#v", canceledStatus)
+	}
+
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	retained := serveNodeUninstallAdmin(t, server, cookie, http.MethodGet, "/api/nodes/"+node.ID+"/uninstall", nil)
+	var retainedStatus nodeUninstallStatusResponse
+	if err := json.Unmarshal(retained.Body.Bytes(), &retainedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if retainedStatus.Node.Status != domain.NodeActive || retainedStatus.Job == nil || retainedStatus.Job.Status != store.NodeUninstallCanceled || len(retainedStatus.Blockers) != 0 {
+		t.Fatalf("retained node status = %#v", retainedStatus)
+	}
+
+	if err := database.SetNodeStatus(node.ID, domain.NodeDraining); err != nil {
+		t.Fatal(err)
+	}
+	restarted := serveNodeUninstallAdmin(t, server, cookie, http.MethodPost, "/api/nodes/"+node.ID+"/uninstall", nil)
+	if restarted.Code != http.StatusCreated {
+		t.Fatalf("restart response = %d %s", restarted.Code, restarted.Body.String())
+	}
+	var restartedStatus nodeUninstallStatusResponse
+	if err := json.Unmarshal(restarted.Body.Bytes(), &restartedStatus); err != nil {
+		t.Fatal(err)
+	}
+	if restartedStatus.Job == nil || restartedStatus.Job.Status != store.NodeUninstallPreparing || len(restartedStatus.Blockers) != 1 || restartedStatus.Blockers[0].SiteID != site.ID {
+		t.Fatalf("restarted workflow = %#v", restartedStatus)
+	}
+}
+
 func TestNodeUninstallTreatsPublishedAssignmentAsActiveWhileDraftIsPending(t *testing.T) {
 	server, database, cookie := newNodeUninstallTestServer(t)
 	oldNode, err := database.CreateNode("edge-old", "203.0.113.43")

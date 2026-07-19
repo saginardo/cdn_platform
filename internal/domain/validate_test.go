@@ -245,3 +245,19 @@ func TestPassthroughIsRestrictedToHTTPOrigins(t *testing.T) {
 		}
 	}
 }
+
+func TestEffectiveNodeCacheMaxSizeUsesOverrideOrGlobalDefault(t *testing.T) {
+	size, err := EffectiveNodeCacheMaxSizeGB(Node{}, 4)
+	if err != nil || size != 4 {
+		t.Fatalf("inherited node cache size = %d, err=%v", size, err)
+	}
+	override := 2
+	size, err = EffectiveNodeCacheMaxSizeGB(Node{CacheMaxSizeGB: &override}, 4)
+	if err != nil || size != 2 {
+		t.Fatalf("overridden node cache size = %d, err=%v", size, err)
+	}
+	invalid := MaxCacheMaxSizeGB + 1
+	if _, err := EffectiveNodeCacheMaxSizeGB(Node{CacheMaxSizeGB: &invalid}, 4); err == nil {
+		t.Fatal("invalid node cache override was accepted")
+	}
+}

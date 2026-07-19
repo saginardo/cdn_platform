@@ -123,6 +123,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/nodes/upgrade-all", s.requireAdmin(s.startAllNodeUpgrades))
 	mux.HandleFunc("GET /api/nodes/{id}", s.requireAdmin(s.nodeDetail))
 	mux.HandleFunc("GET /api/nodes/{id}/cache-status", s.requireAdmin(s.nodeCacheStatus))
+	mux.HandleFunc("PUT /api/nodes/{id}/cache", s.requireAdmin(s.updateNodeCacheSettings))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/nodes/{id}/status", s.requireAdmin(s.setNodeStatus))
 	mux.HandleFunc("GET /api/nodes/{id}/upgrade", s.requireAdmin(s.nodeUpgradeStatus))
@@ -600,7 +601,6 @@ type siteRequest struct {
 	DNSTTLSeconds           optionalNullableInt  `json:"dns_ttl_seconds"`
 	TCPOnly                 *bool                `json:"tcp_only"`
 	TCPForwards             *[]domain.TCPForward `json:"tcp_forwards"`
-	CacheMaxSizeGB          optionalNullableInt  `json:"cache_max_size_gb"`
 	Enabled                 *bool                `json:"enabled"`
 }
 
@@ -655,14 +655,7 @@ func (input siteRequest) site(id string, current *domain.Site) domain.Site {
 	if input.TCPForwards != nil {
 		tcpForwards = append([]domain.TCPForward(nil), (*input.TCPForwards)...)
 	}
-	var cacheMaxSizeGB *int
-	if input.CacheMaxSizeGB.Present {
-		cacheMaxSizeGB = input.CacheMaxSizeGB.Value
-	} else if current != nil && current.CacheMaxSizeGB != nil {
-		value := *current.CacheMaxSizeGB
-		cacheMaxSizeGB = &value
-	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, TCPOnly: tcpOnly, TCPForwards: tcpForwards, CacheMaxSizeGB: cacheMaxSizeGB, Enabled: enabled}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, TCPOnly: tcpOnly, TCPForwards: tcpForwards, Enabled: enabled}
 }
 
 func (input siteRequest) validateClientMaxBodySize() error {
@@ -679,13 +672,6 @@ func (input siteRequest) validateReadWriteTimeout() error {
 	return domain.ValidateReadWriteTimeoutSeconds(*input.ReadWriteTimeoutSeconds)
 }
 
-func (input siteRequest) validateCacheMaxSize() error {
-	if !input.CacheMaxSizeGB.Present || input.CacheMaxSizeGB.Value == nil {
-		return nil
-	}
-	return domain.ValidateCacheMaxSizeGB(*input.CacheMaxSizeGB.Value)
-}
-
 func (s *Server) createSite(response http.ResponseWriter, request *http.Request) {
 	var input siteRequest
 	if !readJSON(response, request, &input) {
@@ -696,10 +682,6 @@ func (s *Server) createSite(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	if err := input.validateReadWriteTimeout(); err != nil {
-		writeError(response, http.StatusBadRequest, err)
-		return
-	}
-	if err := input.validateCacheMaxSize(); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
@@ -727,10 +709,6 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	if err := input.validateReadWriteTimeout(); err != nil {
-		writeError(response, http.StatusBadRequest, err)
-		return
-	}
-	if err := input.validateCacheMaxSize(); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}

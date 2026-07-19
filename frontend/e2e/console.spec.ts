@@ -73,7 +73,6 @@ const site = {
   dns_ttl_seconds: null,
   tcp_only: false,
   tcp_forwards: [],
-  cache_max_size_gb: null,
   cache_generation: 2,
   config_version: 8,
   published: true,
@@ -141,6 +140,7 @@ const accessLogs = [
 async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
   let branding = { name: "CDN Platform", subtitle: "控制面板" };
   let cacheDefaultSizeGB = 1;
+  let nodeCacheOverrideGB: number | null = null;
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (
@@ -152,6 +152,25 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify(branding),
+      });
+      return;
+    }
+    if (
+      url.pathname === "/api/nodes/node-1/cache" &&
+      route.request().method() === "PUT"
+    ) {
+      const input = route.request().postDataJSON() as {
+        cache_max_size_gb: number | null;
+      };
+      nodeCacheOverrideGB = input.cache_max_size_gb;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          default_size_gb: cacheDefaultSizeGB,
+          override_size_gb: nodeCacheOverrideGB,
+          effective_size_gb: nodeCacheOverrideGB ?? cacheDefaultSizeGB,
+        }),
       });
       return;
     }
@@ -258,7 +277,21 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       "/api/backups/restores/current": null,
       ...overrides,
     };
-    const data = responses[url.pathname];
+    let data = responses[url.pathname];
+    if (
+      url.pathname === "/api/nodes/node-1" &&
+      data &&
+      typeof data === "object"
+    ) {
+      data = {
+        ...(data as Record<string, unknown>),
+        cache: {
+          default_size_gb: cacheDefaultSizeGB,
+          override_size_gb: nodeCacheOverrideGB,
+          effective_size_gb: nodeCacheOverrideGB ?? cacheDefaultSizeGB,
+        },
+      };
+    }
     if (data === undefined) {
       await route.fulfill({
         status: 404,
@@ -604,22 +637,185 @@ test("log rows truncate long paths, color errors, and open request details", asy
   await expect(page.getByText("bytes=0-4095", { exact: true })).toBeVisible();
 });
 
-test("cache defaults are configurable and inherited by site editors", async ({
+test("cache defaults are configurable and overridden by individual nodes", async ({
   page,
 }) => {
-  await mockAPI(page);
+  const node = {
+    id: "node-1",
+    name: "cache-edge",
+    public_ipv4: "203.0.113.41",
+    status: "active",
+    capabilities: [],
+    applied_version: 8,
+    last_heartbeat_at: now.toISOString(),
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
+    upgrade_capable: false,
+    upgrade_up_to_date: false,
+    can_upgrade: false,
+    upgrade_blocker: "升级边缘代理后可使用在线升级",
+  };
+  await mockAPI(page, {
+    "/api/nodes/node-1": {
+      node,
+      machine: {
+        available: false,
+        unavailable_reason: "升级边缘代理后可查看机器状态",
+        stale: false,
+      },
+      cache: {
+        default_size_gb: 1,
+        override_size_gb: null,
+        effective_size_gb: 1,
+      },
+      sites: [],
+    },
+    "/api/nodes/node-1/cache-status": {
+      available: false,
+      unavailable_reason: "缓存统计暂不可用",
+      from: series[0].time,
+      to: now.toISOString(),
+      requests: 0,
+      bytes: 0,
+      cache_lookups: 0,
+      cache_hits: 0,
+      cache_misses: 0,
+      bypasses: 0,
+      uncached: 0,
+      hit_rate: 0,
+      statuses: [],
+      storage: {
+        available: false,
+        unavailable_reason: "升级边缘代理后可查看缓存空间",
+        used_bytes: 0,
+        total_bytes: 0,
+        stale: false,
+      },
+    },
+    "/api/nodes/node-1/uninstall": {
+      node,
+      job: null,
+      blockers: [],
+      can_generate_command: false,
+      ready_in_seconds: 0,
+    },
+  });
   await page.goto("/#/settings");
   await page.getByRole("tab", { name: "网络与 DNS" }).click();
-  const cacheSize = page.getByLabel("全局默认上限（GB）");
+  const cacheSize = page.getByLabel("节点默认总上限（GB）");
   await expect(cacheSize).toHaveValue("1");
   await cacheSize.fill("4");
   await page.getByRole("button", { name: "保存缓存配置" }).click();
   await expect(page.getByText("全局缓存上限已保存")).toBeVisible();
 
-  await page.goto("/#/sites/site-1");
-  await expect(page.getByText("当前全局默认 4 GB")).toBeVisible();
-  await expect(page.getByLabel("继承全局缓存上限")).toBeChecked();
-  await expect(page.getByLabel("站点缓存上限（GB）")).toBeDisabled();
+  await page.goto("/#/nodes/node-1");
+  await expect(page.getByText("全局默认 4 GB")).toBeVisible();
+  const override = page.getByLabel("覆写全局缓存配额");
+  const nodeCacheSize = page.getByLabel("节点缓存总上限（GB）");
+  await expect(override).not.toBeChecked();
+  await expect(nodeCacheSize).toBeDisabled();
+  await expect(nodeCacheSize).toHaveValue("4");
+
+  await override.click();
+  await nodeCacheSize.fill("2");
+  await page.getByRole("button", { name: "保存缓存配置" }).click();
+  await expect(page.getByText("节点缓存配额已保存")).toBeVisible();
+  await expect(page.getByText("当前配置 2 GB")).toBeVisible();
+});
+
+test("canceled node uninstall returns the panel to its idle state", async ({
+  page,
+}) => {
+  const node = {
+    id: "node-1",
+    name: "lightlayer-hk",
+    public_ipv4: "203.0.113.42",
+    status: "active",
+    capabilities: [],
+    applied_version: 47,
+    last_heartbeat_at: now.toISOString(),
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
+    upgrade_capable: false,
+    upgrade_up_to_date: false,
+    can_upgrade: false,
+    upgrade_blocker: "升级边缘代理后可使用在线升级",
+  };
+  await mockAPI(page, {
+    "/api/nodes/node-1": {
+      node,
+      machine: {
+        available: false,
+        unavailable_reason: "升级边缘代理后可查看机器状态",
+        stale: false,
+      },
+      cache: {
+        default_size_gb: 1,
+        override_size_gb: null,
+        effective_size_gb: 1,
+      },
+      sites: [],
+    },
+    "/api/nodes/node-1/cache-status": {
+      available: false,
+      unavailable_reason: "缓存统计暂不可用",
+      from: series[0].time,
+      to: now.toISOString(),
+      requests: 0,
+      bytes: 0,
+      cache_lookups: 0,
+      cache_hits: 0,
+      cache_misses: 0,
+      bypasses: 0,
+      uncached: 0,
+      hit_rate: 0,
+      statuses: [],
+      storage: {
+        available: false,
+        unavailable_reason: "升级边缘代理后可查看缓存空间",
+        used_bytes: 0,
+        total_bytes: 0,
+        stale: false,
+      },
+    },
+    "/api/nodes/node-1/uninstall": {
+      node,
+      job: {
+        node_id: "node-1",
+        status: "canceled",
+        previous_status: "draining",
+        ready_at: now.toISOString(),
+        affected_site_ids: ["site-1"],
+        forced: false,
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      },
+      blockers: [
+        {
+          code: "still_assigned",
+          site_id: "site-1",
+          site_name: "静态资源主站",
+          detail: "remove this node from the site",
+        },
+      ],
+      can_generate_command: false,
+      ready_in_seconds: 0,
+    },
+  });
+
+  await page.goto("/#/nodes/node-1");
+
+  await expect(
+    page.getByRole("heading", { name: "lightlayer-hk", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByText("已取消", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByText("remove this node from the site", { exact: true }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "准备卸载" })).toBeDisabled();
+  await expect(
+    page.getByText("暂停调度或撤销授权后才能准备卸载。"),
+  ).toBeVisible();
 });
 
 test("all primary workspaces and the new-site editor mount without runtime errors", async ({

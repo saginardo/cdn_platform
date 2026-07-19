@@ -273,19 +273,15 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 			nodeSecurityPolicies = securityPolicies
 		}
 		nodeRateLimitPolicies := rateLimitPoliciesForCapabilities(rateLimitPolicies, node.Capabilities)
-		var config string
-		if slices.Contains(node.Capabilities, domain.EdgeCapabilityPerSiteCache) {
-			config, err = nginx.RenderWithOptions(nodeSites, nodeSecurityPolicies, nodeRateLimitPolicies, settings.CacheDefaultSizeGB)
-		} else {
-			config, err = nginx.RenderWithLegacyCache(nodeSites, nodeSecurityPolicies, nodeRateLimitPolicies, settings.CacheDefaultSizeGB)
+		cacheSizeGB, err := domain.EffectiveNodeCacheMaxSizeGB(node, settings.CacheDefaultSizeGB)
+		if err != nil {
+			return nil, nil, fmt.Errorf("node %s: %w", node.Name, err)
 		}
+		config, err := nginx.RenderWithOptions(nodeSites, nodeSecurityPolicies, nodeRateLimitPolicies, cacheSizeGB)
 		if err != nil {
 			return nil, nil, err
 		}
-		cacheMaxBytes, err := nginx.TotalCacheMaxBytes(nodeSites, settings.CacheDefaultSizeGB)
-		if err != nil {
-			return nil, nil, err
-		}
+		cacheMaxBytes := int64(cacheSizeGB) << 30
 		streamConfig, err := nginx.RenderStream(nodeSites)
 		if err != nil {
 			return nil, nil, err

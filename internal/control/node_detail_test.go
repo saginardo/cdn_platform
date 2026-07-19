@@ -35,6 +35,66 @@ func TestNodeDetailRouteRequiresAdmin(t *testing.T) {
 	}
 }
 
+func TestNodeCacheSettingsOverrideGlobalDefault(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.SaveCacheDefaultSizeGB(4); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("cache-settings-edge", "203.0.113.25")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+
+	settings, err := server.nodeCacheSettings(node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.DefaultSizeGB != 4 || settings.OverrideSizeGB != nil || settings.EffectiveSizeGB != 4 {
+		t.Fatalf("inherited cache settings = %#v", settings)
+	}
+
+	request := httptest.NewRequest(http.MethodPut, "/api/nodes/"+node.ID+"/cache", strings.NewReader(`{"cache_max_size_gb":2}`))
+	request.SetPathValue("id", node.ID)
+	response := httptest.NewRecorder()
+	server.updateNodeCacheSettings(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("override response = %d %s", response.Code, response.Body.String())
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.OverrideSizeGB == nil || *settings.OverrideSizeGB != 2 || settings.EffectiveSizeGB != 2 {
+		t.Fatalf("overridden cache settings = %#v", settings)
+	}
+
+	invalid := httptest.NewRequest(http.MethodPut, "/api/nodes/"+node.ID+"/cache", strings.NewReader(`{"cache_max_size_gb":0}`))
+	invalid.SetPathValue("id", node.ID)
+	invalidResponse := httptest.NewRecorder()
+	server.updateNodeCacheSettings(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid override response = %d %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+
+	clear := httptest.NewRequest(http.MethodPut, "/api/nodes/"+node.ID+"/cache", strings.NewReader(`{"cache_max_size_gb":null}`))
+	clear.SetPathValue("id", node.ID)
+	clearResponse := httptest.NewRecorder()
+	server.updateNodeCacheSettings(clearResponse, clear)
+	if clearResponse.Code != http.StatusOK {
+		t.Fatalf("clear response = %d %s", clearResponse.Code, clearResponse.Body.String())
+	}
+	if err := json.Unmarshal(clearResponse.Body.Bytes(), &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings.OverrideSizeGB != nil || settings.EffectiveSizeGB != 4 {
+		t.Fatalf("cleared cache settings = %#v", settings)
+	}
+}
+
 func (s nodeCacheLogStore) NodeCache(context.Context, string, time.Time, time.Time) ([]logstore.NodeCacheBucket, error) {
 	return s.buckets, s.err
 }

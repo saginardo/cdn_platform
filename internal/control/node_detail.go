@@ -2,6 +2,7 @@ package control
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sort"
@@ -52,6 +53,12 @@ type nodeCacheStatusResponse struct {
 	Storage           nodeCacheStorageStatus  `json:"storage"`
 }
 
+type nodeCacheSettingsResponse struct {
+	DefaultSizeGB   int  `json:"default_size_gb"`
+	OverrideSizeGB  *int `json:"override_size_gb"`
+	EffectiveSizeGB int  `json:"effective_size_gb"`
+}
+
 type nodeSiteSummary struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
@@ -64,6 +71,7 @@ type nodeSiteSummary struct {
 type nodeDetailResponse struct {
 	Node    nodeUpgradeStatusResponse `json:"node"`
 	Machine nodeMachineStatusResponse `json:"machine"`
+	Cache   nodeCacheSettingsResponse `json:"cache"`
 	Sites   []nodeSiteSummary         `json:"sites"`
 }
 
@@ -89,6 +97,11 @@ func (s *Server) nodeDetail(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusInternalServerError, err)
 		return
 	}
+	cacheSettings, err := s.nodeCacheSettings(node)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
 	configuredSites, err := s.Store.ListSites()
 	if err != nil {
 		writeStoreError(response, err)
@@ -106,8 +119,55 @@ func (s *Server) nodeDetail(response http.ResponseWriter, request *http.Request)
 	}
 
 	writeJSON(response, http.StatusOK, nodeDetailResponse{
-		Node: status, Machine: s.nodeMachineStatus(node, time.Now().UTC()), Sites: sites,
+		Node: status, Machine: s.nodeMachineStatus(node, time.Now().UTC()), Cache: cacheSettings, Sites: sites,
 	})
+}
+
+func (s *Server) nodeCacheSettings(node domain.Node) (nodeCacheSettingsResponse, error) {
+	settings, err := s.Store.ControlSettings()
+	if err != nil {
+		return nodeCacheSettingsResponse{}, err
+	}
+	effective, err := domain.EffectiveNodeCacheMaxSizeGB(node, settings.CacheDefaultSizeGB)
+	if err != nil {
+		return nodeCacheSettingsResponse{}, err
+	}
+	return nodeCacheSettingsResponse{
+		DefaultSizeGB: settings.CacheDefaultSizeGB, OverrideSizeGB: node.CacheMaxSizeGB, EffectiveSizeGB: effective,
+	}, nil
+}
+
+func (s *Server) updateNodeCacheSettings(response http.ResponseWriter, request *http.Request) {
+	var input struct {
+		CacheMaxSizeGB optionalNullableInt `json:"cache_max_size_gb"`
+	}
+	if !readJSON(response, request, &input) {
+		return
+	}
+	if !input.CacheMaxSizeGB.Present {
+		writeError(response, http.StatusBadRequest, errors.New("cache_max_size_gb is required"))
+		return
+	}
+	node, err := s.Store.SetNodeCacheMaxSizeGB(request.PathValue("id"), input.CacheMaxSizeGB.Value)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeStoreError(response, err)
+		} else {
+			writeError(response, http.StatusBadRequest, err)
+		}
+		return
+	}
+	settings, err := s.nodeCacheSettings(node)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	detail := "inherit global cache limit"
+	if node.CacheMaxSizeGB != nil {
+		detail = fmt.Sprintf("cache_max_size_gb=%d", *node.CacheMaxSizeGB)
+	}
+	s.audit(request, adminID(request.Context()), "update_cache", "node", node.ID, detail)
+	writeJSON(response, http.StatusOK, settings)
 }
 
 func (s *Server) nodeMachineStatus(node domain.Node, at time.Time) nodeMachineStatusResponse {

@@ -25,6 +25,7 @@ export interface Node {
   id: string;
   name: string;
   public_ipv4: string;
+  cache_max_size_gb?: number;
   status: NodeStatus;
   capabilities: string[];
   agent_sha256?: string;
@@ -70,6 +71,7 @@ export interface NodeDetail {
     stale: boolean;
     report?: MachineReport;
   };
+  cache: NodeCacheSettings;
   sites: Array<{
     id: string;
     name: string;
@@ -78,6 +80,12 @@ export interface NodeDetail {
     published: boolean;
     cache_enabled: boolean;
   }>;
+}
+
+export interface NodeCacheSettings {
+  default_size_gb: number;
+  override_size_gb: number | null;
+  effective_size_gb: number;
 }
 
 export interface NodeCacheStatus {
@@ -139,7 +147,6 @@ export interface Site {
   dns_ttl_seconds: number | null;
   tcp_only: boolean;
   tcp_forwards: TCPForward[];
-  cache_max_size_gb: number | null;
   cache_generation: number;
   config_version: number;
   published: boolean;

@@ -24,6 +24,15 @@ var schemaMigrations = []schemaMigration{
 	{Version: 7, Name: "branding-settings", Apply: migrateBrandingSettings},
 	{Version: 8, Name: "ephemeral-machine-status-and-cache-limits", Apply: migrateCacheLimits},
 	{Version: 9, Name: "rate-limit-ban-escalation", Apply: migrateRateLimitBanEscalation},
+	{Version: 10, Name: "node-cache-limits", Apply: migrateNodeCacheLimits},
+}
+
+func migrateNodeCacheLimits(tx *sql.Tx) error {
+	if err := addColumnIfMissing(tx, "nodes", "cache_max_size_gb", "cache_max_size_gb INTEGER"); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE sites SET cache_max_size_gb = NULL`)
+	return err
 }
 
 func migrateRateLimitBanEscalation(tx *sql.Tx) error {

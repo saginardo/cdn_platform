@@ -65,7 +65,7 @@ func TestNodeStateNginxFragmentsRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSiteCacheLimitInheritsAndRoundTripsOverride(t *testing.T) {
+func TestNodeCacheLimitInheritsAndRoundTripsOverride(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -75,26 +75,18 @@ func TestSiteCacheLimitInheritsAndRoundTripsOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	site, err := database.CreateSite(domain.Site{
-		Name: "cache", Domains: []string{"cache.example.test"}, Nodes: []string{node.ID},
-		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
-	}, "zone")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if site.CacheMaxSizeGB != nil {
-		t.Fatalf("new site cache override = %#v, want inheritance", site.CacheMaxSizeGB)
+	if node.CacheMaxSizeGB != nil {
+		t.Fatalf("new node cache override = %#v, want inheritance", node.CacheMaxSizeGB)
 	}
 	override := 12
-	site.CacheMaxSizeGB = &override
-	updated, err := database.UpdateSite(site, "zone")
+	updated, err := database.SetNodeCacheMaxSizeGB(node.ID, &override)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.CacheMaxSizeGB == nil || *updated.CacheMaxSizeGB != override {
 		t.Fatalf("updated cache override = %#v", updated.CacheMaxSizeGB)
 	}
-	loaded, _, err := database.GetSite(site.ID)
+	loaded, err := database.GetNode(node.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,9 +94,49 @@ func TestSiteCacheLimitInheritsAndRoundTripsOverride(t *testing.T) {
 		t.Fatalf("stored cache override = %#v", loaded.CacheMaxSizeGB)
 	}
 	invalid := domain.MaxCacheMaxSizeGB + 1
-	loaded.CacheMaxSizeGB = &invalid
-	if _, err := database.UpdateSite(loaded, "zone"); err == nil {
-		t.Fatal("accepted site cache override above maximum")
+	if _, err := database.SetNodeCacheMaxSizeGB(node.ID, &invalid); err == nil {
+		t.Fatal("accepted node cache override above maximum")
+	}
+	cleared, err := database.SetNodeCacheMaxSizeGB(node.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.CacheMaxSizeGB != nil {
+		t.Fatalf("cleared cache override = %#v", cleared.CacheMaxSizeGB)
+	}
+}
+
+func TestSiteCacheLimitIsDiscarded(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-site-cache", "203.0.113.62")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyOverride := 12
+	site, err := database.CreateSite(domain.Site{
+		Name:           "site-cache",
+		Domains:        []string{"cache.example.test"},
+		Nodes:          []string{node.ID},
+		PrimaryOrigin:  domain.Origin{URL: "https://origin.example.test", Enabled: true},
+		CacheMaxSizeGB: &legacyOverride,
+		Enabled:        true,
+	}, "zone-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if site.CacheMaxSizeGB != nil {
+		t.Fatalf("created site retained cache limit %#v", site.CacheMaxSizeGB)
+	}
+	var stored sql.NullInt64
+	if err := database.db.QueryRow(`SELECT cache_max_size_gb FROM sites WHERE id = ?`, site.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Valid {
+		t.Fatalf("stored site retained cache limit %d", stored.Int64)
 	}
 }
 

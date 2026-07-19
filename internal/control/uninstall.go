@@ -318,6 +318,9 @@ func (s *Server) buildNodeUninstallStatus(nodeID string) (nodeUninstallStatusRes
 		return nodeUninstallStatusResponse{}, err
 	}
 	result.Job = &job
+	if job.Status == store.NodeUninstallCanceled {
+		return result, nil
+	}
 
 	sites, err := s.Store.ListSites()
 	if err != nil {

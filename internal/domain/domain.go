@@ -29,6 +29,7 @@ type Node struct {
 	ID              string     `json:"id"`
 	Name            string     `json:"name"`
 	PublicIPv4      string     `json:"public_ipv4"`
+	CacheMaxSizeGB  *int       `json:"cache_max_size_gb,omitempty"`
 	Status          NodeStatus `json:"status"`
 	Capabilities    []string   `json:"capabilities"`
 	AgentSHA256     string     `json:"agent_sha256,omitempty"`
@@ -80,7 +81,6 @@ const (
 	EdgeCapabilityCacheUsage     = "cache_usage_v1"
 	EdgeCapabilityMachineStatus  = "machine_status_v1"
 	EdgeCapabilityNginxFragments = "nginx_fragments_v1"
-	EdgeCapabilityPerSiteCache   = "per_site_cache_v1"
 )
 
 type TCPForward struct {
@@ -111,14 +111,16 @@ type Site struct {
 	DNSTTLSeconds           *int         `json:"dns_ttl_seconds"`
 	TCPOnly                 bool         `json:"tcp_only"`
 	TCPForwards             []TCPForward `json:"tcp_forwards"`
-	CacheMaxSizeGB          *int         `json:"cache_max_size_gb"`
-	CacheGeneration         int64        `json:"cache_generation"`
-	ConfigVersion           int64        `json:"config_version"`
-	Published               bool         `json:"published"`
-	Enabled                 bool         `json:"enabled"`
-	Deleting                bool         `json:"deleting"`
-	CreatedAt               time.Time    `json:"created_at"`
-	UpdatedAt               time.Time    `json:"updated_at"`
+	// CacheMaxSizeGB is retained only for reading legacy database rows. Cache
+	// quotas are node-scoped and this value is no longer exposed or rendered.
+	CacheMaxSizeGB  *int      `json:"-"`
+	CacheGeneration int64     `json:"cache_generation"`
+	ConfigVersion   int64     `json:"config_version"`
+	Published       bool      `json:"published"`
+	Enabled         bool      `json:"enabled"`
+	Deleting        bool      `json:"deleting"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type EnrollmentToken struct {

@@ -294,7 +294,7 @@ function CacheForm({ settings }: { settings: Settings }) {
   return (
     <FormCard
       title="缓存"
-      description="站点默认磁盘配额"
+      description="节点默认磁盘配额"
       icon={<HardDrive />}
       source="控制面设置"
     >
@@ -305,7 +305,7 @@ function CacheForm({ settings }: { settings: Settings }) {
           mutation.mutate();
         }}
       >
-        <Field label="全局默认上限（GB）" id="cache-size">
+        <Field label="节点默认总上限（GB）" id="cache-size">
           <Input
             id="cache-size"
             type="number"
@@ -317,7 +317,7 @@ function CacheForm({ settings }: { settings: Settings }) {
           />
         </Field>
         <p className="text-xs text-muted-foreground">
-          继承该值的站点在下次发布时生效。
+          未单独覆写的节点在下次发布时使用该总上限。
         </p>
         <div>
           <Button type="submit" disabled={mutation.isPending}>

@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   public_ipv4 TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL,
 	capabilities_json TEXT NOT NULL DEFAULT '[]',
+	cache_max_size_gb INTEGER,
   cert_fingerprint TEXT,
 	  last_heartbeat_at TEXT,
 	  applied_version INTEGER NOT NULL DEFAULT 0,
@@ -648,11 +649,11 @@ func (s *Store) CreateNode(name, publicIPv4 string) (domain.Node, error) {
 }
 
 func (s *Store) GetNode(id string) (domain.Node, error) {
-	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, capabilities_json, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
+	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, capabilities_json, cache_max_size_gb, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
 }
 
 func (s *Store) ListNodes() ([]domain.Node, error) {
-	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, capabilities_json, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, capabilities_json, cache_max_size_gb, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -668,14 +669,35 @@ func (s *Store) ListNodes() ([]domain.Node, error) {
 	return nodes, rows.Err()
 }
 
+func (s *Store) SetNodeCacheMaxSizeGB(nodeID string, size *int) (domain.Node, error) {
+	if size != nil {
+		if err := domain.ValidateCacheMaxSizeGB(*size); err != nil {
+			return domain.Node{}, err
+		}
+	}
+	result, err := s.db.Exec(`UPDATE nodes SET cache_max_size_gb = ?, updated_at = ? WHERE id = ?`, size, stamp(now()), nodeID)
+	if err != nil {
+		return domain.Node{}, err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return domain.Node{}, err
+	}
+	if changed != 1 {
+		return domain.Node{}, ErrNotFound
+	}
+	return s.GetNode(nodeID)
+}
+
 type scanner interface{ Scan(...any) error }
 
 func scanNode(row scanner) (domain.Node, error) {
 	var node domain.Node
 	var capabilities string
+	var cacheMaxSizeGB sql.NullInt64
 	var heartbeat sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &capabilities, &node.AgentSHA256, &node.ActiveUpgradeID, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
+	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &capabilities, &cacheMaxSizeGB, &node.AgentSHA256, &node.ActiveUpgradeID, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Node{}, ErrNotFound
 	}
@@ -684,6 +706,10 @@ func scanNode(row scanner) (domain.Node, error) {
 	}
 	if err := json.Unmarshal([]byte(capabilities), &node.Capabilities); err != nil {
 		return domain.Node{}, fmt.Errorf("decode node capabilities: %w", err)
+	}
+	if cacheMaxSizeGB.Valid {
+		value := int(cacheMaxSizeGB.Int64)
+		node.CacheMaxSizeGB = &value
 	}
 	node.CreatedAt, err = parseTime(createdAt)
 	if err != nil {

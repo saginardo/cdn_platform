@@ -9,6 +9,7 @@ import (
 )
 
 func NormalizeAndValidateSite(site *Site) error {
+	site.CacheMaxSizeGB = nil
 	site.Name = strings.TrimSpace(site.Name)
 	if site.Name == "" || len(site.Name) > 100 {
 		return fmt.Errorf("site name must be between 1 and 100 characters")
@@ -25,11 +26,6 @@ func NormalizeAndValidateSite(site *Site) error {
 	site.ReadWriteTimeoutSeconds = readWriteTimeoutSeconds
 	if site.DNSTTLSeconds != nil {
 		if err := ValidateDNSTTLSeconds(*site.DNSTTLSeconds); err != nil {
-			return err
-		}
-	}
-	if site.CacheMaxSizeGB != nil {
-		if err := ValidateCacheMaxSizeGB(*site.CacheMaxSizeGB); err != nil {
 			return err
 		}
 	}
@@ -227,17 +223,17 @@ func ValidateCacheMaxSizeGB(value int) error {
 	return nil
 }
 
-func EffectiveCacheMaxSizeGB(site Site, defaultSize int) (int, error) {
+func EffectiveNodeCacheMaxSizeGB(node Node, defaultSize int) (int, error) {
 	if err := ValidateCacheMaxSizeGB(defaultSize); err != nil {
 		return 0, err
 	}
-	if site.CacheMaxSizeGB == nil {
+	if node.CacheMaxSizeGB == nil {
 		return defaultSize, nil
 	}
-	if err := ValidateCacheMaxSizeGB(*site.CacheMaxSizeGB); err != nil {
+	if err := ValidateCacheMaxSizeGB(*node.CacheMaxSizeGB); err != nil {
 		return 0, err
 	}
-	return *site.CacheMaxSizeGB, nil
+	return *node.CacheMaxSizeGB, nil
 }
 
 func ValidateOrigin(origin *Origin) error {

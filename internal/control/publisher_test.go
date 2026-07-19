@@ -79,7 +79,7 @@ func TestPublishRequiresCertificateAndThenMarksPublished(t *testing.T) {
 	}
 }
 
-func TestPublishUsesCacheLayoutSupportedByEachNode(t *testing.T) {
+func TestPublishUsesEachNodesEffectiveCacheLimit(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -87,19 +87,20 @@ func TestPublishUsesCacheLayoutSupportedByEachNode(t *testing.T) {
 	defer database.Close()
 	key, _ := NewEncryptionKey()
 	cipher, _ := NewCipher(key)
-	legacyNode, err := database.CreateNode("legacy-edge", "203.0.113.10")
+	defaultNode, err := database.CreateNode("default-cache-edge", "203.0.113.10")
 	if err != nil {
 		t.Fatal(err)
 	}
-	capableNode, err := database.CreateNode("per-site-edge", "203.0.113.11")
+	overriddenNode, err := database.CreateNode("overridden-cache-edge", "203.0.113.11")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetNodeCapabilities(capableNode.ID, []string{domain.EdgeCapabilityPerSiteCache}); err != nil {
+	override := 3
+	if _, err := database.SetNodeCacheMaxSizeGB(overriddenNode.ID, &override); err != nil {
 		t.Fatal(err)
 	}
 	site, err := database.CreateSite(domain.Site{
-		Name: "site", Domains: []string{"cdn.example.test"}, Nodes: []string{legacyNode.ID, capableNode.ID},
+		Name: "site", Domains: []string{"cdn.example.test"}, Nodes: []string{defaultNode.ID, overriddenNode.ID},
 		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
 	}, "zone")
 	if err != nil {
@@ -113,19 +114,19 @@ func TestPublishUsesCacheLayoutSupportedByEachNode(t *testing.T) {
 	if _, err := publisher.PublishSite(site.ID); err != nil {
 		t.Fatal(err)
 	}
-	legacyState, _, err := database.NodeState(legacyNode.ID)
+	defaultState, _, err := database.NodeState(defaultNode.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	capableState, _, err := database.NodeState(capableNode.ID)
+	overriddenState, _, err := database.NodeState(overriddenNode.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(legacyState.NginxConfig, "proxy_cache_path /opt/cdn-edge/cache ") || strings.Contains(legacyState.NginxConfig, "/cache/sites/") {
-		t.Fatalf("legacy node did not receive the shared cache layout:\n%s", legacyState.NginxConfig)
+	if !strings.Contains(defaultState.NginxConfig, "max_size=1g") || defaultState.CacheMaxBytes != 1<<30 || strings.Contains(defaultState.NginxConfig, "/cache/sites/") {
+		t.Fatalf("default node did not receive the global cache limit:\n%s", defaultState.NginxConfig)
 	}
-	if !strings.Contains(capableState.NginxConfig, "/opt/cdn-edge/cache/sites/") {
-		t.Fatalf("capable node did not receive the per-site cache layout:\n%s", capableState.NginxConfig)
+	if !strings.Contains(overriddenState.NginxConfig, "proxy_cache_path /opt/cdn-edge/cache ") || !strings.Contains(overriddenState.NginxConfig, "max_size=3g") || overriddenState.CacheMaxBytes != 3<<30 || strings.Contains(overriddenState.NginxConfig, "/cache/sites/") {
+		t.Fatalf("overridden node did not receive its total cache limit:\n%s", overriddenState.NginxConfig)
 	}
 }
 

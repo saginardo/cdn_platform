@@ -112,7 +112,7 @@ func TestLatestMigrationDropsMachineStatusAndAddsCacheDefaults(t *testing.T) {
 		t.Fatalf("cache default = %d, want 1", settings.CacheDefaultSizeGB)
 	}
 	for table, column := range map[string]string{
-		"sites": "cache_max_size_gb", "node_states": "cache_max_bytes",
+		"sites": "cache_max_size_gb", "nodes": "cache_max_size_gb", "node_states": "cache_max_bytes",
 	} {
 		found, err := columnExists(database.db, table, column)
 		if err != nil {
@@ -172,6 +172,44 @@ func TestRateLimitBanEscalationMigrationAddsLegacyColumns(t *testing.T) {
 	}
 	if enabled != 0 || after != 3 || duration != 3600 {
 		t.Fatalf("migrated defaults = enabled:%d after:%d duration:%d", enabled, after, duration)
+	}
+}
+
+func TestNodeCacheLimitMigrationAddsNodeOverrideAndClearsSiteOverrides(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE nodes (id TEXT PRIMARY KEY);
+		CREATE TABLE sites (id TEXT PRIMARY KEY, cache_max_size_gb INTEGER);
+		INSERT INTO sites(id, cache_max_size_gb) VALUES ('site-1', 7);`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateNodeCacheLimits(tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	found, err := columnExists(database, "nodes", "cache_max_size_gb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("node cache override column was not added")
+	}
+	var legacyOverride sql.NullInt64
+	if err := database.QueryRow(`SELECT cache_max_size_gb FROM sites WHERE id = 'site-1'`).Scan(&legacyOverride); err != nil {
+		t.Fatal(err)
+	}
+	if legacyOverride.Valid {
+		t.Fatalf("legacy site cache override remains set to %d", legacyOverride.Int64)
 	}
 }
 

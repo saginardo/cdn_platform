@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Rocket,
+  Save,
   ShieldOff,
   Trash2,
   Unplug,
@@ -47,7 +48,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -68,6 +72,7 @@ import {
 } from "@/lib/format";
 import type {
   Node,
+  NodeCacheSettings,
   NodeCacheStatus,
   NodeDetail,
   NodeStatus,
@@ -225,6 +230,11 @@ export function NodeDetailPage() {
                 <AssignedSites sites={detail.data.sites} />
               </div>
               <div className="space-y-4">
+                <CacheQuotaSettings
+                  key={`${detail.data.cache.default_size_gb}-${detail.data.cache.override_size_gb ?? "global"}`}
+                  nodeId={nodeId}
+                  settings={detail.data.cache}
+                />
                 <Card>
                   <CardHeader>
                     <CardTitle>节点操作</CardTitle>
@@ -360,6 +370,94 @@ export function NodeDetailPage() {
         }}
       />
     </>
+  );
+}
+
+function CacheQuotaSettings({
+  nodeId,
+  settings,
+}: {
+  nodeId: string;
+  settings: NodeCacheSettings;
+}) {
+  const queryClient = useQueryClient();
+  const [overrideEnabled, setOverrideEnabled] = useState(
+    settings.override_size_gb != null,
+  );
+  const [size, setSize] = useState(
+    settings.override_size_gb ?? settings.default_size_gb,
+  );
+  const mutation = useMutation({
+    mutationFn: () =>
+      api<NodeCacheSettings>(`/api/nodes/${encodeURIComponent(nodeId)}/cache`, {
+        method: "PUT",
+        body: JSON.stringify({
+          cache_max_size_gb: overrideEnabled ? size : null,
+        }),
+      }),
+    onSuccess: () => {
+      toast.success("节点缓存配额已保存");
+      void queryClient.invalidateQueries({ queryKey: ["node", nodeId] });
+      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  const effectiveSize = overrideEnabled ? size : settings.default_size_gb;
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>磁盘缓存配额</CardTitle>
+        <CardDescription>当前配置 {effectiveSize} GB</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            mutation.mutate();
+          }}
+        >
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <Label htmlFor="override-node-cache">覆写全局缓存配额</Label>
+              <p className="text-xs text-muted-foreground">
+                全局默认 {settings.default_size_gb} GB
+              </p>
+            </div>
+            <Switch
+              id="override-node-cache"
+              checked={overrideEnabled}
+              onCheckedChange={setOverrideEnabled}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="node-cache-size">节点缓存总上限（GB）</Label>
+            <Input
+              id="node-cache-size"
+              type="number"
+              min={1}
+              max={1024}
+              required={overrideEnabled}
+              disabled={!overrideEnabled}
+              value={size}
+              onChange={(event) => setSize(Number(event.target.value))}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            保存后在该节点下一次配置发布时生效。
+          </p>
+          <Button type="submit" disabled={mutation.isPending}>
+            {mutation.isPending ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <Save />
+            )}
+            保存缓存配置
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -625,7 +723,7 @@ function UninstallPanel({
   onDelete: () => void;
 }) {
   const base = `/api/nodes/${encodeURIComponent(node.id)}/uninstall`;
-  const job = status?.job;
+  const job = status?.job?.status === "canceled" ? undefined : status?.job;
   const blockersPagination = useListPagination(status?.blockers ?? []);
   const canPrepare = node.status === "draining" || node.status === "revoked";
   const deletable =
@@ -659,7 +757,9 @@ function UninstallPanel({
                 key={`${blocker.code}-${blocker.site_id}`}
                 className="text-xs text-destructive"
               >
-                {blocker.detail}
+                {blocker.site_name
+                  ? `${blocker.site_name}：${blocker.detail}`
+                  : blocker.detail}
               </p>
             ))}
             {blockersPagination.totalPages > 1 ? (

@@ -86,8 +86,6 @@ interface SiteDraft {
   passthrough: boolean;
   client_max_body_size_mb: number;
   read_write_timeout_seconds: number;
-  inherit_cache_size: boolean;
-  cache_max_size_gb: number;
   inherit_dns_ttl: boolean;
   dns_ttl_seconds: number;
   tcp_only: boolean;
@@ -123,14 +121,13 @@ export function SiteDetailPage() {
     queryFn: () => api<Settings>("/api/settings"),
   });
   const site = sites.data?.find((item) => item.id === siteId);
-  const [draft, setDraft] = useState<SiteDraft>(() => emptyDraft(60, 1));
+  const [draft, setDraft] = useState<SiteDraft>(() => emptyDraft(60));
   const [baseline, setBaseline] = useState("");
   const [loadedKey, setLoadedKey] = useState("");
   const [discardOpen, setDiscardOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [allowlistOpen, setAllowlistOpen] = useState(false);
   const globalTTL = settings.data?.dns.default_ttl_seconds ?? 60;
-  const globalCacheSize = settings.data?.cache.default_size_gb ?? 1;
   const dirty = Boolean(baseline && JSON.stringify(draft) !== baseline);
   const encodedID = encodeURIComponent(siteId ?? "");
 
@@ -138,13 +135,11 @@ export function SiteDetailPage() {
     if (!settings.isFetched) return;
     const key = isNew ? "new" : site?.id;
     if (!key || key === loadedKey) return;
-    const next = site
-      ? draftFromSite(site, globalTTL, globalCacheSize)
-      : emptyDraft(globalTTL, globalCacheSize);
+    const next = site ? draftFromSite(site, globalTTL) : emptyDraft(globalTTL);
     setDraft(next);
     setBaseline(JSON.stringify(next));
     setLoadedKey(key);
-  }, [globalCacheSize, globalTTL, isNew, loadedKey, settings.isFetched, site]);
+  }, [globalTTL, isNew, loadedKey, settings.isFetched, site]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -194,7 +189,7 @@ export function SiteDetailPage() {
         body: JSON.stringify(sitePayload(draft)),
       }),
     onSuccess: (saved) => {
-      const next = draftFromSite(saved, globalTTL, globalCacheSize);
+      const next = draftFromSite(saved, globalTTL);
       setDraft(next);
       setBaseline(JSON.stringify(next));
       setLoadedKey(saved.id);
@@ -294,11 +289,7 @@ export function SiteDetailPage() {
                 setDraft={setDraft}
                 zoneLocked={!isNew}
               />
-              <TrafficSettings
-                draft={draft}
-                setDraft={setDraft}
-                globalCacheSize={globalCacheSize}
-              />
+              <TrafficSettings draft={draft} setDraft={setDraft} />
               <NodeSelector
                 nodes={nodes.data ?? []}
                 selected={draft.node_ids}
@@ -337,16 +328,6 @@ export function SiteDetailPage() {
                         : `${draft.dns_ttl_seconds} 秒`
                     }
                   />
-                  {!draft.tcp_only && !draft.passthrough ? (
-                    <Fact
-                      label="缓存上限"
-                      value={
-                        draft.inherit_cache_size
-                          ? `${globalCacheSize} GB（全局）`
-                          : `${draft.cache_max_size_gb} GB`
-                      }
-                    />
-                  ) : null}
                   <Fact
                     label="TCP 端口"
                     value={
@@ -504,11 +485,9 @@ function BasicSettings({
 function TrafficSettings({
   draft,
   setDraft,
-  globalCacheSize,
 }: {
   draft: SiteDraft;
   setDraft: (draft: SiteDraft) => void;
-  globalCacheSize: number;
 }) {
   return (
     <Card>
@@ -624,40 +603,6 @@ function TrafficSettings({
                 }
               />
             </div>
-            <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
-              <div className="flex items-center justify-between">
-                <div>
-                  <Label htmlFor="inherit-cache-size">继承全局缓存上限</Label>
-                  <p className="text-xs text-muted-foreground">
-                    当前全局默认 {globalCacheSize} GB
-                  </p>
-                </div>
-                <Switch
-                  id="inherit-cache-size"
-                  checked={draft.inherit_cache_size}
-                  disabled={draft.passthrough}
-                  onCheckedChange={(inherit_cache_size) =>
-                    setDraft({ ...draft, inherit_cache_size })
-                  }
-                />
-              </div>
-              <Input
-                type="number"
-                min={1}
-                max={1024}
-                required={!draft.inherit_cache_size && !draft.passthrough}
-                disabled={draft.inherit_cache_size || draft.passthrough}
-                value={draft.cache_max_size_gb}
-                onChange={(event) =>
-                  setDraft({
-                    ...draft,
-                    cache_max_size_gb: Number(event.target.value),
-                  })
-                }
-                aria-label="站点缓存上限（GB）"
-              />
-            </div>
-            <Separator />
             <div className="grid gap-4 sm:grid-cols-[1fr_10rem]">
               <div className="flex items-center justify-between">
                 <div>
@@ -1326,7 +1271,7 @@ function activeTask(task?: DeploymentTask | null) {
   );
 }
 
-function emptyDraft(ttl: number, cacheSize: number): SiteDraft {
+function emptyDraft(ttl: number): SiteDraft {
   return {
     name: "",
     zone_id: "",
@@ -1342,8 +1287,6 @@ function emptyDraft(ttl: number, cacheSize: number): SiteDraft {
     passthrough: false,
     client_max_body_size_mb: 128,
     read_write_timeout_seconds: 360,
-    inherit_cache_size: true,
-    cache_max_size_gb: cacheSize,
     inherit_dns_ttl: true,
     dns_ttl_seconds: ttl,
     tcp_only: false,
@@ -1364,7 +1307,7 @@ function emptyForward(): TCPForward {
     idle_timeout_seconds: 300,
   };
 }
-function draftFromSite(site: Site, ttl: number, cacheSize: number): SiteDraft {
+function draftFromSite(site: Site, ttl: number): SiteDraft {
   return {
     name: site.name,
     zone_id: site.zone_id,
@@ -1380,8 +1323,6 @@ function draftFromSite(site: Site, ttl: number, cacheSize: number): SiteDraft {
     passthrough: site.passthrough,
     client_max_body_size_mb: site.client_max_body_size_mb ?? 128,
     read_write_timeout_seconds: site.read_write_timeout_seconds ?? 360,
-    inherit_cache_size: site.cache_max_size_gb == null,
-    cache_max_size_gb: site.cache_max_size_gb ?? cacheSize,
     inherit_dns_ttl: site.dns_ttl_seconds == null,
     dns_ttl_seconds: site.dns_ttl_seconds ?? ttl,
     tcp_only: site.tcp_only,
@@ -1412,9 +1353,6 @@ function sitePayload(draft: SiteDraft) {
     passthrough: draft.passthrough,
     client_max_body_size_mb: draft.client_max_body_size_mb,
     read_write_timeout_seconds: draft.read_write_timeout_seconds,
-    cache_max_size_gb: draft.inherit_cache_size
-      ? null
-      : draft.cache_max_size_gb,
     dns_ttl_seconds: draft.inherit_dns_ttl ? null : draft.dns_ttl_seconds,
     tcp_only: draft.tcp_only,
     tcp_forwards: draft.tcp_forwards,

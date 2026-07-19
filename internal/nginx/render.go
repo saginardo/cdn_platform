@@ -401,9 +401,7 @@ type renderedSite struct {
 	ClientMaxBodySizeMB int
 	ReadWriteTimeout    string
 	CacheEnabled        bool
-	CachePath           string
 	CacheZone           string
-	CacheMaxSize        string
 	AlwaysUnbuffered    bool
 }
 
@@ -443,15 +441,15 @@ func RenderWithSecurityAndRateLimit(sites []domain.Site, securityPolicies []doma
 }
 
 func RenderWithOptions(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy, defaultCacheSizeGB int) (string, error) {
-	return renderWithCacheLayout(sites, securityPolicies, rateLimitPolicies, defaultCacheSizeGB, true)
+	return renderWithCacheLayout(sites, securityPolicies, rateLimitPolicies, defaultCacheSizeGB)
 }
 
 func RenderWithLegacyCache(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy, defaultCacheSizeGB int) (string, error) {
-	return renderWithCacheLayout(sites, securityPolicies, rateLimitPolicies, defaultCacheSizeGB, false)
+	return renderWithCacheLayout(sites, securityPolicies, rateLimitPolicies, defaultCacheSizeGB)
 }
 
-func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy, defaultCacheSizeGB int, perSiteCache bool) (string, error) {
-	if err := domain.ValidateCacheMaxSizeGB(defaultCacheSizeGB); err != nil {
+func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.SecurityPolicy, rateLimitPolicies []domain.RateLimitPolicy, cacheSizeGB int) (string, error) {
+	if err := domain.ValidateCacheMaxSizeGB(cacheSizeGB); err != nil {
 		return "", err
 	}
 	var err error
@@ -462,8 +460,8 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 		}
 	}
 	items := make([]renderedSite, 0, len(sites))
-	cachePaths := make([]renderedCachePath, 0, len(sites))
-	sharedCacheSizeGB := 0
+	cachePaths := make([]renderedCachePath, 0, 1)
+	cacheEnabled := false
 	dedicatedTCP := false
 	for _, site := range sites {
 		if site.TCPOnly {
@@ -497,21 +495,8 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 		}
 		item.CacheEnabled = item.CacheEnabled && !site.Passthrough
 		if item.CacheEnabled {
-			cacheSizeGB, err := domain.EffectiveCacheMaxSizeGB(site, defaultCacheSizeGB)
-			if err != nil {
-				return "", fmt.Errorf("site %s: %w", site.Name, err)
-			}
-			if perSiteCache {
-				token := cacheToken(site.ID)
-				item.CachePath = DefaultCachePath + "/sites/" + token
-				item.CacheZone = "cdn_cache_" + token
-				cachePaths = append(cachePaths, renderedCachePath{Path: item.CachePath, Zone: item.CacheZone, ZoneSize: "10m", MaxSize: fmt.Sprintf("%dg", cacheSizeGB)})
-			} else {
-				item.CachePath = DefaultCachePath
-				item.CacheZone = "cdn_cache"
-				sharedCacheSizeGB += cacheSizeGB
-			}
-			item.CacheMaxSize = fmt.Sprintf("%dg", cacheSizeGB)
+			item.CacheZone = "cdn_cache"
+			cacheEnabled = true
 		}
 		if item.HostHeader == "" {
 			item.HostHeader = primary.Hostname()
@@ -540,8 +525,8 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
-	if !perSiteCache && sharedCacheSizeGB > 0 {
-		cachePaths = append(cachePaths, renderedCachePath{Path: DefaultCachePath, Zone: "cdn_cache", ZoneSize: "100m", MaxSize: fmt.Sprintf("%dg", sharedCacheSizeGB)})
+	if cacheEnabled {
+		cachePaths = append(cachePaths, renderedCachePath{Path: DefaultCachePath, Zone: "cdn_cache", ZoneSize: "100m", MaxSize: fmt.Sprintf("%dg", cacheSizeGB)})
 	}
 	template, err := template.New("nginx").Parse(configTemplate)
 	if err != nil {
@@ -566,39 +551,6 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 		return "", err
 	}
 	return out.String(), nil
-}
-
-func TotalCacheMaxBytes(sites []domain.Site, defaultCacheSizeGB int) (int64, error) {
-	if err := domain.ValidateCacheMaxSizeGB(defaultCacheSizeGB); err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, site := range sites {
-		if !site.Enabled || site.TCPOnly || site.Passthrough {
-			continue
-		}
-		origin, err := parseOrigin(site.PrimaryOrigin)
-		if err != nil {
-			return 0, fmt.Errorf("site %s primary origin: %w", site.Name, err)
-		}
-		if origin.Scheme != "http" && origin.Scheme != "https" {
-			continue
-		}
-		sizeGB, err := domain.EffectiveCacheMaxSizeGB(site, defaultCacheSizeGB)
-		if err != nil {
-			return 0, fmt.Errorf("site %s: %w", site.Name, err)
-		}
-		total += int64(sizeGB) << 30
-	}
-	if total == 0 {
-		return int64(defaultCacheSizeGB) << 30, nil
-	}
-	return total, nil
-}
-
-func cacheToken(siteID string) string {
-	digest := sha256.Sum256([]byte(siteID))
-	return fmt.Sprintf("%x", digest[:8])
 }
 
 func SplitHTTPConfig(configuration string) (string, []domain.NginxConfigFragment, error) {

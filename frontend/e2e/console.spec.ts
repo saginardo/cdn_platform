@@ -485,6 +485,12 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
           username: "",
           from_address: "",
           recipients: [],
+          notification_categories: [
+            "availability",
+            "monitoring",
+            "certificate",
+            "backup",
+          ],
           security: "starttls",
           source: "unconfigured",
           override_configured: false,
@@ -702,6 +708,12 @@ test("SMTP test shows progress and keeps timeout feedback visible", async ({
         username: "mailer",
         from_address: "cdn@example.test",
         recipients: ["ops@example.test"],
+        notification_categories: [
+          "availability",
+          "monitoring",
+          "certificate",
+          "backup",
+        ],
         security: "tls",
         source: "database",
         override_configured: true,
@@ -768,6 +780,36 @@ test("SMTP test shows progress and keeps timeout feedback visible", async ({
   await expect(failure).toHaveCount(0);
   await expect(page.getByText("测试邮件已发送")).toBeVisible();
   expect(attempts).toBe(2);
+});
+
+test("SMTP alert categories can be saved independently", async ({ page }) => {
+  await mockAPI(page);
+  let savedCategories: string[] | undefined;
+  await page.route("**/api/settings/smtp", async (route) => {
+    const input = route.request().postDataJSON() as {
+      notification_categories: string[];
+    };
+    savedCategories = input.notification_categories;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true }),
+    });
+  });
+
+  await page.goto("/#/settings");
+  await page.getByRole("tab", { name: "通知" }).click();
+  const monitoring = page.getByRole("switch", { name: "TCP 拨测异常" });
+  const backup = page.getByRole("switch", { name: "备份任务" });
+  await expect(monitoring).toBeChecked();
+  await expect(backup).toBeChecked();
+  await monitoring.click();
+  await backup.click();
+  await page.getByRole("button", { name: "保存 SMTP" }).click();
+
+  await expect
+    .poll(() => savedCategories)
+    .toEqual(["availability", "certificate"]);
 });
 
 test("branding settings update the sidebar immediately", async ({

@@ -21,14 +21,15 @@ const (
 )
 
 type SMTPSettings struct {
-	Override    bool
-	Enabled     bool
-	Host        string
-	Port        int
-	Username    string
-	FromAddress string
-	Recipients  []string
-	Security    string
+	Override               bool
+	Enabled                bool
+	Host                   string
+	Port                   int
+	Username               string
+	FromAddress            string
+	Recipients             []string
+	NotificationCategories []string
+	Security               string
 }
 
 type ControlSettings struct {
@@ -53,6 +54,7 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 		DNSDefaultTTLSeconds: domain.DefaultDNSTTLSeconds,
 		CacheDefaultSizeGB:   domain.DefaultCacheMaxSizeGB,
 		Branding:             domain.DefaultBrandingSettings(),
+		SMTP:                 SMTPSettings{NotificationCategories: defaultSMTPNotificationCategories()},
 		Backup: domain.BackupSettings{
 			Region:             domain.DefaultBackupRegion,
 			BackupTime:         domain.DefaultBackupTime,
@@ -60,12 +62,12 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 		},
 	}
 	var smtpOverride, smtpEnabled, backupOverride int
-	var recipients, updatedAt string
-	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, cache_default_size_gb, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security,
+	var recipients, notificationCategories, updatedAt string
+	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, cache_default_size_gb, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_notification_categories_json, smtp_security,
 		backup_override, backup_repository, backup_access_key_id, backup_region, backup_time, backup_random_delay_seconds,
 		brand_name, brand_subtitle, brand_logo_data_url, updated_at
 			FROM control_settings WHERE id = 1`).
-		Scan(&settings.DNSDefaultTTLSeconds, &settings.CacheDefaultSizeGB, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &settings.SMTP.Security,
+		Scan(&settings.DNSDefaultTTLSeconds, &settings.CacheDefaultSizeGB, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &notificationCategories, &settings.SMTP.Security,
 			&backupOverride, &settings.Backup.Repository, &settings.Backup.AccessKeyID, &settings.Backup.Region, &settings.Backup.BackupTime, &settings.Backup.RandomDelaySeconds,
 			&settings.Branding.Name, &settings.Branding.Subtitle, &settings.Branding.LogoDataURL, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -82,6 +84,12 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 	}
 	if err := json.Unmarshal([]byte(recipients), &settings.SMTP.Recipients); err != nil {
 		return ControlSettings{}, fmt.Errorf("decode SMTP recipients: %w", err)
+	}
+	if err := json.Unmarshal([]byte(notificationCategories), &settings.SMTP.NotificationCategories); err != nil {
+		return ControlSettings{}, fmt.Errorf("decode SMTP notification categories: %w", err)
+	}
+	if settings.SMTP.NotificationCategories == nil {
+		settings.SMTP.NotificationCategories = defaultSMTPNotificationCategories()
 	}
 	settings.SMTP.Override = smtpOverride != 0
 	settings.SMTP.Enabled = smtpEnabled != 0
@@ -214,15 +222,22 @@ func (s *Store) SaveSMTPSettings(settings SMTPSettings, passwordCiphertext []byt
 	if err != nil {
 		return err
 	}
+	if settings.NotificationCategories == nil {
+		settings.NotificationCategories = defaultSMTPNotificationCategories()
+	}
+	notificationCategories, err := json.Marshal(settings.NotificationCategories)
+	if err != nil {
+		return err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO control_settings(id, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security, updated_at)
-		VALUES (1, 1, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET smtp_override=1, smtp_enabled=excluded.smtp_enabled, smtp_host=excluded.smtp_host, smtp_port=excluded.smtp_port, smtp_username=excluded.smtp_username, smtp_from_address=excluded.smtp_from_address, smtp_recipients_json=excluded.smtp_recipients_json, smtp_security=excluded.smtp_security, updated_at=excluded.updated_at`,
-		boolInt(settings.Enabled), settings.Host, settings.Port, settings.Username, settings.FromAddress, string(recipients), settings.Security, stamp(now()))
+	_, err = tx.Exec(`INSERT INTO control_settings(id, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_notification_categories_json, smtp_security, updated_at)
+		VALUES (1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET smtp_override=1, smtp_enabled=excluded.smtp_enabled, smtp_host=excluded.smtp_host, smtp_port=excluded.smtp_port, smtp_username=excluded.smtp_username, smtp_from_address=excluded.smtp_from_address, smtp_recipients_json=excluded.smtp_recipients_json, smtp_notification_categories_json=excluded.smtp_notification_categories_json, smtp_security=excluded.smtp_security, updated_at=excluded.updated_at`,
+		boolInt(settings.Enabled), settings.Host, settings.Port, settings.Username, settings.FromAddress, string(recipients), string(notificationCategories), settings.Security, stamp(now()))
 	if err != nil {
 		return err
 	}
@@ -236,6 +251,10 @@ func (s *Store) SaveSMTPSettings(settings SMTPSettings, passwordCiphertext []byt
 		}
 	}
 	return tx.Commit()
+}
+
+func defaultSMTPNotificationCategories() []string {
+	return []string{"availability", "monitoring", "certificate", "backup"}
 }
 
 func (s *Store) ClearSMTPSettings() error {
@@ -278,7 +297,7 @@ func OpenReadOnly(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, readOnly: true}, nil
 }
 
 func (s *Store) IntegrityCheck() error {

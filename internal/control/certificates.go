@@ -108,7 +108,19 @@ func (m *CertificateManager) Reconcile(ctx context.Context) {
 			continue
 		}
 		if _, _, err := m.QueueRenewal(site); err != nil && m.Notifier != nil {
-			_ = m.Notifier.Notify(ctx, "CDN alert: certificate renewal failed", "Site "+site.Name+": "+err.Error())
+			_ = integrations.SendNotification(ctx, m.Notifier, integrations.Notification{
+				Category: integrations.NotificationCategoryCertificate,
+				Severity: integrations.NotificationSeverityError,
+				Subject:  "[CDN] 证书续期失败",
+				Message:  "站点证书续期任务未能入队。",
+				Details: []integrations.NotificationDetail{
+					{Label: "站点", Value: site.Name},
+					{Label: "错误", Value: err.Error()},
+				},
+				OccurredAt: time.Now().UTC(),
+				Key:        "certificate:renewal:" + site.ID,
+				Cooldown:   5 * time.Minute,
+			})
 		}
 	}
 }
@@ -205,7 +217,19 @@ func (m *CertificateManager) runJob(ctx context.Context, job certificateJob) {
 
 func (m *CertificateManager) notifyRenewalFailure(ctx context.Context, job certificateJob, site domain.Site, err error) {
 	if job.Kind == renewCertificateTask && m.Notifier != nil {
-		_ = m.Notifier.Notify(ctx, "CDN alert: certificate renewal failed", "Site "+site.Name+": "+err.Error())
+		_ = integrations.SendNotification(ctx, m.Notifier, integrations.Notification{
+			Category: integrations.NotificationCategoryCertificate,
+			Severity: integrations.NotificationSeverityError,
+			Subject:  "[CDN] 证书续期失败",
+			Message:  "站点证书续期任务失败，请检查 DNS-01 验证和证书颁发服务。",
+			Details: []integrations.NotificationDetail{
+				{Label: "站点", Value: site.Name},
+				{Label: "错误", Value: err.Error()},
+			},
+			OccurredAt: time.Now().UTC(),
+			Key:        "certificate:renewal:" + site.ID,
+			Cooldown:   5 * time.Minute,
+		})
 	}
 }
 

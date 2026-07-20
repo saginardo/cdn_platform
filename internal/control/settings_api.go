@@ -191,18 +191,23 @@ func (s *Server) validateCloudflareToken(ctx context.Context, token string) erro
 }
 
 type smtpSettingsRequest struct {
-	Enabled     bool     `json:"enabled"`
-	Host        string   `json:"host"`
-	Port        int      `json:"port"`
-	Username    string   `json:"username"`
-	Password    *string  `json:"password"`
-	FromAddress string   `json:"from_address"`
-	Recipients  []string `json:"recipients"`
-	Security    string   `json:"security"`
+	Enabled                bool      `json:"enabled"`
+	Host                   string    `json:"host"`
+	Port                   int       `json:"port"`
+	Username               string    `json:"username"`
+	Password               *string   `json:"password"`
+	FromAddress            string    `json:"from_address"`
+	Recipients             []string  `json:"recipients"`
+	NotificationCategories *[]string `json:"notification_categories"`
+	Security               string    `json:"security"`
 }
 
-func (input smtpSettingsRequest) profile() SMTPProfile {
-	return SMTPProfile{Enabled: input.Enabled, Host: input.Host, Port: input.Port, Username: input.Username, FromAddress: input.FromAddress, Recipients: input.Recipients, Security: input.Security}
+func (input smtpSettingsRequest) profile(fallbackCategories []string) SMTPProfile {
+	categories := fallbackCategories
+	if input.NotificationCategories != nil {
+		categories = *input.NotificationCategories
+	}
+	return SMTPProfile{Enabled: input.Enabled, Host: input.Host, Port: input.Port, Username: input.Username, FromAddress: input.FromAddress, Recipients: input.Recipients, NotificationCategories: categories, Security: input.Security}
 }
 
 func (s *Server) updateSMTPSettings(response http.ResponseWriter, request *http.Request) {
@@ -214,7 +219,8 @@ func (s *Server) updateSMTPSettings(response http.ResponseWriter, request *http.
 	if !readJSON(response, request, &input) {
 		return
 	}
-	if err := s.Settings.SaveSMTP(input.profile(), input.Password); err != nil {
+	current, _ := s.Settings.SMTPProfile()
+	if err := s.Settings.SaveSMTP(input.profile(current.NotificationCategories), input.Password); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
@@ -245,12 +251,12 @@ func (s *Server) testSMTPSettings(response http.ResponseWriter, request *http.Re
 	if !readJSON(response, request, &input) {
 		return
 	}
-	profile := input.profile()
+	current, currentPassword := s.Settings.SMTPProfile()
+	profile := input.profile(current.NotificationCategories)
 	if !profile.Enabled {
 		writeError(response, http.StatusBadRequest, errors.New("enable SMTP before sending a test message"))
 		return
 	}
-	_, currentPassword := s.Settings.SMTPProfile()
 	password := currentPassword
 	if input.Password != nil {
 		password = *input.Password
@@ -269,7 +275,18 @@ func (s *Server) testSMTPSettings(response http.ResponseWriter, request *http.Re
 	if s.smtpNotifierFactory != nil {
 		notifier = s.smtpNotifierFactory(profile, password)
 	}
-	if err := notifier.Notify(testCtx, "CDN Platform SMTP test", "This message confirms that the CDN Platform SMTP settings can send notifications."); err != nil {
+	if err := integrations.SendNotification(testCtx, notifier, integrations.Notification{
+		Category: integrations.NotificationCategoryAvailability,
+		Severity: integrations.NotificationSeverityInfo,
+		Subject:  "CDN Platform SMTP 测试邮件",
+		Message:  "SMTP 通知通道配置有效，控制面可以向当前收件人发送告警。",
+		Details: []integrations.NotificationDetail{
+			{Label: "SMTP 服务器", Value: net.JoinHostPort(profile.Host, fmt.Sprintf("%d", profile.Port))},
+			{Label: "安全连接", Value: strings.ToUpper(profile.Security)},
+			{Label: "收件人数", Value: fmt.Sprintf("%d", len(profile.Recipients))},
+		},
+		OccurredAt: time.Now().UTC(),
+	}); err != nil {
 		status, responseError := smtpTestResponseError(err)
 		if s.Logger != nil {
 			s.Logger.Error("SMTP test failed", "host", profile.Host, "port", profile.Port, "security", profile.Security, "status", status, "error", err)

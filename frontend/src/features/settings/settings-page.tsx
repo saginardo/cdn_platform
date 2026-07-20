@@ -103,7 +103,7 @@ export function SettingsPage() {
             </TabsContent>
             <TabsContent value="notifications">
               <SMTPForm
-                key={`smtp-${query.data.smtp.source}-${query.data.smtp.host}-${query.data.smtp.port}`}
+                key={`smtp-${query.data.smtp.source}-${query.data.smtp.host}-${query.data.smtp.port}-${query.data.smtp.notification_categories.join(",")}`}
                 settings={query.data}
               />
             </TabsContent>
@@ -506,6 +506,9 @@ function SMTPForm({ settings }: { settings: Settings }) {
   const [password, setPassword] = useState("");
   const [from, setFrom] = useState(initial.from_address);
   const [recipients, setRecipients] = useState(initial.recipients.join(", "));
+  const [notificationCategories, setNotificationCategories] = useState(
+    initial.notification_categories,
+  );
   const [testError, setTestError] = useState("");
   const payload = () => ({
     enabled,
@@ -515,6 +518,7 @@ function SMTPForm({ settings }: { settings: Settings }) {
     username,
     from_address: from,
     recipients: split(recipients),
+    notification_categories: notificationCategories,
     ...(password ? { password } : {}),
   });
   const done = (message: string) => {
@@ -557,6 +561,13 @@ function SMTPForm({ settings }: { settings: Settings }) {
   function submit(event: FormEvent) {
     event.preventDefault();
     save.mutate();
+  }
+  function setNotificationCategory(category: string, checked: boolean) {
+    setNotificationCategories((current) =>
+      checked
+        ? [...new Set([...current, category])]
+        : current.filter((candidate) => candidate !== category),
+    );
   }
   return (
     <FormCard
@@ -651,6 +662,42 @@ function SMTPForm({ settings }: { settings: Settings }) {
             />
           </div>
         </div>
+        <div className="grid gap-3">
+          <div>
+            <Label>告警分类</Label>
+            <p className="text-xs text-muted-foreground">
+              每类通知可独立启用，测试邮件不受分类开关影响
+            </p>
+          </div>
+          <div className="grid border sm:grid-cols-2">
+            {smtpNotificationCategories.map((category, index) => (
+              <div
+                key={category.value}
+                className={`flex min-h-20 items-center justify-between gap-4 px-3 py-3 ${
+                  index < 3 ? "border-b" : ""
+                } ${index % 2 === 0 ? "sm:border-r" : ""} ${
+                  index === 2 ? "sm:border-b-0" : ""
+                }`}
+              >
+                <div className="min-w-0">
+                  <Label htmlFor={`smtp-category-${category.value}`}>
+                    {category.label}
+                  </Label>
+                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                    {category.description}
+                  </p>
+                </div>
+                <Switch
+                  id={`smtp-category-${category.value}`}
+                  checked={notificationCategories.includes(category.value)}
+                  onCheckedChange={(checked) =>
+                    setNotificationCategory(category.value, checked)
+                  }
+                />
+              </div>
+            ))}
+          </div>
+        </div>
         <div className="flex flex-wrap gap-2">
           <Button type="submit" disabled={busy}>
             <Save />
@@ -692,6 +739,29 @@ function SMTPForm({ settings }: { settings: Settings }) {
     </FormCard>
   );
 }
+
+const smtpNotificationCategories = [
+  {
+    value: "availability",
+    label: "节点与站点可用性",
+    description: "健康检查失败、DNS 池调整和无健康节点",
+  },
+  {
+    value: "monitoring",
+    label: "TCP 拨测异常",
+    description: "拨测异常自动暂停及恢复流量",
+  },
+  {
+    value: "certificate",
+    label: "证书续期",
+    description: "证书自动续期任务失败",
+  },
+  {
+    value: "backup",
+    label: "备份任务",
+    description: "自动备份任务失败",
+  },
+] as const;
 
 function smtpTestErrorMessage(error: unknown) {
   if (error instanceof ApiError && error.status === 504) {

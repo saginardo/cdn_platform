@@ -50,6 +50,7 @@ type MonitoringRoundOutcome struct {
 	Status        NodeMonitoringStatus
 	NodeStatus    domain.NodeStatus
 	StatusChanged bool
+	AutoPaused    bool
 }
 
 func (s *Store) ListMonitoringTargets(enabledOnly bool) ([]domain.MonitoringTarget, error) {
@@ -348,7 +349,7 @@ func (s *Store) RecordMonitoringRound(nodeID string, results []domain.Monitoring
 	if err := tx.Commit(); err != nil {
 		return MonitoringRoundOutcome{}, err
 	}
-	return MonitoringRoundOutcome{Status: status, NodeStatus: nodeStatus, StatusChanged: statusChanged}, nil
+	return MonitoringRoundOutcome{Status: status, NodeStatus: nodeStatus, StatusChanged: statusChanged, AutoPaused: autoPaused != 0}, nil
 }
 
 func monitoringResultsMatchTargets(results []domain.MonitoringProbeResult, targetIDs []string) bool {

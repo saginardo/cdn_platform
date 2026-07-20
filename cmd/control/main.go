@@ -415,8 +415,22 @@ func notifyBackupFailure(status control.BackupRunStatus) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	body := fmt.Sprintf("Host: %s\nStarted: %s\nFailed: %s\nAttempt: %d/%d\nError: %s\n", status.Host, status.StartedAt.Format(time.RFC3339), status.UpdatedAt.Format(time.RFC3339), status.Attempt, status.MaxAttempts, status.Error)
-	return settings.Notify(ctx, "[CDN Platform] Backup failed", body)
+	return settings.NotifyNotification(ctx, integrations.Notification{
+		Category: integrations.NotificationCategoryBackup,
+		Severity: integrations.NotificationSeverityError,
+		Subject:  "[CDN] 备份任务失败",
+		Message:  "自动备份任务未能完成。",
+		Details: []integrations.NotificationDetail{
+			{Label: "主机", Value: status.Host},
+			{Label: "开始时间", Value: status.StartedAt.Format(time.RFC3339)},
+			{Label: "失败时间", Value: status.UpdatedAt.Format(time.RFC3339)},
+			{Label: "重试次数", Value: fmt.Sprintf("%d/%d", status.Attempt, status.MaxAttempts)},
+			{Label: "错误", Value: status.Error},
+		},
+		OccurredAt: status.UpdatedAt,
+		Key:        "backup:failure",
+		Cooldown:   5 * time.Minute,
+	})
 }
 
 func writePrivateRuntimeFile(directory, name, value string) error {

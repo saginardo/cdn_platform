@@ -49,7 +49,7 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if err := database.SaveCacheDefaultSizeGB(0); err == nil {
 		t.Fatal("accepted cache default below minimum")
 	}
-	smtp := SMTPSettings{Enabled: true, Host: "smtp.example.test", Port: 465, Username: "mailer", FromAddress: "cdn@example.test", Recipients: []string{"ops@example.test"}, Security: "tls"}
+	smtp := SMTPSettings{Enabled: true, Host: "smtp.example.test", Port: 465, Username: "mailer", FromAddress: "cdn@example.test", Recipients: []string{"ops@example.test"}, NotificationCategories: []string{"monitoring", "backup"}, Security: "tls"}
 	if err := database.SaveSMTPSettings(smtp, []byte("encrypted-password"), true); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if settings.DNSDefaultTTLSeconds != 120 || settings.CacheDefaultSizeGB != 8 || settings.Branding != branding || !settings.SMTP.Override || settings.SMTP.Host != smtp.Host || len(settings.SMTP.Recipients) != 1 {
+	if settings.DNSDefaultTTLSeconds != 120 || settings.CacheDefaultSizeGB != 8 || settings.Branding != branding || !settings.SMTP.Override || settings.SMTP.Host != smtp.Host || len(settings.SMTP.Recipients) != 1 || len(settings.SMTP.NotificationCategories) != 2 || settings.SMTP.NotificationCategories[0] != "monitoring" {
 		t.Fatalf("unexpected saved settings: %#v", settings)
 	}
 	stored, err := database.Secret(SecretSMTPPassword)

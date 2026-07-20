@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cdn-platform/internal/domain"
+	"cdn-platform/internal/integrations"
 	"cdn-platform/internal/logstore"
 	"cdn-platform/internal/store"
 )
@@ -86,6 +87,76 @@ func TestMonitoringAPIConfiguresTargetsAndExposesNodeScore(t *testing.T) {
 	monitorNode := overview.Nodes[0]
 	if !monitorNode.Capable || monitorNode.Score == nil || *monitorNode.Score >= store.MonitoringHealthyScore || len(monitorNode.Results) != 1 || monitorNode.Results[0].TargetName != "主 API" {
 		t.Fatalf("monitoring node = %#v", monitorNode)
+	}
+}
+
+type recordingNotificationNotifier struct {
+	notifications []integrations.Notification
+}
+
+func (notifier *recordingNotificationNotifier) Notify(_ context.Context, subject, body string) error {
+	notifier.notifications = append(notifier.notifications, integrations.Notification{Subject: subject, Message: body})
+	return nil
+}
+
+func (notifier *recordingNotificationNotifier) NotifyNotification(_ context.Context, notification integrations.Notification) error {
+	notifier.notifications = append(notifier.notifications, notification)
+	return nil
+}
+
+func TestMonitoringReportNotifiesConfirmedAnomalyAndRecovery(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-monitor-alert", "203.0.113.101")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	target, err := database.CreateMonitoringTarget("主探针", "probe.example.test:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier := &recordingNotificationNotifier{}
+	server := &Server{Store: database, Notifier: notifier}
+	base := time.Now().UTC().Add(-time.Minute)
+	for round := 1; round <= store.MonitoringAutoPauseAfter; round++ {
+		body, _ := json.Marshal(monitoringReportRequest{Results: []domain.MonitoringProbeResult{{
+			TargetID: target.ID, Attempts: 3, SuccessfulAttempts: 0, AverageLatencyMS: 0,
+			Error: "timeout", CheckedAt: base.Add(time.Duration(round) * time.Second),
+		}}})
+		request := httptest.NewRequest(http.MethodPost, "/api/edge/v1/monitoring-results", bytes.NewReader(body))
+		request = request.WithContext(context.WithValue(request.Context(), edgeContextKey{}, node.ID))
+		response := httptest.NewRecorder()
+		server.edgeMonitoringReport(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("round %d status = %d, body = %s", round, response.Code, response.Body.String())
+		}
+	}
+	if len(notifier.notifications) != 1 {
+		t.Fatalf("anomaly notifications = %#v", notifier.notifications)
+	}
+	anomaly := notifier.notifications[0]
+	if anomaly.Category != integrations.NotificationCategoryMonitoring || anomaly.Severity != integrations.NotificationSeverityError || anomaly.SuppressUntilResolved || anomaly.Cooldown != 5*time.Minute || anomaly.Key == "" {
+		t.Fatalf("anomaly notification = %#v", anomaly)
+	}
+	healthyBody, _ := json.Marshal(monitoringReportRequest{Results: []domain.MonitoringProbeResult{{
+		TargetID: target.ID, Attempts: 3, SuccessfulAttempts: 3, AverageLatencyMS: 20,
+		CheckedAt: base.Add((store.MonitoringAutoPauseAfter + 1) * time.Second),
+	}}})
+	healthyRequest := httptest.NewRequest(http.MethodPost, "/api/edge/v1/monitoring-results", bytes.NewReader(healthyBody))
+	healthyRequest = healthyRequest.WithContext(context.WithValue(healthyRequest.Context(), edgeContextKey{}, node.ID))
+	healthyResponse := httptest.NewRecorder()
+	server.edgeMonitoringReport(healthyResponse, healthyRequest)
+	if healthyResponse.Code != http.StatusOK || len(notifier.notifications) != 2 {
+		t.Fatalf("recovery response=%d notifications=%#v", healthyResponse.Code, notifier.notifications)
+	}
+	if !notifier.notifications[1].Resolved || !notifier.notifications[1].NotifyOnResolve || notifier.notifications[1].Severity != integrations.NotificationSeveritySuccess {
+		t.Fatalf("recovery notification = %#v", notifier.notifications[1])
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"cdn-platform/internal/domain"
 	"cdn-platform/internal/integrations"
@@ -19,13 +20,14 @@ const (
 )
 
 type SMTPProfile struct {
-	Enabled     bool     `json:"enabled"`
-	Host        string   `json:"host"`
-	Port        int      `json:"port"`
-	Username    string   `json:"username"`
-	FromAddress string   `json:"from_address"`
-	Recipients  []string `json:"recipients"`
-	Security    string   `json:"security"`
+	Enabled                bool     `json:"enabled"`
+	Host                   string   `json:"host"`
+	Port                   int      `json:"port"`
+	Username               string   `json:"username"`
+	FromAddress            string   `json:"from_address"`
+	Recipients             []string `json:"recipients"`
+	NotificationCategories []string `json:"notification_categories"`
+	Security               string   `json:"security"`
 }
 
 type EnvironmentSettings struct {
@@ -79,7 +81,10 @@ type SettingsManager struct {
 	Store  *store.Store
 	Cipher *Cipher
 
+	notificationSender func(context.Context, SMTPProfile, string, integrations.Notification) error
+
 	updateMu     sync.Mutex
+	notifyMu     sync.Mutex
 	mu           sync.RWMutex
 	env          EnvironmentSettings
 	dnsTTL       int
@@ -353,6 +358,11 @@ func (m *SettingsManager) ValidateSMTP(profile SMTPProfile, password string) (SM
 			return SMTPProfile{}, errors.New("SMTP settings contain invalid characters")
 		}
 	}
+	for _, category := range profile.NotificationCategories {
+		if !integrations.ValidNotificationCategory(integrations.NotificationCategory(category)) {
+			return SMTPProfile{}, fmt.Errorf("unsupported SMTP notification category %q", category)
+		}
+	}
 	if !profile.Enabled {
 		return profile, nil
 	}
@@ -418,11 +428,84 @@ func (m *SettingsManager) ClearSMTP() error {
 }
 
 func (m *SettingsManager) Notify(ctx context.Context, subject, body string) error {
+	return m.NotifyNotification(ctx, integrations.Notification{
+		Category: integrations.NotificationCategoryAvailability,
+		Severity: integrations.NotificationSeverityInfo,
+		Subject:  subject,
+		Message:  body,
+	})
+}
+
+func (m *SettingsManager) NotifyNotification(ctx context.Context, notification integrations.Notification) error {
 	profile, password := m.SMTPProfile()
-	if !profile.Enabled {
+	if !integrations.ValidNotificationCategory(notification.Category) {
+		notification.Category = integrations.NotificationCategoryAvailability
+	}
+	categoryEnabled := smtpNotificationCategoryEnabled(profile, notification.Category)
+	if notification.Resolved && notification.Key != "" {
+		m.notifyMu.Lock()
+		defer m.notifyMu.Unlock()
+		state, err := m.Store.NotificationDeliveryState(notification.Key)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !state.Active {
+			return nil
+		}
+		if m.Store.ReadOnly() {
+			if !profile.Enabled || !categoryEnabled || !notification.NotifyOnResolve {
+				return nil
+			}
+			return m.deliverNotification(ctx, profile, password, notification)
+		}
+		if !profile.Enabled || !categoryEnabled || !notification.NotifyOnResolve {
+			return m.Store.ResolveNotificationDelivery(notification.Key)
+		}
+		if err := m.deliverNotification(ctx, profile, password, notification); err != nil {
+			return err
+		}
+		return m.Store.ResolveNotificationDelivery(notification.Key)
+	}
+	if !profile.Enabled || !categoryEnabled {
 		return nil
 	}
-	return smtpNotifier(profile, password).Notify(ctx, subject, body)
+	// The backup-status helper intentionally opens SQLite read-only. It can still
+	// deliver a categorized message, but cannot persist a cooldown marker.
+	if m.Store.ReadOnly() {
+		return m.deliverNotification(ctx, profile, password, notification)
+	}
+	if notification.Key == "" {
+		return m.deliverNotification(ctx, profile, password, notification)
+	}
+	m.notifyMu.Lock()
+	defer m.notifyMu.Unlock()
+	state, err := m.Store.NotificationDeliveryState(notification.Key)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	now := time.Now().UTC()
+	if err == nil {
+		if notification.SuppressUntilResolved && state.Active {
+			return nil
+		}
+		if notification.Cooldown > 0 && now.Before(state.LastSentAt.Add(notification.Cooldown)) {
+			return nil
+		}
+	}
+	if err := m.deliverNotification(ctx, profile, password, notification); err != nil {
+		return err
+	}
+	return m.Store.MarkNotificationDelivered(notification.Key, true, now)
+}
+
+func (m *SettingsManager) deliverNotification(ctx context.Context, profile SMTPProfile, password string, notification integrations.Notification) error {
+	if m.notificationSender != nil {
+		return m.notificationSender(ctx, profile, password, notification)
+	}
+	return smtpNotifier(profile, password).NotifyNotification(ctx, notification)
 }
 
 func smtpNotifier(profile SMTPProfile, password string) integrations.SMTPNotifier {
@@ -456,18 +539,55 @@ func normalizeSMTPProfile(profile SMTPProfile) SMTPProfile {
 		recipients = append(recipients, recipient)
 	}
 	profile.Recipients = recipients
+	if profile.NotificationCategories == nil {
+		profile.NotificationCategories = defaultSMTPNotificationCategories()
+	} else {
+		seenCategories := make(map[string]struct{}, len(profile.NotificationCategories))
+		categories := make([]string, 0, len(profile.NotificationCategories))
+		for _, category := range profile.NotificationCategories {
+			category = strings.ToLower(strings.TrimSpace(category))
+			if category == "" {
+				continue
+			}
+			if _, found := seenCategories[category]; found {
+				continue
+			}
+			seenCategories[category] = struct{}{}
+			categories = append(categories, category)
+		}
+		profile.NotificationCategories = categories
+	}
 	return profile
 }
 
 func cloneSMTPProfile(profile SMTPProfile) SMTPProfile {
 	profile.Recipients = append([]string{}, profile.Recipients...)
+	profile.NotificationCategories = append([]string{}, profile.NotificationCategories...)
 	return profile
 }
 
 func smtpProfileFromStore(settings store.SMTPSettings) SMTPProfile {
-	return normalizeSMTPProfile(SMTPProfile{Enabled: settings.Enabled, Host: settings.Host, Port: settings.Port, Username: settings.Username, FromAddress: settings.FromAddress, Recipients: settings.Recipients, Security: settings.Security})
+	return normalizeSMTPProfile(SMTPProfile{Enabled: settings.Enabled, Host: settings.Host, Port: settings.Port, Username: settings.Username, FromAddress: settings.FromAddress, Recipients: settings.Recipients, NotificationCategories: settings.NotificationCategories, Security: settings.Security})
 }
 
 func smtpProfileToStore(profile SMTPProfile) store.SMTPSettings {
-	return store.SMTPSettings{Override: true, Enabled: profile.Enabled, Host: profile.Host, Port: profile.Port, Username: profile.Username, FromAddress: profile.FromAddress, Recipients: append([]string{}, profile.Recipients...), Security: profile.Security}
+	return store.SMTPSettings{Override: true, Enabled: profile.Enabled, Host: profile.Host, Port: profile.Port, Username: profile.Username, FromAddress: profile.FromAddress, Recipients: append([]string{}, profile.Recipients...), NotificationCategories: append([]string{}, profile.NotificationCategories...), Security: profile.Security}
+}
+
+func defaultSMTPNotificationCategories() []string {
+	categories := integrations.NotificationCategories()
+	result := make([]string, 0, len(categories))
+	for _, category := range categories {
+		result = append(result, string(category))
+	}
+	return result
+}
+
+func smtpNotificationCategoryEnabled(profile SMTPProfile, category integrations.NotificationCategory) bool {
+	for _, configured := range profile.NotificationCategories {
+		if configured == string(category) {
+			return true
+		}
+	}
+	return false
 }

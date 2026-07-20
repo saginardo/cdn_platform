@@ -162,6 +162,102 @@ func TestPendingSiteDraftDoesNotChangePublishedHealthOrDNS(t *testing.T) {
 	}
 }
 
+func TestHealthPreservesDNSAndSuppressesAlertsDuringStateConvergence(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-converging", "203.0.113.121")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	site, err := database.CreateSite(domain.Site{
+		Name: "converging-site", Domains: []string{"converging.example.test"}, Nodes: []string{node.ID},
+		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
+	}, "zone-converging")
+	if err != nil {
+		t.Fatal(err)
+	}
+	site, err = database.MarkSitePublished(site.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := nginx.Render([]domain.Site{site})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveNodeState(node.ID, domain.DesiredState{Version: 2, NginxConfig: configuration}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Heartbeat(node.ID, 1, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	for range 5 {
+		if _, err := database.RecordNodeHealth(node.ID, true, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dns := &MemoryDNS{Zones: map[string][]integrations.DNSRecord{
+		"zone-converging": {{Name: "converging.example.test", Content: node.PublicIPv4, Comment: integrations.ManagedRecordPrefix + "site=" + site.ID + ";node=" + node.ID}},
+	}}
+	notifications := 0
+	notifier := notifierFunc(func(context.Context, string, string) error {
+		notifications++
+		return nil
+	})
+	nodes, err := database.ListNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := HealthManager{Server: &Server{Store: database, DNS: dns, Notifier: notifier}}
+	if err := manager.reconcileSiteDNS(context.Background(), site, nodes); err != nil {
+		t.Fatal(err)
+	}
+	records := dns.Zones["zone-converging"]
+	if len(records) != 1 || records[0].Content != node.PublicIPv4 {
+		t.Fatalf("DNS changed during state convergence: %#v", records)
+	}
+	if notifications != 0 {
+		t.Fatalf("convergence emitted %d availability notifications", notifications)
+	}
+}
+
+func TestHealthSkipsNodeProbeDuringOnlineUpgrade(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-upgrading", "203.0.113.122")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = database.CreateOrGetNodeUpgrade(node.ID, domain.NodeUpgradeInstruction{
+		Binary: domain.UpgradeArtifact{URL: "https://control.example.test/edge", SHA256: strings.Repeat("a", 64)},
+	}, time.Now().UTC().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := HealthManager{Server: &Server{Store: database}, Client: nodeHealthClient(http.StatusServiceUnavailable)}
+	if errorsFound := manager.reconcileNodeHealth(context.Background(), []domain.Node{node}); len(errorsFound) != 0 {
+		t.Fatalf("upgrade probe errors = %v", errorsFound)
+	}
+	health, err := database.NodeHealth(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.LastCheckedAt != nil || health.ConsecutiveFailures != 0 {
+		t.Fatalf("node health changed during online upgrade: %#v", health)
+	}
+}
+
 func TestDrainedSitePoolWithdrawsManagedDNS(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

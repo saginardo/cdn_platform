@@ -2,9 +2,11 @@ package control
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"cdn-platform/internal/domain"
 	"cdn-platform/internal/integrations"
@@ -182,5 +184,89 @@ func TestSettingsManagerValidatesSMTPProfile(t *testing.T) {
 	profile.Recipients = []string{"bad\naddress@example.test"}
 	if err := manager.SaveSMTP(profile, &password); err == nil {
 		t.Fatal("accepted SMTP header injection")
+	}
+}
+
+func TestSettingsManagerFiltersCategoriesAndPersistsNotificationCooldown(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, _ := NewEncryptionKey()
+	cipher, _ := NewCipher(key)
+	environment := EnvironmentSettings{SMTP: SMTPProfile{
+		Enabled: true, Host: "smtp.example.test", Port: 465,
+		FromAddress: "cdn@example.test", Recipients: []string{"ops@example.test"},
+		NotificationCategories: []string{"monitoring"}, Security: integrations.SMTPSecurityTLS,
+	}}
+	manager, err := NewSettingsManager(database, cipher, environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered := make([]integrations.Notification, 0)
+	manager.notificationSender = func(_ context.Context, _ SMTPProfile, _ string, notification integrations.Notification) error {
+		delivered = append(delivered, notification)
+		return nil
+	}
+	availability := integrations.Notification{Category: integrations.NotificationCategoryAvailability, Subject: "availability"}
+	if err := manager.NotifyNotification(context.Background(), availability); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 0 {
+		t.Fatalf("disabled category delivered notifications: %#v", delivered)
+	}
+	const deliveryKey = "monitoring:node:test"
+	anomaly := integrations.Notification{
+		Category: integrations.NotificationCategoryMonitoring, Subject: "anomaly", Key: deliveryKey,
+		Cooldown: 5 * time.Minute, SuppressUntilResolved: true,
+	}
+	if err := manager.NotifyNotification(context.Background(), anomaly); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.NotifyNotification(context.Background(), anomaly); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 1 {
+		t.Fatalf("same incident delivered %d notifications", len(delivered))
+	}
+	reloaded, err := NewSettingsManager(database, cipher, environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded.notificationSender = func(_ context.Context, _ SMTPProfile, _ string, notification integrations.Notification) error {
+		delivered = append(delivered, notification)
+		return nil
+	}
+	if err := reloaded.NotifyNotification(context.Background(), anomaly); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 1 {
+		t.Fatal("cooldown did not survive settings manager restart")
+	}
+	recovery := integrations.Notification{
+		Category: integrations.NotificationCategoryMonitoring, Subject: "recovered", Key: deliveryKey,
+		Resolved: true, NotifyOnResolve: true,
+	}
+	if err := reloaded.NotifyNotification(context.Background(), recovery); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 2 || !delivered[1].Resolved {
+		t.Fatalf("recovery notifications = %#v", delivered)
+	}
+	if err := reloaded.NotifyNotification(context.Background(), anomaly); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 2 {
+		t.Fatal("resolved incident bypassed the five-minute cooldown")
+	}
+	if err := database.MarkNotificationDelivered(deliveryKey, false, time.Now().UTC().Add(-6*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := reloaded.NotifyNotification(context.Background(), anomaly); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 3 {
+		t.Fatal("notification remained suppressed after cooldown elapsed")
 	}
 }

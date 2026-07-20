@@ -1,18 +1,23 @@
 package control
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	"cdn-platform/internal/domain"
+	"cdn-platform/internal/integrations"
 	"cdn-platform/internal/logstore"
 	"cdn-platform/internal/store"
 )
 
 const monitoringStaleAfter = 75 * time.Second
+
+const monitoringNotificationCooldown = 5 * time.Minute
 
 type monitoringOverviewResponse struct {
 	Targets          []domain.MonitoringTarget `json:"targets"`
@@ -350,14 +355,90 @@ func (s *Server) edgeMonitoringReport(response http.ResponseWriter, request *htt
 		return
 	}
 	s.enqueueMonitoringHistory(nodeID, input.Results)
-	if outcome.StatusChanged {
+	if outcome.StatusChanged || outcome.AutoPaused && outcome.Status.ConsecutiveAbnormal >= store.MonitoringAutoPauseAfter {
 		action := "monitor_auto_pause"
-		if outcome.NodeStatus == domain.NodeActive {
+		if outcome.StatusChanged && outcome.NodeStatus == domain.NodeActive {
 			action = "monitor_auto_resume"
 		}
-		s.audit(request, "edge:"+nodeID, action, "node", nodeID, outcome.Status.String())
+		if outcome.StatusChanged {
+			s.audit(request, "edge:"+nodeID, action, "node", nodeID, outcome.Status.String())
+		}
+		s.notifyMonitoringTransition(request.Context(), nodeID, input.Results, outcome)
 	}
 	writeJSON(response, http.StatusOK, map[string]bool{"accepted": true})
+}
+
+func (s *Server) notifyMonitoringTransition(ctx context.Context, nodeID string, results []domain.MonitoringProbeResult, outcome store.MonitoringRoundOutcome) {
+	if s.Notifier == nil {
+		return
+	}
+	node, err := s.Store.GetNode(nodeID)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Warn("load node for monitoring notification", "node_id", nodeID, "error", err)
+		}
+		return
+	}
+	targets, err := s.Store.ListMonitoringTargets(false)
+	if err != nil {
+		if s.Logger != nil {
+			s.Logger.Warn("load targets for monitoring notification", "node_id", nodeID, "error", err)
+		}
+		return
+	}
+	targetByID := make(map[string]domain.MonitoringTarget, len(targets))
+	for _, target := range targets {
+		targetByID[target.ID] = target
+	}
+	details := []integrations.NotificationDetail{
+		{Label: "节点", Value: node.Name},
+		{Label: "公网地址", Value: node.PublicIPv4},
+		{Label: "综合评分", Value: fmt.Sprintf("%d / 100", outcome.Status.Score)},
+		{Label: "成功率", Value: fmt.Sprintf("%.1f%%", outcome.Status.SuccessRate)},
+		{Label: "平均延迟", Value: fmt.Sprintf("%.1f ms", outcome.Status.AverageLatencyMS)},
+		{Label: "连续异常", Value: fmt.Sprintf("%d 轮", outcome.Status.ConsecutiveAbnormal)},
+	}
+	failedTargets := 0
+	for _, result := range results {
+		if result.SuccessfulAttempts == result.Attempts && strings.TrimSpace(result.Error) == "" {
+			continue
+		}
+		if failedTargets >= 12 {
+			break
+		}
+		name := result.TargetID
+		if target, found := targetByID[result.TargetID]; found {
+			name = target.Name
+		}
+		detail := fmt.Sprintf("%d/%d 次成功", result.SuccessfulAttempts, result.Attempts)
+		if strings.TrimSpace(result.Error) != "" {
+			detail += "；" + strings.TrimSpace(result.Error)
+		}
+		details = append(details, integrations.NotificationDetail{Label: "目标 " + name, Value: detail})
+		failedTargets++
+	}
+	notification := integrations.Notification{
+		Category:   integrations.NotificationCategoryMonitoring,
+		OccurredAt: time.Now().UTC(),
+		Key:        "monitoring:node:" + nodeID,
+		Cooldown:   monitoringNotificationCooldown,
+		Details:    details,
+	}
+	if outcome.NodeStatus == domain.NodeDraining {
+		notification.Severity = integrations.NotificationSeverityError
+		notification.Subject = "[CDN] 节点拨测异常，已暂停流量"
+		notification.Message = "节点连续多轮拨测低于健康阈值，控制面已自动暂停该节点，避免继续调度流量。"
+		notification.SuppressUntilResolved = false
+	} else {
+		notification.Severity = integrations.NotificationSeveritySuccess
+		notification.Subject = "[CDN] 节点拨测恢复，已恢复流量"
+		notification.Message = "节点拨测已恢复健康，控制面已解除自动暂停并恢复流量调度。"
+		notification.Resolved = true
+		notification.NotifyOnResolve = true
+	}
+	if err := integrations.SendNotification(ctx, s.Notifier, notification); err != nil && s.Logger != nil {
+		s.Logger.Warn("send monitoring notification", "node_id", nodeID, "status", outcome.NodeStatus, "error", err)
+	}
 }
 
 func (s *Server) enqueueMonitoringHistory(nodeID string, results []domain.MonitoringProbeResult) {

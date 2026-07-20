@@ -55,13 +55,37 @@ func TestSMTPNotifierSupportsSTARTTLSAndImplicitTLS(t *testing.T) {
 			case err := <-errors:
 				t.Fatal(err)
 			case message := <-messages:
-				if !strings.Contains(message, "Subject: Test message") || !strings.Contains(message, "SMTP body") {
+				if !strings.Contains(message, "Subject: Test message") || !strings.Contains(message, "SMTP body") || !strings.Contains(message, "multipart/alternative") || !strings.Contains(message, "text/html; charset=UTF-8") {
 					t.Fatalf("message = %q", message)
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("SMTP test server did not finish")
 			}
 		})
+	}
+}
+
+func TestNotificationHTMLIsStyledAndEscapesContent(t *testing.T) {
+	notification := normalizeNotification(Notification{
+		Category:   NotificationCategoryMonitoring,
+		Severity:   NotificationSeverityError,
+		Subject:    "Probe alert",
+		Message:    `<script>alert("unsafe")</script>`,
+		Details:    []NotificationDetail{{Label: "Node", Value: `<img src=x onerror=alert(1)>`}},
+		OccurredAt: time.Date(2026, 7, 20, 14, 30, 0, 0, time.UTC),
+	})
+	rendered, err := renderNotificationHTML(notification)
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(rendered)
+	for _, expected := range []string{"CDN Platform", "拨测监控", "#b91c1c", "&lt;script&gt;", "&lt;img"} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("rendered HTML does not contain %q: %s", expected, html)
+		}
+	}
+	if strings.Contains(html, `<script>`) || strings.Contains(html, `<img src=x`) {
+		t.Fatalf("rendered HTML contains unescaped input: %s", html)
 	}
 }
 

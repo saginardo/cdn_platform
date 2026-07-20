@@ -429,6 +429,7 @@ export interface Settings {
     username: string;
     from_address: string;
     recipients: string[];
+    notification_categories: string[];
     security: string;
     source: string;
     override_configured: boolean;

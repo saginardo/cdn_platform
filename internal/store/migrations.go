@@ -29,6 +29,20 @@ var schemaMigrations = []schemaMigration{
 	{Version: 11, Name: "branding-logo", Apply: migrateBrandingLogo},
 	{Version: 12, Name: "tcp-monitoring", Apply: migrateTCPMonitoring},
 	{Version: 13, Name: "monitoring-target-names", Apply: migrateMonitoringTargetNames},
+	{Version: 14, Name: "notification-preferences-and-delivery-state", Apply: migrateNotificationPreferences},
+}
+
+func migrateNotificationPreferences(tx *sql.Tx) error {
+	if err := addColumnIfMissing(tx, "control_settings", "smtp_notification_categories_json", `smtp_notification_categories_json TEXT NOT NULL DEFAULT '["availability","monitoring","certificate","backup"]'`); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS notification_delivery_state (
+		key TEXT PRIMARY KEY,
+		active INTEGER NOT NULL DEFAULT 0,
+		last_sent_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`)
+	return err
 }
 
 func migrateMonitoringTargetNames(tx *sql.Tx) error {

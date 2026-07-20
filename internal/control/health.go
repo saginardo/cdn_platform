@@ -26,7 +26,7 @@ type HealthManager struct {
 	RoundTimeout    time.Duration
 	Interval        time.Duration
 	alertMu         sync.Mutex
-	noHealthyAlerts map[string]bool
+	noHealthyAlerts map[string]time.Time
 	statusMu        sync.RWMutex
 	lastRound       HealthRoundStatus
 }
@@ -44,6 +44,7 @@ const (
 	defaultHealthWorkerLimit  = 4
 	defaultHealthRoundTimeout = 45 * time.Second
 	defaultHealthInterval     = 15 * time.Second
+	availabilityAlertCooldown = 5 * time.Minute
 )
 
 func (m *HealthManager) Run(ctx context.Context) {
@@ -122,6 +123,7 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 		return finish()
 	}
 	publishedSites := make([]domain.Site, 0, len(publications))
+	noHealthySites := make([]domain.Site, 0)
 	for _, publication := range publications {
 		publishedSites = append(publishedSites, publication.Site)
 	}
@@ -158,8 +160,20 @@ func (m *HealthManager) Reconcile(ctx context.Context) error {
 			m.clearNoHealthyAlert(site.ID)
 			continue
 		}
-		if err := m.reconcileSiteDNS(roundCtx, site, nodes); err != nil {
+		outcome, err := m.reconcileSiteDNSOutcome(roundCtx, site, nodes)
+		if err != nil {
 			errorsFound = append(errorsFound, err)
+			continue
+		}
+		if outcome.noHealthy && !m.noHealthyAlertActive(site.ID) {
+			noHealthySites = append(noHealthySites, site)
+		}
+	}
+	if err := m.notifyNoHealthySites(roundCtx, noHealthySites); err != nil {
+		errorsFound = append(errorsFound, err)
+	} else {
+		for _, site := range noHealthySites {
+			m.markNoHealthyAlert(site.ID)
 		}
 	}
 	if errors.Is(roundCtx.Err(), context.DeadlineExceeded) {
@@ -186,6 +200,14 @@ func (m *HealthManager) reconcileNodeHealth(ctx context.Context, nodes []domain.
 	errorsFound := make([]error, 0)
 	for _, node := range nodes {
 		if node.Status == domain.NodeRevoked || node.Status == domain.NodeDraining || node.Status == domain.NodeUninstalling || node.Status == domain.NodeUninstalled {
+			continue
+		}
+		upgrading, err := m.nodeUpgradeInProgress(node)
+		if err != nil {
+			errorsFound = append(errorsFound, fmt.Errorf("read upgrade state for %s: %w", node.Name, err))
+			continue
+		}
+		if upgrading {
 			continue
 		}
 		prior, err := m.Server.Store.NodeHealth(node.ID)
@@ -219,7 +241,20 @@ func (m *HealthManager) reconcileNodeHealth(ctx context.Context, nodes []domain.
 			continue
 		}
 		if probe.prior.dnsEligible && !health.DNSEligible && m.Server.Notifier != nil {
-			if err := m.Server.Notifier.Notify(ctx, "CDN alert: edge node removed from DNS pool", "Node "+probe.node.Name+" ("+probe.node.PublicIPv4+") failed three consecutive health checks: "+probe.detail); err != nil {
+			if err := integrations.SendNotification(ctx, m.Server.Notifier, integrations.Notification{
+				Category: integrations.NotificationCategoryAvailability,
+				Severity: integrations.NotificationSeverityError,
+				Subject:  "[CDN] 边缘节点已移出 DNS 池",
+				Message:  "节点连续三次健康检查失败，控制面已停止将新流量调度到该节点。",
+				Details: []integrations.NotificationDetail{
+					{Label: "节点", Value: probe.node.Name},
+					{Label: "公网地址", Value: probe.node.PublicIPv4},
+					{Label: "检查结果", Value: probe.detail},
+				},
+				OccurredAt: time.Now().UTC(),
+				Key:        "availability:node-health:" + probe.node.ID,
+				Cooldown:   availabilityAlertCooldown,
+			}); err != nil {
 				errorsFound = append(errorsFound, fmt.Errorf("notify node health failure for %s: %w", probe.node.Name, err))
 			}
 		}
@@ -250,6 +285,14 @@ func (m *HealthManager) reconcileSiteHealth(ctx context.Context, sites []domain.
 		for _, nodeID := range site.Nodes {
 			node, found := nodesByID[nodeID]
 			if !found || node.Status != domain.NodeActive {
+				continue
+			}
+			upgrading, err := m.nodeUpgradeInProgress(node)
+			if err != nil {
+				errorsFound = append(errorsFound, fmt.Errorf("read upgrade state for site %s on %s: %w", site.Name, node.Name, err))
+				continue
+			}
+			if upgrading {
 				continue
 			}
 			desiredVersion, err := m.Server.Store.DesiredVersion(node.ID)
@@ -308,7 +351,21 @@ func (m *HealthManager) reconcileSiteHealth(ctx context.Context, sites []domain.
 			continue
 		}
 		if probe.priorDNS && !health.DNSEligible && m.Server.Notifier != nil {
-			if err := m.Server.Notifier.Notify(ctx, "CDN alert: site endpoint removed from DNS pool", "Site "+probe.site.Name+" on node "+probe.node.Name+" ("+probe.node.PublicIPv4+") failed three consecutive HTTPS/SNI health checks: "+health.LastError); err != nil {
+			if err := integrations.SendNotification(ctx, m.Server.Notifier, integrations.Notification{
+				Category: integrations.NotificationCategoryAvailability,
+				Severity: integrations.NotificationSeverityError,
+				Subject:  "[CDN] 站点端点已移出 DNS 池",
+				Message:  "站点端点连续三次 HTTPS/SNI 健康检查失败，控制面已停止向该端点调度新流量。",
+				Details: []integrations.NotificationDetail{
+					{Label: "站点", Value: probe.site.Name},
+					{Label: "节点", Value: probe.node.Name},
+					{Label: "公网地址", Value: probe.node.PublicIPv4},
+					{Label: "检查结果", Value: health.LastError},
+				},
+				OccurredAt: time.Now().UTC(),
+				Key:        "availability:site-health:" + probe.site.ID + ":" + probe.node.ID,
+				Cooldown:   availabilityAlertCooldown,
+			}); err != nil {
 				errorsFound = append(errorsFound, fmt.Errorf("notify site health failure for %s on %s: %w", probe.site.Name, probe.node.Name, err))
 			}
 		}
@@ -425,8 +482,27 @@ func (m *HealthManager) reconcileSite(ctx context.Context, site domain.Site, nod
 }
 
 func (m *HealthManager) reconcileSiteDNS(ctx context.Context, site domain.Site, nodes []domain.Node) error {
+	outcome, err := m.reconcileSiteDNSOutcome(ctx, site, nodes)
+	if err != nil {
+		return err
+	}
+	if outcome.noHealthy && !m.noHealthyAlertActive(site.ID) {
+		if err := m.notifyNoHealthySites(ctx, []domain.Site{site}); err != nil {
+			return err
+		}
+		m.markNoHealthyAlert(site.ID)
+	}
+	return nil
+}
+
+type siteDNSOutcome struct {
+	noHealthy bool
+}
+
+func (m *HealthManager) reconcileSiteDNSOutcome(ctx context.Context, site domain.Site, nodes []domain.Node) (siteDNSOutcome, error) {
+	outcome := siteDNSOutcome{}
 	if err := ctx.Err(); err != nil {
-		return context.Cause(ctx)
+		return outcome, context.Cause(ctx)
 	}
 	nodesByID := make(map[string]domain.Node, len(nodes))
 	for _, node := range nodes {
@@ -434,35 +510,59 @@ func (m *HealthManager) reconcileSiteDNS(ctx context.Context, site domain.Site, 
 	}
 	var healthy []domain.Node
 	activeAssigned := 0
+	convergingAssigned := 0
 	for _, nodeID := range site.Nodes {
 		node, found := nodesByID[nodeID]
-		if !found || node.Status != domain.NodeActive {
+		if !found {
+			continue
+		}
+		upgrading, err := m.nodeUpgradeInProgress(node)
+		if err != nil {
+			return outcome, err
+		}
+		if node.Status != domain.NodeActive {
+			if upgrading {
+				convergingAssigned++
+			}
 			continue
 		}
 		activeAssigned++
+		if upgrading {
+			convergingAssigned++
+			continue
+		}
 		desiredVersion, err := m.Server.Store.DesiredVersion(node.ID)
 		if err != nil {
-			return err
+			return outcome, err
 		}
 		if desiredVersion == 0 || node.AppliedVersion < desiredVersion {
+			convergingAssigned++
+			continue
+		}
+		publishing, err := m.Server.Store.HasActiveNodePublication(node.ID)
+		if err != nil {
+			return outcome, err
+		}
+		if publishing {
+			convergingAssigned++
 			continue
 		}
 		nodeHealth, err := m.Server.Store.NodeHealth(node.ID)
 		if err != nil {
-			return err
+			return outcome, err
 		}
 		if !nodeHealth.DNSEligible {
 			continue
 		}
 		state, _, err := m.Server.Store.NodeState(node.ID)
 		if err != nil {
-			return err
+			return outcome, err
 		}
 		hasSiteHealth := nginx.HasSiteHealth(state.NginxConfig, site.ID)
 		if hasSiteHealth {
 			siteHealth, err := m.Server.Store.SiteNodeHealth(site.ID, node.ID)
 			if err != nil {
-				return err
+				return outcome, err
 			}
 			if !siteHealth.DNSEligible {
 				continue
@@ -470,20 +570,20 @@ func (m *HealthManager) reconcileSiteDNS(ctx context.Context, site domain.Site, 
 		}
 		healthy = append(healthy, node)
 	}
+	if convergingAssigned > 0 {
+		m.clearNoHealthyAlert(site.ID)
+		return outcome, nil
+	}
 	if len(healthy) == 0 {
 		if activeAssigned == 0 {
 			if err := m.clearSiteDNS(ctx, site); err != nil {
-				return err
+				return outcome, err
 			}
 			m.clearNoHealthyAlert(site.ID)
-			return nil
+			return outcome, nil
 		}
-		if m.markNoHealthyAlert(site.ID) && m.Server.Notifier != nil {
-			if err := m.Server.Notifier.Notify(ctx, "CDN alert: no healthy nodes for "+site.Name, "DNS was left unchanged because every assigned node is unhealthy. Investigate edge reachability and control-plane probes."); err != nil {
-				return fmt.Errorf("notify empty healthy pool for %s: %w", site.Name, err)
-			}
-		}
-		return nil
+		outcome.noHealthy = true
+		return outcome, nil
 	}
 	m.clearNoHealthyAlert(site.ID)
 	desired := make([]integrations.DNSRecord, 0, len(healthy)*len(site.Domains))
@@ -502,10 +602,52 @@ func (m *HealthManager) reconcileSiteDNS(ctx context.Context, site domain.Site, 
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return context.Cause(ctx)
+		return outcome, context.Cause(ctx)
 	}
 	if err := m.Server.DNS.Reconcile(ctx, site.ZoneID, "site="+site.ID, desired); err != nil {
-		return fmt.Errorf("reconcile DNS for %s: %w", site.Name, err)
+		return outcome, fmt.Errorf("reconcile DNS for %s: %w", site.Name, err)
+	}
+	return outcome, nil
+}
+
+func (m *HealthManager) nodeUpgradeInProgress(node domain.Node) (bool, error) {
+	if node.ActiveUpgradeID != "" {
+		return true, nil
+	}
+	return m.Server.Store.HasActiveNodeUpgrade(node.ID)
+}
+
+func (m *HealthManager) notifyNoHealthySites(ctx context.Context, sites []domain.Site) error {
+	if len(sites) == 0 || m.Server.Notifier == nil {
+		return nil
+	}
+	subject := fmt.Sprintf("[CDN] %d 个站点暂无健康节点", len(sites))
+	if len(sites) == 1 {
+		subject = "[CDN] 站点暂无健康节点：" + sites[0].Name
+	}
+	details := make([]integrations.NotificationDetail, 0, min(len(sites), 20)+1)
+	for index, site := range sites {
+		if index == 20 {
+			details = append(details, integrations.NotificationDetail{Label: "其他站点", Value: fmt.Sprintf("另有 %d 个站点，请在控制面查看", len(sites)-index)})
+			break
+		}
+		value := site.Name
+		if len(site.Domains) > 0 {
+			value += "（" + strings.Join(site.Domains, "、") + "）"
+		}
+		details = append(details, integrations.NotificationDetail{Label: fmt.Sprintf("站点 %d", index+1), Value: value})
+	}
+	if err := integrations.SendNotification(ctx, m.Server.Notifier, integrations.Notification{
+		Category:   integrations.NotificationCategoryAvailability,
+		Severity:   integrations.NotificationSeverityError,
+		Subject:    subject,
+		Message:    "所有已分配节点均未通过可用性筛选。为避免错误清空解析，DNS 保持不变；请检查边缘连通性和控制面健康探测。",
+		Details:    details,
+		OccurredAt: time.Now().UTC(),
+		Key:        "availability:no-healthy-sites",
+		Cooldown:   availabilityAlertCooldown,
+	}); err != nil {
+		return fmt.Errorf("notify empty healthy pool: %w", err)
 	}
 	return nil
 }
@@ -633,12 +775,29 @@ func (m *HealthManager) markNoHealthyAlert(siteID string) bool {
 	m.alertMu.Lock()
 	defer m.alertMu.Unlock()
 	if m.noHealthyAlerts == nil {
-		m.noHealthyAlerts = make(map[string]bool)
+		m.noHealthyAlerts = make(map[string]time.Time)
 	}
-	if m.noHealthyAlerts[siteID] {
+	if sentAt, found := m.noHealthyAlerts[siteID]; found && time.Since(sentAt) < availabilityAlertCooldown {
 		return false
 	}
-	m.noHealthyAlerts[siteID] = true
+	m.noHealthyAlerts[siteID] = time.Now()
+	return true
+}
+
+func (m *HealthManager) noHealthyAlertActive(siteID string) bool {
+	m.alertMu.Lock()
+	defer m.alertMu.Unlock()
+	if m.noHealthyAlerts == nil {
+		return false
+	}
+	sentAt, found := m.noHealthyAlerts[siteID]
+	if !found {
+		return false
+	}
+	if time.Since(sentAt) >= availabilityAlertCooldown {
+		delete(m.noHealthyAlerts, siteID)
+		return false
+	}
 	return true
 }
 

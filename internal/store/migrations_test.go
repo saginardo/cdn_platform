@@ -36,6 +36,37 @@ func TestMigrationsRecordCurrentVersionAndRemainIdempotent(t *testing.T) {
 	}
 }
 
+func TestNotificationPreferencesMigrationUpgradesLegacySchema(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.db.Exec(`ALTER TABLE control_settings DROP COLUMN smtp_notification_categories_json`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DROP TABLE notification_delivery_state`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version >= 14`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	found, err := columnExists(database.db, "control_settings", "smtp_notification_categories_json")
+	if err != nil || !found {
+		t.Fatalf("notification categories column = %v, %v", found, err)
+	}
+	var count int
+	if err := database.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'notification_delivery_state'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("notification delivery state table was not created")
+	}
+}
+
 func TestBrandingLogoMigrationAddsLegacyColumn(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

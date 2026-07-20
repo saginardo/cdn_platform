@@ -32,8 +32,11 @@ var (
 )
 
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	readOnly bool
 }
+
+func (s *Store) ReadOnly() bool { return s.readOnly }
 
 const legacyDefaultSecurityPolicyPattern = `(?i)^/+(?:\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|(?:[^/]+/)*\.env(?:[._~-]?[A-Za-z0-9-]*)?(?:\.php)?|\.git(?:/|$|-)|\.aws(?:/|$)|\.docker/(?:config\.json|)|\.svn(?:/|$)|\.hg(?:/|$)|\.ht(?:access|passwd)|\.DS_Store$)`
 
@@ -231,6 +234,7 @@ CREATE TABLE IF NOT EXISTS control_settings (
   smtp_username TEXT NOT NULL DEFAULT '',
   smtp_from_address TEXT NOT NULL DEFAULT '',
   smtp_recipients_json TEXT NOT NULL DEFAULT '[]',
+	 smtp_notification_categories_json TEXT NOT NULL DEFAULT '["availability","monitoring","certificate","backup"]',
   smtp_security TEXT NOT NULL DEFAULT 'starttls',
   backup_override INTEGER NOT NULL DEFAULT 0,
   backup_repository TEXT NOT NULL DEFAULT '',
@@ -274,6 +278,12 @@ CREATE TABLE IF NOT EXISTS node_monitoring_status (
   average_latency_ms REAL NOT NULL,
   consecutive_abnormal INTEGER NOT NULL DEFAULT 0,
   last_checked_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS notification_delivery_state (
+  key TEXT PRIMARY KEY,
+  active INTEGER NOT NULL DEFAULT 0,
+  last_sent_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS monitoring_probe_results (

@@ -38,37 +38,38 @@ var embeddedWeb embed.FS
 var uninstallEdgeScript string
 
 type Server struct {
-	Store              *store.Store
-	Cipher             *Cipher
-	CA                 *InternalCA
-	Publisher          Publisher
-	DNS                integrations.DNSProvider
-	Cloudflare         *integrations.CloudflareDNS
-	Issuer             integrations.CertificateIssuer
-	CertificateManager *CertificateManager
-	HealthManager      *HealthManager
-	SiteDeleter        *SiteDeletionManager
-	Settings           *SettingsManager
-	BackupValidator    BackupRepositoryValidator
-	BackupStatusPath   string
-	OnlineRestore      *OnlineRestoreManager
-	Notifier           integrations.Notifier
-	Logs               logstore.Store
-	MonitoringHistory  logstore.MonitoringHistoryReader
-	MonitoringWriter   logstore.MonitoringHistoryEnqueuer
-	ControlURL         string
-	EdgeControlURL     string
-	EdgeBinaryURL      string
-	EdgeBinarySHA256   string
-	EdgeBinaryPath     string
-	SetupAllowCIDRs    []*net.IPNet
-	TrustedProxyCIDRs  []*net.IPNet
-	Logger             *slog.Logger
-	RestartControl     func()
-	machineStatusMu    sync.RWMutex
-	machineStatuses    map[string]domain.MachineStatus
-	loginMu            sync.Mutex
-	loginHits          map[string][]time.Time
+	Store               *store.Store
+	Cipher              *Cipher
+	CA                  *InternalCA
+	Publisher           Publisher
+	DNS                 integrations.DNSProvider
+	Cloudflare          *integrations.CloudflareDNS
+	Issuer              integrations.CertificateIssuer
+	CertificateManager  *CertificateManager
+	HealthManager       *HealthManager
+	SiteDeleter         *SiteDeletionManager
+	Settings            *SettingsManager
+	BackupValidator     BackupRepositoryValidator
+	BackupStatusPath    string
+	OnlineRestore       *OnlineRestoreManager
+	Notifier            integrations.Notifier
+	Logs                logstore.Store
+	MonitoringHistory   logstore.MonitoringHistoryReader
+	MonitoringWriter    logstore.MonitoringHistoryEnqueuer
+	smtpNotifierFactory func(SMTPProfile, string) integrations.Notifier
+	ControlURL          string
+	EdgeControlURL      string
+	EdgeBinaryURL       string
+	EdgeBinarySHA256    string
+	EdgeBinaryPath      string
+	SetupAllowCIDRs     []*net.IPNet
+	TrustedProxyCIDRs   []*net.IPNet
+	Logger              *slog.Logger
+	RestartControl      func()
+	machineStatusMu     sync.RWMutex
+	machineStatuses     map[string]domain.MachineStatus
+	loginMu             sync.Mutex
+	loginHits           map[string][]time.Time
 }
 
 func (s *Server) Handler() http.Handler {
@@ -1454,11 +1455,63 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 func (s *Server) withRequestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(response, request)
+		loggedResponse := &requestLogResponseWriter{ResponseWriter: response}
+		next.ServeHTTP(loggedResponse, request)
 		if s.Logger != nil {
-			s.Logger.Info("request", "method", request.Method, "path", request.URL.Path, "remote", s.requestIP(request), "duration", time.Since(started).String())
+			status := loggedResponse.statusCode()
+			level := slog.LevelInfo
+			message := "request"
+			if status >= http.StatusInternalServerError {
+				level = slog.LevelError
+				message = "request failed"
+			} else if status >= http.StatusBadRequest {
+				level = slog.LevelWarn
+				message = "request rejected"
+			}
+			s.Logger.Log(request.Context(), level, message,
+				"method", request.Method,
+				"path", request.URL.Path,
+				"remote", s.requestIP(request),
+				"status", status,
+				"response_bytes", loggedResponse.bytes,
+				"duration", time.Since(started).String(),
+			)
 		}
 	})
+}
+
+type requestLogResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *requestLogResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *requestLogResponseWriter) Write(contents []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	written, err := w.ResponseWriter.Write(contents)
+	w.bytes += written
+	return written, err
+}
+
+func (w *requestLogResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *requestLogResponseWriter) statusCode() int {
+	if w.status == 0 {
+		return http.StatusOK
+	}
+	return w.status
 }
 
 func (s *Server) audit(request *http.Request, actor, action, resourceType, resourceID, detail string) {

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"cdn-platform/internal/domain"
+	"cdn-platform/internal/integrations"
 )
 
 func (s *Server) getSettings(response http.ResponseWriter, _ *http.Request) {
@@ -263,11 +265,27 @@ func (s *Server) testSMTPSettings(response http.ResponseWriter, request *http.Re
 	}
 	testCtx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
 	defer cancel()
-	if err := smtpNotifier(profile, password).Notify(testCtx, "CDN Platform SMTP test", "This message confirms that the CDN Platform SMTP settings can send notifications."); err != nil {
-		writeError(response, http.StatusBadGateway, err)
+	notifier := integrations.Notifier(smtpNotifier(profile, password))
+	if s.smtpNotifierFactory != nil {
+		notifier = s.smtpNotifierFactory(profile, password)
+	}
+	if err := notifier.Notify(testCtx, "CDN Platform SMTP test", "This message confirms that the CDN Platform SMTP settings can send notifications."); err != nil {
+		status, responseError := smtpTestResponseError(err)
+		if s.Logger != nil {
+			s.Logger.Error("SMTP test failed", "host", profile.Host, "port", profile.Port, "security", profile.Security, "status", status, "error", err)
+		}
+		writeError(response, status, responseError)
 		return
 	}
 	writeJSON(response, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func smtpTestResponseError(err error) (int, error) {
+	var networkError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &networkError) && networkError.Timeout()) {
+		return http.StatusGatewayTimeout, errors.New("SMTP connection timed out")
+	}
+	return http.StatusBadGateway, fmt.Errorf("SMTP test failed: %w", err)
 }
 
 type backupSettingsRequest struct {

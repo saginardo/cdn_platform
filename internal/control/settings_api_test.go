@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,6 +22,12 @@ import (
 type recordingBackupValidator struct {
 	runtime BackupRuntime
 	err     error
+}
+
+type notifierFunc func(context.Context, string, string) error
+
+func (notify notifierFunc) Notify(ctx context.Context, subject, body string) error {
+	return notify(ctx, subject, body)
 }
 
 func (v *recordingBackupValidator) Validate(_ context.Context, runtime BackupRuntime) error {
@@ -134,12 +143,45 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	}
 
 	smtpPassword := "smtp-secret"
-	response = settingsRequest(t, server, http.MethodPut, "/api/settings/smtp", map[string]any{
+	smtpInput := map[string]any{
 		"enabled": true, "host": "smtp.example.test", "port": 465, "security": "tls", "username": "mailer", "password": smtpPassword,
 		"from_address": "cdn@example.test", "recipients": []string{"ops@example.test"},
-	}, true)
+	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/smtp", smtpInput, true)
 	if response.Code != http.StatusOK {
 		t.Fatalf("SMTP save = %d %s", response.Code, response.Body.String())
+	}
+	delete(smtpInput, "password")
+	var smtpTestError error
+	server.smtpNotifierFactory = func(profile SMTPProfile, password string) integrations.Notifier {
+		if profile.Host != "smtp.example.test" || password != smtpPassword {
+			t.Errorf("SMTP test profile = %#v, password configured = %t", profile, password != "")
+		}
+		return notifierFunc(func(context.Context, string, string) error { return smtpTestError })
+	}
+	response = settingsRequest(t, server, http.MethodPost, "/api/settings/smtp/test", smtpInput, true)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"ok":true`) {
+		t.Fatalf("SMTP test = %d %s", response.Code, response.Body.String())
+	}
+	var smtpLog bytes.Buffer
+	server.Logger = slog.New(slog.NewTextHandler(&smtpLog, nil))
+	smtpTestError = &net.DNSError{Err: "timeout", IsTimeout: true}
+	response = settingsRequest(t, server, http.MethodPost, "/api/settings/smtp/test", smtpInput, true)
+	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), "SMTP connection timed out") {
+		t.Fatalf("SMTP timeout = %d %s", response.Code, response.Body.String())
+	}
+	for _, expected := range []string{`msg="SMTP test failed"`, "host=smtp.example.test", "port=465", "security=tls", "status=504"} {
+		if !strings.Contains(smtpLog.String(), expected) {
+			t.Fatalf("SMTP failure log %q does not contain %q", smtpLog.String(), expected)
+		}
+	}
+	if strings.Contains(smtpLog.String(), smtpPassword) {
+		t.Fatal("SMTP failure log contains the password")
+	}
+	smtpTestError = errors.New("authentication rejected")
+	response = settingsRequest(t, server, http.MethodPost, "/api/settings/smtp/test", smtpInput, true)
+	if response.Code != http.StatusBadGateway || !strings.Contains(response.Body.String(), "SMTP test failed: authentication rejected") {
+		t.Fatalf("SMTP failure = %d %s", response.Code, response.Body.String())
 	}
 	backupSecret := "database-backup-secret"
 	backupPassword := "database-restic-password"

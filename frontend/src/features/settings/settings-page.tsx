@@ -12,6 +12,7 @@ import {
   Send,
   ShieldCheck,
   Trash2,
+  TriangleAlert,
 } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -25,6 +26,7 @@ import {
   PageLoading,
 } from "@/components/page";
 import { StatusBadge } from "@/components/status-badge";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -45,7 +47,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cacheBranding, DEFAULT_BRANDING } from "@/hooks/use-branding";
-import { api, errorMessage } from "@/lib/api";
+import { api, ApiError, errorMessage } from "@/lib/api";
 import type { Settings } from "@/lib/types";
 
 export function SettingsPage() {
@@ -504,6 +506,7 @@ function SMTPForm({ settings }: { settings: Settings }) {
   const [password, setPassword] = useState("");
   const [from, setFrom] = useState(initial.from_address);
   const [recipients, setRecipients] = useState(initial.recipients.join(", "));
+  const [testError, setTestError] = useState("");
   const payload = () => ({
     enabled,
     host,
@@ -534,8 +537,16 @@ function SMTPForm({ settings }: { settings: Settings }) {
         method: "POST",
         body: JSON.stringify(payload()),
       }),
-    onSuccess: () => toast.success("测试邮件已发送"),
-    onError: (error) => toast.error(errorMessage(error)),
+    onMutate: () => setTestError(""),
+    onSuccess: () => {
+      setTestError("");
+      toast.success("测试邮件已发送");
+    },
+    onError: (error) => {
+      const message = smtpTestErrorMessage(error);
+      setTestError(message);
+      toast.error(message);
+    },
   });
   const reset = useMutation({
     mutationFn: () => api("/api/settings/smtp", { method: "DELETE" }),
@@ -648,11 +659,17 @@ function SMTPForm({ settings }: { settings: Settings }) {
           <Button
             type="button"
             variant="outline"
+            className="min-w-32"
             disabled={busy || !enabled}
+            aria-busy={test.isPending}
             onClick={() => test.mutate()}
           >
-            <Send />
-            发送测试邮件
+            {test.isPending ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <Send />
+            )}
+            {test.isPending ? "正在发送" : "发送测试邮件"}
           </Button>
           <Button
             type="button"
@@ -664,9 +681,23 @@ function SMTPForm({ settings }: { settings: Settings }) {
             恢复环境变量
           </Button>
         </div>
+        {testError ? (
+          <Alert variant="destructive">
+            <TriangleAlert />
+            <AlertTitle>测试邮件发送失败</AlertTitle>
+            <AlertDescription>{testError}</AlertDescription>
+          </Alert>
+        ) : null}
       </form>
     </FormCard>
   );
+}
+
+function smtpTestErrorMessage(error: unknown) {
+  if (error instanceof ApiError && error.status === 504) {
+    return "SMTP 连接超时，请检查服务器、端口、安全连接方式及网络连通性。";
+  }
+  return errorMessage(error);
 }
 
 function BackupForm({ settings }: { settings: Settings }) {

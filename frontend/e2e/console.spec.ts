@@ -677,6 +677,99 @@ test("sites list shows only the publish status", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("SMTP test shows progress and keeps timeout feedback visible", async ({
+  page,
+}) => {
+  await mockAPI(page, {
+    "/api/settings": {
+      branding: {
+        name: "CDN Platform",
+        subtitle: "控制面板",
+        logo_data_url: "",
+      },
+      cache: { default_size_gb: 1 },
+      dns: { default_ttl_seconds: 60 },
+      cloudflare: {
+        source: "environment",
+        configured: true,
+        override_configured: false,
+        environment_configured: true,
+      },
+      smtp: {
+        enabled: true,
+        host: "smtp.example.test",
+        port: 465,
+        username: "mailer",
+        from_address: "cdn@example.test",
+        recipients: ["ops@example.test"],
+        security: "tls",
+        source: "database",
+        override_configured: true,
+        password_configured: true,
+        environment_configured: false,
+      },
+      backup: {
+        repository: "",
+        access_key_id: "",
+        region: "us-east-1",
+        backup_time: "03:25",
+        random_delay_seconds: 1200,
+        source: "unconfigured",
+        configured: false,
+        override_configured: false,
+        secret_access_key_configured: false,
+        restic_password_configured: false,
+        environment_configured: false,
+      },
+    },
+  });
+  let releaseFirstRequest: () => void = () => undefined;
+  const firstRequestGate = new Promise<void>((resolve) => {
+    releaseFirstRequest = resolve;
+  });
+  let attempts = 0;
+  await page.route("**/api/settings/smtp/test", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await firstRequestGate;
+      await route.fulfill({
+        status: 504,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "SMTP connection timed out" }),
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true }),
+    });
+  });
+
+  await page.goto("/#/settings");
+  await page.getByRole("tab", { name: "通知" }).click();
+  await page.getByRole("button", { name: "发送测试邮件" }).click();
+  const pendingButton = page.getByRole("button", { name: "正在发送" });
+  await expect(pendingButton).toBeDisabled();
+  await expect(pendingButton).toHaveAttribute("aria-busy", "true");
+  await expect(pendingButton.locator(".animate-spin")).toBeVisible();
+
+  releaseFirstRequest();
+  const failure = page
+    .getByRole("alert")
+    .filter({ hasText: "测试邮件发送失败" });
+  await expect(failure).toContainText(
+    "SMTP 连接超时，请检查服务器、端口、安全连接方式及网络连通性。",
+  );
+  await page.getByLabel("服务器").fill("smtp-alt.example.test");
+  await expect(failure).toBeVisible();
+
+  await page.getByRole("button", { name: "发送测试邮件" }).click();
+  await expect(failure).toHaveCount(0);
+  await expect(page.getByText("测试邮件已发送")).toBeVisible();
+  expect(attempts).toBe(2);
+});
+
 test("branding settings update the sidebar immediately", async ({
   page,
 }, testInfo) => {

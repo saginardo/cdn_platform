@@ -54,6 +54,8 @@ type Server struct {
 	OnlineRestore      *OnlineRestoreManager
 	Notifier           integrations.Notifier
 	Logs               logstore.Store
+	MonitoringHistory  logstore.MonitoringHistoryReader
+	MonitoringWriter   logstore.MonitoringHistoryEnqueuer
 	ControlURL         string
 	EdgeControlURL     string
 	EdgeBinaryURL      string
@@ -112,6 +114,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/backups/restores/{id}", s.requireAdmin(s.cancelOnlineRestore))
 	mux.HandleFunc("GET /api/security", s.requireAdmin(s.getSecurityOverview))
 	mux.HandleFunc("GET /api/monitoring", s.requireAdmin(s.monitoringOverview))
+	mux.HandleFunc("GET /api/monitoring/nodes/{id}/history", s.requireAdmin(s.monitoringNodeHistory))
 	mux.HandleFunc("POST /api/monitoring/targets", s.requireAdmin(s.createMonitoringTarget))
 	mux.HandleFunc("PUT /api/monitoring/targets/{id}", s.requireAdmin(s.updateMonitoringTarget))
 	mux.HandleFunc("DELETE /api/monitoring/targets/{id}", s.requireAdmin(s.deleteMonitoringTarget))
@@ -1566,7 +1569,7 @@ func writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteChanged) || errors.Is(err, store.ErrNodeUpgradeActive) || errors.Is(err, store.ErrNodeOperationActive) || errors.Is(err, store.ErrUpgradeRetryNotReady) || errors.Is(err, store.ErrMonitoringTargetExists) || errors.Is(err, store.ErrMonitoringTargetLimit) || errors.Is(err, store.ErrMonitoringTargetsChanged) {
+	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteChanged) || errors.Is(err, store.ErrNodeUpgradeActive) || errors.Is(err, store.ErrNodeOperationActive) || errors.Is(err, store.ErrUpgradeRetryNotReady) || errors.Is(err, store.ErrMonitoringTargetExists) || errors.Is(err, store.ErrMonitoringTargetNameExists) || errors.Is(err, store.ErrMonitoringTargetLimit) || errors.Is(err, store.ErrMonitoringTargetsChanged) {
 		writeError(response, http.StatusConflict, err)
 		return
 	}

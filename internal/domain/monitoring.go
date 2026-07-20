@@ -8,12 +8,17 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
-const MaxMonitoringTargets = 32
+const (
+	MaxMonitoringTargets          = 32
+	MaxMonitoringTargetNameLength = 64
+)
 
 type MonitoringTarget struct {
 	ID        string    `json:"id"`
+	Name      string    `json:"name"`
 	Address   string    `json:"address"`
 	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"created_at"`
@@ -27,6 +32,19 @@ type MonitoringProbeResult struct {
 	AverageLatencyMS   float64   `json:"average_latency_ms"`
 	Error              string    `json:"error,omitempty"`
 	CheckedAt          time.Time `json:"checked_at"`
+}
+
+func NormalizeMonitoringTargetName(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || !utf8.ValidString(value) || utf8.RuneCountInString(value) > MaxMonitoringTargetNameLength || len(value) > 256 {
+		return "", errors.New("monitoring target name must contain 1 to 64 characters")
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return "", errors.New("monitoring target name contains unsupported characters")
+		}
+	}
+	return value, nil
 }
 
 func NormalizeMonitoringAddress(value string) (string, error) {

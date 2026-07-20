@@ -4,9 +4,11 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"cdn-platform/internal/domain"
+	"cdn-platform/internal/logstore"
 	"cdn-platform/internal/store"
 )
 
@@ -39,6 +41,7 @@ type monitoringNodeResponse struct {
 
 type monitoringProbeResponse struct {
 	TargetID           string    `json:"target_id"`
+	TargetName         string    `json:"target_name"`
 	Address            string    `json:"address"`
 	Attempts           int       `json:"attempts"`
 	SuccessfulAttempts int       `json:"successful_attempts"`
@@ -83,7 +86,7 @@ func (s *Server) monitoringOverview(response http.ResponseWriter, _ *http.Reques
 			continue
 		}
 		resultsByNode[result.NodeID] = append(resultsByNode[result.NodeID], monitoringProbeResponse{
-			TargetID: result.TargetID, Address: target.Address, Attempts: result.Attempts,
+			TargetID: result.TargetID, TargetName: target.Name, Address: target.Address, Attempts: result.Attempts,
 			SuccessfulAttempts: result.SuccessfulAttempts, AverageLatencyMS: result.AverageLatencyMS,
 			Error: result.Error, CheckedAt: result.CheckedAt,
 		})
@@ -119,7 +122,144 @@ func (s *Server) monitoringOverview(response http.ResponseWriter, _ *http.Reques
 	})
 }
 
+type monitoringHistoryPreset struct {
+	duration time.Duration
+	bucket   time.Duration
+}
+
+var monitoringHistoryPresets = map[string]monitoringHistoryPreset{
+	"1h":  {duration: time.Hour, bucket: 30 * time.Second},
+	"6h":  {duration: 6 * time.Hour, bucket: 2 * time.Minute},
+	"12h": {duration: 12 * time.Hour, bucket: 5 * time.Minute},
+	"24h": {duration: 24 * time.Hour, bucket: 10 * time.Minute},
+	"7d":  {duration: 7 * 24 * time.Hour, bucket: time.Hour},
+}
+
+type monitoringHistoryResponse struct {
+	Available         bool                              `json:"available"`
+	UnavailableReason string                            `json:"unavailable_reason,omitempty"`
+	Node              monitoringHistoryNodeResponse     `json:"node"`
+	Range             string                            `json:"range"`
+	From              time.Time                         `json:"from"`
+	To                time.Time                         `json:"to"`
+	BucketSeconds     int                               `json:"bucket_seconds"`
+	Series            []monitoringHistorySeriesResponse `json:"series"`
+}
+
+type monitoringHistoryNodeResponse struct {
+	ID                string            `json:"id"`
+	Name              string            `json:"name"`
+	PublicIPv4        string            `json:"public_ipv4"`
+	Status            domain.NodeStatus `json:"status"`
+	MonitorAutoPaused bool              `json:"monitor_auto_paused"`
+}
+
+type monitoringHistorySeriesResponse struct {
+	TargetID string                           `json:"target_id"`
+	Name     string                           `json:"name"`
+	Address  string                           `json:"address"`
+	Points   []monitoringHistoryPointResponse `json:"points"`
+}
+
+type monitoringHistoryPointResponse struct {
+	Time               time.Time `json:"time"`
+	Attempts           uint64    `json:"attempts"`
+	SuccessfulAttempts uint64    `json:"successful_attempts"`
+	SuccessRate        float64   `json:"success_rate"`
+	AverageLatencyMS   *float64  `json:"average_latency_ms"`
+	FailedRounds       uint64    `json:"failed_rounds"`
+}
+
+func (s *Server) monitoringNodeHistory(response http.ResponseWriter, request *http.Request) {
+	node, err := s.Store.GetNode(request.PathValue("id"))
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	rangeName := strings.TrimSpace(request.URL.Query().Get("range"))
+	if rangeName == "" {
+		rangeName = "24h"
+	}
+	preset, found := monitoringHistoryPresets[rangeName]
+	if !found {
+		writeError(response, http.StatusBadRequest, errors.New("range must be one of 1h, 6h, 12h, 24h, or 7d"))
+		return
+	}
+	to := time.Now().UTC()
+	from := to.Add(-preset.duration)
+	result := monitoringHistoryResponse{
+		Available: s.MonitoringHistory != nil,
+		Node: monitoringHistoryNodeResponse{
+			ID: node.ID, Name: node.Name, PublicIPv4: node.PublicIPv4,
+			Status: node.Status, MonitorAutoPaused: node.MonitorAutoPaused,
+		},
+		Range: rangeName, From: from, To: to, BucketSeconds: int(preset.bucket / time.Second),
+		Series: []monitoringHistorySeriesResponse{},
+	}
+	if s.MonitoringHistory == nil {
+		result.UnavailableReason = "ClickHouse 历史存储未启用"
+		writeJSON(response, http.StatusOK, result)
+		return
+	}
+	buckets, err := s.MonitoringHistory.MonitoringHistory(request.Context(), logstore.MonitoringHistoryQuery{
+		NodeID: node.ID, From: from, To: to, Bucket: preset.bucket,
+	})
+	if err != nil {
+		result.Available = false
+		result.UnavailableReason = "历史拨测数据暂时不可用"
+		if s.Logger != nil {
+			s.Logger.Warn("query monitoring history", "node_id", node.ID, "range", rangeName, "error", err)
+		}
+		writeJSON(response, http.StatusOK, result)
+		return
+	}
+	targets, err := s.Store.ListMonitoringTargets(false)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	currentTargets := make(map[string]domain.MonitoringTarget, len(targets))
+	for _, target := range targets {
+		currentTargets[target.ID] = target
+	}
+	seriesByTarget := make(map[string]*monitoringHistorySeriesResponse)
+	for _, bucket := range buckets {
+		series := seriesByTarget[bucket.TargetID]
+		if series == nil {
+			name, address := bucket.TargetName, bucket.TargetAddress
+			if target, current := currentTargets[bucket.TargetID]; current {
+				name, address = target.Name, target.Address
+			}
+			created := &monitoringHistorySeriesResponse{
+				TargetID: bucket.TargetID, Name: name, Address: address,
+				Points: []monitoringHistoryPointResponse{},
+			}
+			seriesByTarget[bucket.TargetID] = created
+			series = created
+		}
+		successRate := 0.0
+		if bucket.Attempts != 0 {
+			successRate = 100 * float64(bucket.SuccessfulAttempts) / float64(bucket.Attempts)
+		}
+		series.Points = append(series.Points, monitoringHistoryPointResponse{
+			Time: bucket.Time, Attempts: bucket.Attempts, SuccessfulAttempts: bucket.SuccessfulAttempts,
+			SuccessRate: successRate, AverageLatencyMS: bucket.AverageLatencyMS, FailedRounds: bucket.FailedRounds,
+		})
+	}
+	for _, series := range seriesByTarget {
+		result.Series = append(result.Series, *series)
+	}
+	slices.SortFunc(result.Series, func(left, right monitoringHistorySeriesResponse) int {
+		if compared := strings.Compare(strings.ToLower(left.Name), strings.ToLower(right.Name)); compared != 0 {
+			return compared
+		}
+		return strings.Compare(left.TargetID, right.TargetID)
+	})
+	writeJSON(response, http.StatusOK, result)
+}
+
 type createMonitoringTargetRequest struct {
+	Name    string `json:"name"`
 	Address string `json:"address"`
 }
 
@@ -128,17 +268,18 @@ func (s *Server) createMonitoringTarget(response http.ResponseWriter, request *h
 	if !readJSON(response, request, &input) {
 		return
 	}
-	target, err := s.Store.CreateMonitoringTarget(input.Address)
+	target, err := s.Store.CreateMonitoringTarget(input.Name, input.Address)
 	if err != nil {
 		writeStoreError(response, err)
 		return
 	}
-	s.audit(request, adminID(request.Context()), "create_monitoring_target", "monitoring_target", target.ID, target.Address)
+	s.audit(request, adminID(request.Context()), "create_monitoring_target", "monitoring_target", target.ID, target.Name+" "+target.Address)
 	writeJSON(response, http.StatusCreated, target)
 }
 
 type updateMonitoringTargetRequest struct {
-	Enabled *bool `json:"enabled"`
+	Name    *string `json:"name"`
+	Enabled *bool   `json:"enabled"`
 }
 
 func (s *Server) updateMonitoringTarget(response http.ResponseWriter, request *http.Request) {
@@ -146,16 +287,16 @@ func (s *Server) updateMonitoringTarget(response http.ResponseWriter, request *h
 	if !readJSON(response, request, &input) {
 		return
 	}
-	if input.Enabled == nil {
-		writeError(response, http.StatusBadRequest, errors.New("enabled is required"))
+	if input.Name == nil && input.Enabled == nil {
+		writeError(response, http.StatusBadRequest, errors.New("name or enabled is required"))
 		return
 	}
-	target, err := s.Store.SetMonitoringTargetEnabled(request.PathValue("id"), *input.Enabled)
+	target, err := s.Store.UpdateMonitoringTarget(request.PathValue("id"), input.Name, input.Enabled)
 	if err != nil {
 		writeStoreError(response, err)
 		return
 	}
-	s.audit(request, adminID(request.Context()), "update_monitoring_target", "monitoring_target", target.ID, target.Address)
+	s.audit(request, adminID(request.Context()), "update_monitoring_target", "monitoring_target", target.ID, target.Name+" "+target.Address)
 	writeJSON(response, http.StatusOK, target)
 }
 
@@ -208,6 +349,7 @@ func (s *Server) edgeMonitoringReport(response http.ResponseWriter, request *htt
 		writeStoreError(response, err)
 		return
 	}
+	s.enqueueMonitoringHistory(nodeID, input.Results)
 	if outcome.StatusChanged {
 		action := "monitor_auto_pause"
 		if outcome.NodeStatus == domain.NodeActive {
@@ -216,4 +358,50 @@ func (s *Server) edgeMonitoringReport(response http.ResponseWriter, request *htt
 		s.audit(request, "edge:"+nodeID, action, "node", nodeID, outcome.Status.String())
 	}
 	writeJSON(response, http.StatusOK, map[string]bool{"accepted": true})
+}
+
+func (s *Server) enqueueMonitoringHistory(nodeID string, results []domain.MonitoringProbeResult) {
+	if s.MonitoringWriter == nil {
+		return
+	}
+	node, err := s.Store.GetNode(nodeID)
+	if err != nil {
+		s.logMonitoringHistoryEnqueueError(nodeID, err)
+		return
+	}
+	targets, err := s.Store.ListMonitoringTargets(false)
+	if err != nil {
+		s.logMonitoringHistoryEnqueueError(nodeID, err)
+		return
+	}
+	targetByID := make(map[string]domain.MonitoringTarget, len(targets))
+	for _, target := range targets {
+		targetByID[target.ID] = target
+	}
+	samples := make([]logstore.MonitoringSample, 0, len(results))
+	for _, result := range results {
+		target, found := targetByID[result.TargetID]
+		if !found {
+			continue
+		}
+		samples = append(samples, logstore.MonitoringSample{
+			NodeID: node.ID, NodeName: node.Name,
+			TargetID: target.ID, TargetName: target.Name, TargetAddress: target.Address,
+			Attempts: result.Attempts, SuccessfulAttempts: result.SuccessfulAttempts,
+			AverageLatencyMS: result.AverageLatencyMS, Error: result.Error, CheckedAt: result.CheckedAt,
+		})
+	}
+	if len(samples) != len(results) {
+		s.logMonitoringHistoryEnqueueError(nodeID, errors.New("monitoring target metadata changed before history enqueue"))
+		return
+	}
+	if !s.MonitoringWriter.EnqueueMonitoring(samples) && s.Logger != nil {
+		s.Logger.Warn("monitoring history queue rejected samples", "node_id", nodeID, "samples", len(samples))
+	}
+}
+
+func (s *Server) logMonitoringHistoryEnqueueError(nodeID string, err error) {
+	if s.Logger != nil {
+		s.Logger.Warn("prepare monitoring history samples", "node_id", nodeID, "error", err)
+	}
 }

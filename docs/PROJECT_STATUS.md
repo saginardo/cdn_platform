@@ -1,6 +1,6 @@
 # CDN Platform 项目状态与参考技术架构
 
-更新时间：2026-07-18（基于仓库实现和占位符部署拓扑，不记录实际生产环境信息）
+更新时间：2026-07-20（基于仓库实现和占位符部署拓扑，不记录实际生产环境信息）
 
 ## 1. 项目目标与边界
 
@@ -23,8 +23,8 @@
                               ├─ 公网反向代理层（当前为 Caddy 监听 443）
                               └─ cdn-control :${CONTROL_MTLS_PORT}
                                    │
-                                   ├─ SQLite: 元数据、任务、会话、加密证书、节点状态
-                                   ├─ ClickHouse: 原始访问日志和分钟聚合
+                                   ├─ SQLite: 元数据、任务、会话、加密证书、节点当前状态
+                                   ├─ ClickHouse: 原始访问日志、分钟聚合、7 天 TCP 拨测历史
                                    ├─ Cloudflare API: DNS-only A 记录对账
                                    ├─ Certbot + Cloudflare DNS 插件: DNS-01 证书签发
                                    ├─ SMTP: 告警接口
@@ -55,6 +55,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 - 证书：Certbot `dns-cloudflare` DNS-01，私钥以 `CONTROL_ENCRYPTION_KEY` 进行 AES-GCM 加密后保存在 SQLite，向边缘仅通过 mTLS 下发。
 - 节点健康：每 15 秒启动一轮有截止时间的对账，以固定上限 worker 并发探测并串行写入状态；连续 3 次失败从 DNS 池移除，连续 5 次成功恢复；所有节点均不健康时保留现有 DNS，不发布空记录。每轮聚合全部错误、记录耗时并通过诊断 API 暴露最近结果，上一轮未结束时不会重叠启动下一轮。
 - 日志：ClickHouse 原始请求日志保留 7 天，分钟级聚合保留 30 天；边缘控制面不可达时，本地队列暂存日志。
+- TCP 监测：拨测目标支持唯一名称；SQLite 仅保存最新评分、最新目标结果、连续异常次数及节点自动暂停状态。每轮目标明细在 SQLite 事务提交后进入有界内存队列，由后台批量写入 ClickHouse 并保留 7 天；ClickHouse 写入或查询故障不会阻塞节点上报，也不会清空 SQLite 当前状态。
 
 ### 3.2 边缘面
 
@@ -88,7 +89,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 | `internal/edge` | 已实现 | 注册、mTLS、配置同步、原子应用、Nginx 回滚、心跳、日志转发、机器状态和低频缓存磁盘占用采集。 |
 | `internal/nginx` | 已实现 | HTTP 缓存、整站透传、回源、TLS、WebSocket/SSE、gRPC、备用源站与客户端 IP 限速配置渲染。 |
 | `internal/integrations` | 已实现 | Cloudflare、Certbot、SMTP 等外部适配器。 |
-| `internal/logstore` | 已实现 | ClickHouse 原始日志、分钟指标、节点缓存状态聚合和带过滤分页的检索读写。 |
+| `internal/logstore` | 已实现 | ClickHouse 原始日志、分钟指标、节点缓存状态聚合、7 天 TCP 拨测历史及其异步批量写入。 |
 | `frontend/` 与 `internal/control/web/dist` | 已实现 | React 19、Vite、TypeScript、Tailwind CSS v4 和 shadcn/ui 简体中文管理台；Vite 哈希产物通过 `//go:embed web/dist` 编入控制面二进制。 |
 | `deploy/` 与 `scripts/` | 已实现 | Compose 主控安装、证书续期、Restic 重试/状态/告警、隔离恢复与切换、发布构建和 ClickHouse 配置。边缘安装资源由控制面从 `internal/control` 嵌入提供。 |
 
@@ -97,6 +98,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 - 概览：节点数、运行节点数、站点数、最近 24 小时请求量/传输量/错误率/状态码；站点请求趋势支持按站点、请求总量或传输量升降序排列，条目可进入独立分析页查看站点请求量、传输量、错误汇总、状态码分布和分时折线图。
 - 日志：从左侧导航进入，默认检索全部站点最近 1 小时原始日志，支持时间、站点、节点、方法、状态码、路径、客户端 IP、缓存状态筛选和每页 100 条手动分页；原始日志保留 7 天。
 - 安全：全局访问策略增删改、内置敏感文件扫描与独立 PHP 恶意文件探测规则、拦截/IP 封禁动作、1 小时至 7 天档位，以及按客户端 IP 执行的每秒请求限速策略；限速可选择仅由 2xx/3xx/4xx/5xx 响应计数，超限由边缘返回 429。仅以 4xx/5xx 为条件的策略还可配置连续 429 次数，达到阈值后沿现有边缘事件链封禁 IP。页面同时展示访问安全/限速能力覆盖、活动封禁解封和最近命中。
+- 监测：命名 TCP 拨测目标支持新增、重命名、启停和删除；节点列表保留当前评分、成功率、时延和连续异常，点击节点进入独立历史页。历史页可在 `1h / 6h / 12h / 24h / 7d` 间切换服务端聚合区间，并用可勾选图例将多个目标的时延曲线绘制在同一图中。
 - 节点：列表仅保留运行概览和管理入口，并提供“一键升级全部”；后端一次评估全量节点，只为具备能力且制品落后的可用节点排队，逐节点报告已是最新、已有任务或阻塞原因。独立二级页面集中提供部署/升级命令、在线升级、暂停/启用调度、撤销/重新启用、卸载/删除、分配站点、节点缓存总配额覆写、心跳、能力与应用版本查看，并展示边缘心跳上报的发行版、版本、uptime、系统负载、CPU、RAM、根磁盘和默认出口网卡 RX/TX，以及缓存已用空间/节点有效总配额和最近 24 小时 ClickHouse 缓存状态分布。机器状态、缓存磁盘上报与请求统计独立降级，任一故障不阻塞节点管理。
 - 站点：创建、编辑、节点分配、主/备源站、独立回源 TLS SNI、回源读写空闲超时、整站透传开关、发布、申请 TLS、缓存刷新、源站 CIDR 查看，以及输入站点名确认的安全删除流程。
 - 站点列表采用紧凑工作台布局，仅展示节点、TLS 与发布状态并保留管理入口；创建、编辑、发布、协议、缓存、请求体、超时、TLS、缓存刷新和源站 CIDR 均集中在独立二级页面。
@@ -116,7 +118,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 | 控制服务 | Compose `control`、`clickhouse`、`control-cert-renew` 应保持运行并通过健康检查。 |
 | 数据目录 | 统一根目录 `/opt/cdn-platform`；配置、control 数据、ClickHouse、证书、日志、备份和 rollback 均在其下。 |
 | ClickHouse | Compose `clickhouse` 固定为 `26.6.1.1193`，HTTP 仅映射到 `127.0.0.1:${CLICKHOUSE_HTTP_PORT}`。 |
-| ClickHouse 验收 | 原始访问日志和分钟聚合应持续写入；具体数量不记录在仓库中。 |
+| ClickHouse 验收 | 原始访问日志、分钟聚合和 `cdn_tcp_monitoring_history` 应持续写入；拨测历史 TTL 为 7 天，具体数量不记录在仓库中。 |
 | TLS | Compose 内使用 Cloudflare DNS-01 独立签发并每 12 小时检查续期；主控支持无重启热加载。 |
 | 备份 | SQLite、ClickHouse 和 Restic 工作流应通过隔离恢复演练；凭据只保存在部署环境。 |
 | 边缘节点 | `edge-a`（`203.0.113.10`）、`edge-b`（`203.0.113.11`）、`edge-c`（`203.0.113.12`）、`edge-d`（`203.0.113.13`）代表 RFC 5737 示例节点。 |
@@ -157,6 +159,7 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 19. 备份与恢复：定时备份增加短期重试、原子状态文件、消息中心状态和最终 SMTP 告警；离线脚本可在线预下载、恢复到临时 ClickHouse 并执行 `--verify-only` 演练，切换失败反向回滚并保留旧数据。
 20. S3 在线恢复：设置页可选择精确 Restic 快照，异步阶段化校验并恢复临时 ClickHouse；提交时用跨容器读写锁排空备份/证书作业，重启前后复核摘要并切换 SQLite、CA、证书和 ClickHouse，失败闭锁等待人工处置。
 21. 管理工作台：引入持久消息中心并移除页面顶部单行任务状态；节点列表新增全量升级及逐节点结果；颜色、焦点、密度、抽屉、分段筛选和移动端布局按可组合组件思路统一。
+22. TCP 拨测历史：目标增加唯一名称；最新评分、连续异常和调度状态继续由 SQLite 事务维护，每轮明细通过有界非阻塞队列异步写入保留 7 天的 ClickHouse 表。节点行进入历史详情，可切换五档范围并在同一曲线图选择多个目标；ClickHouse 不可用时当前状态和边缘上报独立降级。
 
 ## 7. 当前问题、风险与下一步
 

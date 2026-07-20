@@ -90,6 +90,7 @@ const monitoring = {
   targets: [
     {
       id: "target-1",
+      name: "主 API",
       address: "probe-a.example.com:443",
       enabled: true,
       created_at: series[20].time,
@@ -97,6 +98,7 @@ const monitoring = {
     },
     {
       id: "target-2",
+      name: "备用入口",
       address: "192.0.2.50:8443",
       enabled: true,
       created_at: series[20].time,
@@ -120,6 +122,7 @@ const monitoring = {
       results: [
         {
           target_id: "target-1",
+          target_name: "主 API",
           address: "probe-a.example.com:443",
           attempts: 3,
           successful_attempts: 3,
@@ -128,6 +131,7 @@ const monitoring = {
         },
         {
           target_id: "target-2",
+          target_name: "备用入口",
           address: "192.0.2.50:8443",
           attempts: 3,
           successful_attempts: 3,
@@ -152,6 +156,7 @@ const monitoring = {
       results: [
         {
           target_id: "target-1",
+          target_name: "主 API",
           address: "probe-a.example.com:443",
           attempts: 3,
           successful_attempts: 3,
@@ -160,6 +165,7 @@ const monitoring = {
         },
         {
           target_id: "target-2",
+          target_name: "备用入口",
           address: "192.0.2.50:8443",
           attempts: 3,
           successful_attempts: 0,
@@ -171,6 +177,66 @@ const monitoring = {
     },
   ],
 };
+
+function monitoringHistory(range: string) {
+  const presets: Record<string, { duration: number; bucket: number }> = {
+    "1h": { duration: 60 * 60 * 1000, bucket: 30 },
+    "6h": { duration: 6 * 60 * 60 * 1000, bucket: 120 },
+    "12h": { duration: 12 * 60 * 60 * 1000, bucket: 300 },
+    "24h": { duration: 24 * 60 * 60 * 1000, bucket: 600 },
+    "7d": { duration: 7 * 24 * 60 * 60 * 1000, bucket: 3600 },
+  };
+  const selectedRange = presets[range] ? range : "24h";
+  const preset = presets[selectedRange];
+  const points = Array.from({ length: 16 }, (_, index) => {
+    const time = new Date(
+      now.getTime() - preset.duration + (preset.duration * index) / 15,
+    ).toISOString();
+    return { time, index };
+  });
+  return {
+    available: true,
+    node: {
+      id: "node-1",
+      name: "edge-hong-kong",
+      public_ipv4: "203.0.113.41",
+      status: "active",
+      monitor_auto_paused: false,
+    },
+    range: selectedRange,
+    from: new Date(now.getTime() - preset.duration).toISOString(),
+    to: now.toISOString(),
+    bucket_seconds: preset.bucket,
+    series: [
+      {
+        target_id: "target-1",
+        name: "主 API",
+        address: "probe-a.example.com:443",
+        points: points.map(({ time, index }) => ({
+          time,
+          attempts: 3,
+          successful_attempts: 3,
+          success_rate: 100,
+          average_latency_ms: 42 + (index % 5) * 3,
+          failed_rounds: 0,
+        })),
+      },
+      {
+        target_id: "target-2",
+        name: "备用入口",
+        address: "192.0.2.50:8443",
+        points: points.map(({ time, index }) => ({
+          time,
+          attempts: 3,
+          successful_attempts: index === 8 ? 0 : 3,
+          success_rate: index === 8 ? 0 : 100,
+          average_latency_ms: index === 8 ? null : 71 + (index % 4) * 4,
+          failed_rounds: index === 8 ? 1 : 0,
+        })),
+      },
+    ],
+  };
+}
 
 const accessLogs = [
   {
@@ -290,12 +356,16 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       url.pathname === "/api/monitoring/targets" &&
       route.request().method() === "POST"
     ) {
-      const input = route.request().postDataJSON() as { address: string };
+      const input = route.request().postDataJSON() as {
+        name: string;
+        address: string;
+      };
       await route.fulfill({
         status: 201,
         contentType: "application/json",
         body: JSON.stringify({
           id: "target-created",
+          name: input.name,
           address: input.address,
           enabled: true,
           created_at: now.toISOString(),
@@ -308,17 +378,34 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       url.pathname.startsWith("/api/monitoring/targets/") &&
       route.request().method() === "PUT"
     ) {
-      const input = route.request().postDataJSON() as { enabled: boolean };
+      const input = route.request().postDataJSON() as {
+        name?: string;
+        enabled?: boolean;
+      };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           id: url.pathname.split("/").at(-1),
+          name: input.name ?? "主 API",
           address: "probe-a.example.com:443",
-          enabled: input.enabled,
+          enabled: input.enabled ?? true,
           created_at: now.toISOString(),
           updated_at: now.toISOString(),
         }),
+      });
+      return;
+    }
+    if (
+      url.pathname === "/api/monitoring/nodes/node-1/history" &&
+      route.request().method() === "GET"
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(
+          monitoringHistory(url.searchParams.get("range") ?? "24h"),
+        ),
       });
       return;
     }
@@ -1113,11 +1200,67 @@ test("monitoring workspace shows scoring, probe results, and target controls", a
   await page.getByRole("tab", { name: "目标配置" }).click();
   await expect(page.getByText("probe-a.example.com:443")).toBeVisible();
   await page.getByRole("button", { name: "添加目标" }).click();
+  await page.getByLabel("名称").fill("新探针");
   await page
     .getByLabel("IP:端口 或 域名:端口")
     .fill("probe-new.example.com:9443");
   await page.getByRole("button", { name: "添加", exact: true }).click();
   await expect(page.getByText("拨测目标已添加")).toBeVisible();
+  await page.getByRole("button", { name: "重命名 主 API" }).click();
+  const renameDialog = page.getByRole("dialog");
+  await renameDialog.getByLabel("名称").fill("核心 API");
+  await renameDialog.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByText("拨测目标名称已更新")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("monitoring node history overlays named targets and switches range", async ({
+  page,
+}, testInfo) => {
+  const errors = trackPageErrors(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockAPI(page);
+  await page.goto("/#/monitoring");
+  await page
+    .getByRole("link", { name: "查看 edge-hong-kong 拨测历史" })
+    .click();
+
+  await expect(
+    page.getByRole("heading", { name: "edge-hong-kong", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByText("主 API", { exact: true })).toBeVisible();
+  await expect(page.getByText("备用入口", { exact: true })).toBeVisible();
+  const chart = page.getByTestId("monitoring-history-chart");
+  await expect(chart).toHaveAttribute("data-series-count", "2");
+  await expect(chart.locator(".recharts-line-curve")).toHaveCount(2);
+
+  const sevenDayResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname === "/api/monitoring/nodes/node-1/history" &&
+      url.searchParams.get("range") === "7d"
+    );
+  });
+  const sevenDayTab = page.getByRole("tab", { name: "7 天" });
+  await sevenDayTab.click();
+  await sevenDayResponse;
+  await expect(sevenDayTab).toHaveAttribute("aria-selected", "true");
+  await page.screenshot({
+    path: testInfo.outputPath("monitoring-history-desktop.png"),
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(chart).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("monitoring-history-mobile.png"),
+    fullPage: true,
+  });
   expect(errors).toEqual([]);
 });
 

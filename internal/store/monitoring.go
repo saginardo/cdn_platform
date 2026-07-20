@@ -18,11 +18,14 @@ const (
 )
 
 var (
-	ErrMonitoringTargetExists   = errors.New("monitoring target already exists")
-	ErrMonitoringTargetLimit    = errors.New("monitoring target limit reached")
-	ErrMonitoringTargetsChanged = errors.New("monitoring targets changed; retry with the latest targets")
-	ErrMonitoringReportStale    = errors.New("monitoring report is not newer than the stored report")
+	ErrMonitoringTargetExists     = errors.New("monitoring target already exists")
+	ErrMonitoringTargetNameExists = errors.New("monitoring target name already exists")
+	ErrMonitoringTargetLimit      = errors.New("monitoring target limit reached")
+	ErrMonitoringTargetsChanged   = errors.New("monitoring targets changed; retry with the latest targets")
+	ErrMonitoringReportStale      = errors.New("monitoring report is not newer than the stored report")
 )
+
+const monitoringTargetColumns = `id, name, address, enabled, created_at, updated_at`
 
 type NodeMonitoringStatus struct {
 	NodeID              string     `json:"node_id"`
@@ -50,11 +53,11 @@ type MonitoringRoundOutcome struct {
 }
 
 func (s *Store) ListMonitoringTargets(enabledOnly bool) ([]domain.MonitoringTarget, error) {
-	query := `SELECT id, address, enabled, created_at, updated_at FROM monitoring_targets`
+	query := `SELECT ` + monitoringTargetColumns + ` FROM monitoring_targets`
 	if enabledOnly {
 		query += ` WHERE enabled = 1`
 	}
-	query += ` ORDER BY address`
+	query += ` ORDER BY name COLLATE NOCASE, address`
 	rows, err := s.db.Query(query)
 	if err != nil {
 		return nil, err
@@ -71,8 +74,12 @@ func (s *Store) ListMonitoringTargets(enabledOnly bool) ([]domain.MonitoringTarg
 	return targets, rows.Err()
 }
 
-func (s *Store) CreateMonitoringTarget(address string) (domain.MonitoringTarget, error) {
-	normalized, err := domain.NormalizeMonitoringAddress(address)
+func (s *Store) CreateMonitoringTarget(name, address string) (domain.MonitoringTarget, error) {
+	normalizedName, err := domain.NormalizeMonitoringTargetName(name)
+	if err != nil {
+		return domain.MonitoringTarget{}, err
+	}
+	normalizedAddress, err := domain.NormalizeMonitoringAddress(address)
 	if err != nil {
 		return domain.MonitoringTarget{}, err
 	}
@@ -89,15 +96,20 @@ func (s *Store) CreateMonitoringTarget(address string) (domain.MonitoringTarget,
 		return domain.MonitoringTarget{}, ErrMonitoringTargetLimit
 	}
 	var existing string
-	if err := tx.QueryRow(`SELECT id FROM monitoring_targets WHERE address = ?`, normalized).Scan(&existing); err == nil {
+	if err := tx.QueryRow(`SELECT id FROM monitoring_targets WHERE address = ?`, normalizedAddress).Scan(&existing); err == nil {
 		return domain.MonitoringTarget{}, ErrMonitoringTargetExists
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return domain.MonitoringTarget{}, err
 	}
+	if err := tx.QueryRow(`SELECT id FROM monitoring_targets WHERE name = ? COLLATE NOCASE`, normalizedName).Scan(&existing); err == nil {
+		return domain.MonitoringTarget{}, ErrMonitoringTargetNameExists
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return domain.MonitoringTarget{}, err
+	}
 	created := now()
-	target := domain.MonitoringTarget{ID: uuid.NewString(), Address: normalized, Enabled: true, CreatedAt: created, UpdatedAt: created}
-	if _, err := tx.Exec(`INSERT INTO monitoring_targets(id, address, enabled, created_at, updated_at) VALUES (?, ?, 1, ?, ?)`,
-		target.ID, target.Address, stamp(created), stamp(created)); err != nil {
+	target := domain.MonitoringTarget{ID: uuid.NewString(), Name: normalizedName, Address: normalizedAddress, Enabled: true, CreatedAt: created, UpdatedAt: created}
+	if _, err := tx.Exec(`INSERT INTO monitoring_targets(id, name, address, enabled, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)`,
+		target.ID, target.Name, target.Address, stamp(created), stamp(created)); err != nil {
 		return domain.MonitoringTarget{}, err
 	}
 	if err := resetMonitoringStateTx(tx); err != nil {
@@ -110,22 +122,52 @@ func (s *Store) CreateMonitoringTarget(address string) (domain.MonitoringTarget,
 }
 
 func (s *Store) SetMonitoringTargetEnabled(targetID string, enabled bool) (domain.MonitoringTarget, error) {
+	return s.UpdateMonitoringTarget(targetID, nil, &enabled)
+}
+
+func (s *Store) UpdateMonitoringTarget(targetID string, name *string, enabled *bool) (domain.MonitoringTarget, error) {
+	if name == nil && enabled == nil {
+		return domain.MonitoringTarget{}, errors.New("monitoring target update is empty")
+	}
+	var normalizedName string
+	var err error
+	if name != nil {
+		normalizedName, err = domain.NormalizeMonitoringTargetName(*name)
+		if err != nil {
+			return domain.MonitoringTarget{}, err
+		}
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return domain.MonitoringTarget{}, err
 	}
 	defer tx.Rollback()
-	current, err := scanMonitoringTarget(tx.QueryRow(`SELECT id, address, enabled, created_at, updated_at FROM monitoring_targets WHERE id = ?`, targetID))
+	current, err := scanMonitoringTarget(tx.QueryRow(`SELECT `+monitoringTargetColumns+` FROM monitoring_targets WHERE id = ?`, targetID))
 	if err != nil {
 		return domain.MonitoringTarget{}, err
 	}
-	if current.Enabled == enabled {
+	nextName, nextEnabled := current.Name, current.Enabled
+	if name != nil {
+		nextName = normalizedName
+		var existing string
+		if err := tx.QueryRow(`SELECT id FROM monitoring_targets WHERE name = ? COLLATE NOCASE AND id != ?`, nextName, targetID).Scan(&existing); err == nil {
+			return domain.MonitoringTarget{}, ErrMonitoringTargetNameExists
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return domain.MonitoringTarget{}, err
+		}
+	}
+	if enabled != nil {
+		nextEnabled = *enabled
+	}
+	nameChanged := nextName != current.Name
+	enabledChanged := nextEnabled != current.Enabled
+	if !nameChanged && !enabledChanged {
 		if err := tx.Commit(); err != nil {
 			return domain.MonitoringTarget{}, err
 		}
 		return current, nil
 	}
-	result, err := tx.Exec(`UPDATE monitoring_targets SET enabled = ?, updated_at = ? WHERE id = ?`, boolInt(enabled), stamp(now()), targetID)
+	result, err := tx.Exec(`UPDATE monitoring_targets SET name = ?, enabled = ?, updated_at = ? WHERE id = ?`, nextName, boolInt(nextEnabled), stamp(now()), targetID)
 	if err != nil {
 		return domain.MonitoringTarget{}, err
 	}
@@ -136,10 +178,12 @@ func (s *Store) SetMonitoringTargetEnabled(targetID string, enabled bool) (domai
 	if changed != 1 {
 		return domain.MonitoringTarget{}, ErrNotFound
 	}
-	if err := resetMonitoringStateTx(tx); err != nil {
-		return domain.MonitoringTarget{}, err
+	if enabledChanged {
+		if err := resetMonitoringStateTx(tx); err != nil {
+			return domain.MonitoringTarget{}, err
+		}
 	}
-	target, err := scanMonitoringTarget(tx.QueryRow(`SELECT id, address, enabled, created_at, updated_at FROM monitoring_targets WHERE id = ?`, targetID))
+	target, err := scanMonitoringTarget(tx.QueryRow(`SELECT `+monitoringTargetColumns+` FROM monitoring_targets WHERE id = ?`, targetID))
 	if err != nil {
 		return domain.MonitoringTarget{}, err
 	}
@@ -196,7 +240,7 @@ func scanMonitoringTarget(row scanner) (domain.MonitoringTarget, error) {
 	var target domain.MonitoringTarget
 	var enabled int
 	var createdAt, updatedAt string
-	if err := row.Scan(&target.ID, &target.Address, &enabled, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&target.ID, &target.Name, &target.Address, &enabled, &createdAt, &updatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.MonitoringTarget{}, ErrNotFound
 		}

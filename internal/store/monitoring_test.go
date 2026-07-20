@@ -22,7 +22,7 @@ func TestMonitoringRoundAutoPausesAndRecoversNode(t *testing.T) {
 	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
 		t.Fatal(err)
 	}
-	target, err := database.CreateMonitoringTarget("probe.example.test:443")
+	target, err := database.CreateMonitoringTarget("主探针", "probe.example.test:443")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestMonitoringNeverResumesManuallyPausedNode(t *testing.T) {
 	if err := database.SetNodeStatus(node.ID, domain.NodeDraining); err != nil {
 		t.Fatal(err)
 	}
-	target, err := database.CreateMonitoringTarget("192.0.2.20:8443")
+	target, err := database.CreateMonitoringTarget("人工暂停探针", "192.0.2.20:8443")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestManualPauseTakesOwnershipAndTargetChangeReleasesAutoPause(t *testing.T)
 	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
 		t.Fatal(err)
 	}
-	target, err := database.CreateMonitoringTarget("probe.example.test:80")
+	target, err := database.CreateMonitoringTarget("探针 A", "probe.example.test:80")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestManualPauseTakesOwnershipAndTargetChangeReleasesAutoPause(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	secondTarget, err := database.CreateMonitoringTarget("probe-b.example.test:80")
+	secondTarget, err := database.CreateMonitoringTarget("探针 B", "probe-b.example.test:80")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestMonitoringRejectsChangedTargetsAndDuplicateReports(t *testing.T) {
 	}
 	defer database.Close()
 	node, _ := database.CreateNode("edge-stale-report", "203.0.113.94")
-	target, _ := database.CreateMonitoringTarget("probe.example.test:443")
+	target, _ := database.CreateMonitoringTarget("重复报告探针", "probe.example.test:443")
 	result := failedMonitoringResult(target.ID, time.Now().UTC())
 	if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{result}); err != nil {
 		t.Fatal(err)
@@ -195,6 +195,42 @@ func TestMonitoringRejectsChangedTargetsAndDuplicateReports(t *testing.T) {
 	}
 	if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{{TargetID: "unknown", Attempts: 1, CheckedAt: time.Now().UTC()}}); !errors.Is(err, ErrMonitoringTargetsChanged) {
 		t.Fatalf("changed target error = %v", err)
+	}
+}
+
+func TestMonitoringTargetRenamePreservesCurrentStateAndRequiresUniqueName(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, _ := database.CreateNode("edge-rename", "203.0.113.95")
+	target, _ := database.CreateMonitoringTarget("旧名称", "probe.example.test:443")
+	backup, err := database.CreateMonitoringTarget("备用探针", "probe-b.example.test:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedAt := time.Now().UTC()
+	results := []domain.MonitoringProbeResult{
+		{TargetID: target.ID, Attempts: 3, SuccessfulAttempts: 3, AverageLatencyMS: 18, CheckedAt: checkedAt},
+		{TargetID: backup.ID, Attempts: 3, SuccessfulAttempts: 3, AverageLatencyMS: 21, CheckedAt: checkedAt},
+	}
+	if _, err := database.RecordMonitoringRound(node.ID, results); err != nil {
+		t.Fatal(err)
+	}
+	newName := "香港主探针"
+	renamed, err := database.UpdateMonitoringTarget(target.ID, &newName, nil)
+	if err != nil || renamed.Name != newName {
+		t.Fatalf("renamed target = %#v, %v", renamed, err)
+	}
+	statuses, statusErr := database.ListNodeMonitoringStatuses()
+	snapshots, snapshotErr := database.ListMonitoringProbeSnapshots()
+	if statusErr != nil || snapshotErr != nil || len(statuses) != 1 || len(snapshots) != 2 {
+		t.Fatalf("rename reset monitoring state: statuses=%#v snapshots=%#v errors=%v/%v", statuses, snapshots, statusErr, snapshotErr)
+	}
+	duplicate := "备用探针"
+	if _, err := database.UpdateMonitoringTarget(target.ID, &duplicate, nil); !errors.Is(err, ErrMonitoringTargetNameExists) {
+		t.Fatalf("duplicate name error = %v", err)
 	}
 }
 

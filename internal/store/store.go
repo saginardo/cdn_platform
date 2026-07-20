@@ -261,6 +261,7 @@ CREATE TABLE IF NOT EXISTS node_cache_storage (
 );
 CREATE TABLE IF NOT EXISTS monitoring_targets (
   id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
   address TEXT NOT NULL UNIQUE,
   enabled INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
@@ -393,6 +394,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_security_bans_expires ON security_bans(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at DESC);
 	CREATE INDEX IF NOT EXISTS idx_monitoring_probe_target ON monitoring_probe_results(target_id, checked_at DESC);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_monitoring_targets_name ON monitoring_targets(name COLLATE NOCASE);
 `
 
 func seedBuiltinSecurityPoliciesTx(tx *sql.Tx) error {

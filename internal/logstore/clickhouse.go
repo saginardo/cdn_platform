@@ -109,6 +109,7 @@ func (c ClickHouse) EnsureSchema(ctx context.Context) error {
 		`CREATE MATERIALIZED VIEW IF NOT EXISTS ` + identifier(c.database()) + `.cdn_access_to_minute TO ` + identifier(c.database()) + `.cdn_site_minute AS
  SELECT toStartOfMinute(timestamp) AS minute, site_id, node_id, count() AS requests, sum(bytes) AS bytes, countIf(status >= 500) AS errors, countIf(cache_status = 'HIT') AS cache_hits
  FROM ` + identifier(c.database()) + `.cdn_access_logs GROUP BY minute, site_id, node_id`,
+		monitoringHistoryTableStatement(c.database()),
 	}
 	for _, statement := range statements {
 		if err := c.query(ctx, statement, nil); err != nil {

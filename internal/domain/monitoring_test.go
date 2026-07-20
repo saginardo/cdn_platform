@@ -26,6 +26,18 @@ func TestNormalizeMonitoringAddress(t *testing.T) {
 	}
 }
 
+func TestNormalizeMonitoringTargetName(t *testing.T) {
+	actual, err := NormalizeMonitoringTargetName("  香港 API  ")
+	if err != nil || actual != "香港 API" {
+		t.Fatalf("normalized name = %q, %v", actual, err)
+	}
+	for _, input := range []string{"", "   ", "line\nbreak", string(make([]byte, 65))} {
+		if _, err := NormalizeMonitoringTargetName(input); err == nil {
+			t.Fatalf("NormalizeMonitoringTargetName(%q) succeeded", input)
+		}
+	}
+}
+
 func TestValidMonitoringProbeResult(t *testing.T) {
 	valid := MonitoringProbeResult{TargetID: "target", Attempts: 3, SuccessfulAttempts: 2, AverageLatencyMS: 12.5, Error: "timeout", CheckedAt: time.Now()}
 	if !ValidMonitoringProbeResult(valid) {

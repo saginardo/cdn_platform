@@ -39,6 +39,11 @@ const MonitoringPage = lazy(() =>
     default: module.MonitoringPage,
   })),
 );
+const MonitoringNodeHistoryPage = lazy(() =>
+  import("@/features/monitoring/monitoring-node-history-page").then(
+    (module) => ({ default: module.MonitoringNodeHistoryPage }),
+  ),
+);
 const NodesPage = lazy(() =>
   import("@/features/nodes/nodes-page").then((module) => ({
     default: module.NodesPage,
@@ -104,6 +109,10 @@ export default function App() {
                     <Route path="/logs/:logId" element={<LogDetailPage />} />
                     <Route path="/security" element={<SecurityPage />} />
                     <Route path="/monitoring" element={<MonitoringPage />} />
+                    <Route
+                      path="/monitoring/nodes/:nodeId"
+                      element={<MonitoringNodeHistoryPage />}
+                    />
                     <Route path="/nodes" element={<NodesPage />} />
                     <Route path="/nodes/:nodeId" element={<NodeDetailPage />} />
                     <Route path="/sites" element={<SitesPage />} />

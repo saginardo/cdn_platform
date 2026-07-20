@@ -4,7 +4,11 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
+
+	"cdn-platform/internal/domain"
 )
 
 func TestMigrationsRecordCurrentVersionAndRemainIdempotent(t *testing.T) {
@@ -108,6 +112,89 @@ func TestTCPMonitoringMigrationUpgradesLegacyNodesTable(t *testing.T) {
 		}
 		if count != 1 {
 			t.Fatalf("migration did not create %s", table)
+		}
+	}
+}
+
+func TestMonitoringTargetNameMigrationBackfillsLegacyTargets(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.db.Exec(`DROP INDEX idx_monitoring_targets_name`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`ALTER TABLE monitoring_targets DROP COLUMN name`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`INSERT INTO monitoring_targets(id, address, enabled, created_at, updated_at) VALUES ('legacy', 'probe.example.test:443', 1, '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version >= 13`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	var name string
+	if err := database.db.QueryRow(`SELECT name FROM monitoring_targets WHERE id = 'legacy'`).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "probe.example.test:443" {
+		t.Fatalf("backfilled monitoring target name = %q", name)
+	}
+}
+
+func TestMonitoringTargetNameMigrationDisambiguatesLongLegacyAddresses(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.db.Exec(`DROP INDEX idx_monitoring_targets_name`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`ALTER TABLE monitoring_targets DROP COLUMN name`); err != nil {
+		t.Fatal(err)
+	}
+	prefix := strings.Repeat("a", domain.MaxMonitoringTargetNameLength)
+	for _, target := range []struct{ id, address string }{
+		{"legacy-a", prefix + "-one.example.test:443"},
+		{"legacy-b", prefix + "-two.example.test:443"},
+	} {
+		if _, err := database.db.Exec(`INSERT INTO monitoring_targets(id, address, enabled, created_at, updated_at) VALUES (?, ?, 1, '2026-07-20T00:00:00Z', '2026-07-20T00:00:00Z')`, target.id, target.address); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version >= 13`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := database.db.Query(`SELECT name FROM monitoring_targets ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 2 || strings.EqualFold(names[0], names[1]) {
+		t.Fatalf("migrated monitoring names = %#v", names)
+	}
+	for _, name := range names {
+		if utf8.RuneCountInString(name) > domain.MaxMonitoringTargetNameLength {
+			t.Fatalf("migrated monitoring name is too long: %q", name)
 		}
 	}
 }

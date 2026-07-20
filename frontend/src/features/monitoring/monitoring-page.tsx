@@ -1,15 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
+  ChevronRight,
   CirclePlus,
   Clock,
   Gauge,
   LoaderCircle,
+  Pencil,
   RefreshCw,
   Server,
   Trash2,
 } from "lucide-react";
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -65,6 +68,7 @@ export function MonitoringPage() {
   const [removeTarget, setRemoveTarget] = useState<MonitoringTarget | null>(
     null,
   );
+  const [editTarget, setEditTarget] = useState<MonitoringTarget | null>(null);
   const query = useQuery({
     queryKey: ["monitoring"],
     queryFn: () => api<MonitoringOverview>("/api/monitoring"),
@@ -203,6 +207,7 @@ export function MonitoringPage() {
                             <TableHead>平均时延</TableHead>
                             <TableHead>连续异常</TableHead>
                             <TableHead className="pr-5">最后拨测</TableHead>
+                            <TableHead className="w-10" />
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -254,8 +259,13 @@ export function MonitoringPage() {
                                     {node.public_ipv4}
                                   </div>
                                 </TableCell>
-                                <TableCell className="font-mono text-xs">
-                                  {result.address}
+                                <TableCell>
+                                  <div className="font-medium">
+                                    {result.target_name}
+                                  </div>
+                                  <div className="font-mono text-xs text-muted-foreground">
+                                    {result.address}
+                                  </div>
                                 </TableCell>
                                 <TableCell>
                                   <StatusBadge
@@ -305,10 +315,11 @@ export function MonitoringPage() {
                       <Table className="min-w-[660px]">
                         <TableHeader>
                           <TableRow>
-                            <TableHead className="pl-5">目标地址</TableHead>
+                            <TableHead className="pl-5">名称</TableHead>
+                            <TableHead>目标地址</TableHead>
                             <TableHead>状态</TableHead>
                             <TableHead>更新时间</TableHead>
-                            <TableHead className="w-16 pr-5 text-right">
+                            <TableHead className="w-24 pr-5 text-right">
                               操作
                             </TableHead>
                           </TableRow>
@@ -316,7 +327,10 @@ export function MonitoringPage() {
                         <TableBody>
                           {targetsPagination.items.map((target) => (
                             <TableRow key={target.id}>
-                              <TableCell className="pl-5 font-mono text-xs">
+                              <TableCell className="pl-5 font-medium">
+                                {target.name}
+                              </TableCell>
+                              <TableCell className="font-mono text-xs">
                                 {target.address}
                               </TableCell>
                               <TableCell>
@@ -324,7 +338,7 @@ export function MonitoringPage() {
                                   <Switch
                                     checked={target.enabled}
                                     disabled={toggleTarget.isPending}
-                                    aria-label={`${target.enabled ? "停用" : "启用"} ${target.address}`}
+                                    aria-label={`${target.enabled ? "停用" : "启用"} ${target.name}`}
                                     onCheckedChange={(enabled) =>
                                       toggleTarget.mutate({
                                         id: target.id,
@@ -341,19 +355,34 @@ export function MonitoringPage() {
                                 {formatDateTime(target.updated_at)}
                               </TableCell>
                               <TableCell className="pr-5 text-right">
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon-sm"
-                                      aria-label={`删除 ${target.address}`}
-                                      onClick={() => setRemoveTarget(target)}
-                                    >
-                                      <Trash2 />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>删除目标</TooltipContent>
-                                </Tooltip>
+                                <div className="flex justify-end gap-1">
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon-sm"
+                                        aria-label={`重命名 ${target.name}`}
+                                        onClick={() => setEditTarget(target)}
+                                      >
+                                        <Pencil />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>重命名目标</TooltipContent>
+                                  </Tooltip>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant="ghost"
+                                        size="icon-sm"
+                                        aria-label={`删除 ${target.name}`}
+                                        onClick={() => setRemoveTarget(target)}
+                                      >
+                                        <Trash2 />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>删除目标</TooltipContent>
+                                  </Tooltip>
+                                </div>
                               </TableCell>
                             </TableRow>
                           ))}
@@ -374,13 +403,20 @@ export function MonitoringPage() {
         ) : null}
       </PageBody>
       <CreateTargetDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <EditTargetDialog
+        key={editTarget?.id ?? "closed"}
+        target={editTarget}
+        onOpenChange={(open) => {
+          if (!open) setEditTarget(null);
+        }}
+      />
       <ConfirmDialog
         open={Boolean(removeTarget)}
         onOpenChange={(open) => {
           if (!open) setRemoveTarget(null);
         }}
         title="删除拨测目标"
-        description={`将删除 ${removeTarget?.address ?? "该目标"} 的当前拨测结果。`}
+        description={`将删除 ${removeTarget?.name ?? "该目标"}（${removeTarget?.address ?? "未知地址"}）的当前拨测结果。`}
         confirmLabel="删除"
         destructive
         busy={remove.isPending}
@@ -399,6 +435,7 @@ function NodeRow({
   node: MonitoringNode;
   healthyScore: number;
 }) {
+  const navigate = useNavigate();
   const monitoringState = !node.capable
     ? { status: "pending", label: "待升级" }
     : node.score === undefined
@@ -408,8 +445,22 @@ function NodeRow({
         : node.score >= healthyScore
           ? { status: "succeeded", label: "正常" }
           : { status: "failed", label: "异常" };
+  const openHistory = () =>
+    navigate(`/monitoring/nodes/${encodeURIComponent(node.node_id)}`);
   return (
-    <TableRow>
+    <TableRow
+      role="link"
+      tabIndex={0}
+      aria-label={`查看 ${node.name} 拨测历史`}
+      className="cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+      onClick={openHistory}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openHistory();
+        }
+      }}
+    >
       <TableCell className="pl-5">
         <div className="font-medium">{node.name}</div>
         <div className="font-mono text-xs text-muted-foreground">
@@ -453,6 +504,9 @@ function NodeRow({
       </TableCell>
       <TableCell className="pr-5 whitespace-nowrap text-xs text-muted-foreground">
         {formatDateTime(node.last_checked_at)}
+      </TableCell>
+      <TableCell className="text-muted-foreground">
+        <ChevronRight className="size-4" aria-hidden="true" />
       </TableCell>
     </TableRow>
   );
@@ -501,14 +555,16 @@ function CreateTargetDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const queryClient = useQueryClient();
+  const [name, setName] = useState("");
   const [address, setAddress] = useState("");
   const mutation = useMutation({
     mutationFn: () =>
       api<MonitoringTarget>("/api/monitoring/targets", {
         method: "POST",
-        ...jsonBody({ address }),
+        ...jsonBody({ name, address }),
       }),
     onSuccess: () => {
+      setName("");
       setAddress("");
       onOpenChange(false);
       void queryClient.invalidateQueries({ queryKey: ["monitoring"] });
@@ -528,15 +584,100 @@ function CreateTargetDialog({
             <DialogTitle>添加拨测目标</DialogTitle>
             <DialogDescription>配置 TCP 连接目标</DialogDescription>
           </DialogHeader>
+          <div className="grid gap-4 py-5">
+            <div className="grid gap-2">
+              <Label htmlFor="monitoring-name">名称</Label>
+              <Input
+                id="monitoring-name"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="主 API"
+                maxLength={64}
+                autoComplete="off"
+                autoFocus
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="monitoring-address">IP:端口 或 域名:端口</Label>
+              <Input
+                id="monitoring-address"
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                placeholder="probe.example.com:443"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={mutation.isPending}
+              onClick={() => onOpenChange(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="submit"
+              disabled={!name.trim() || !address.trim() || mutation.isPending}
+            >
+              {mutation.isPending ? (
+                <LoaderCircle className="animate-spin" />
+              ) : (
+                <CirclePlus />
+              )}
+              添加
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EditTargetDialog({
+  target,
+  onOpenChange,
+}: {
+  target: MonitoringTarget | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [name, setName] = useState(target?.name ?? "");
+  const mutation = useMutation({
+    mutationFn: () =>
+      api<MonitoringTarget>(
+        `/api/monitoring/targets/${encodeURIComponent(target?.id ?? "")}`,
+        { method: "PUT", ...jsonBody({ name }) },
+      ),
+    onSuccess: () => {
+      onOpenChange(false);
+      void queryClient.invalidateQueries({ queryKey: ["monitoring"] });
+      toast.success("拨测目标名称已更新");
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    mutation.mutate();
+  }
+  return (
+    <Dialog open={Boolean(target)} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <form onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>重命名拨测目标</DialogTitle>
+            <DialogDescription>{target?.address}</DialogDescription>
+          </DialogHeader>
           <div className="grid gap-2 py-5">
-            <Label htmlFor="monitoring-address">IP:端口 或 域名:端口</Label>
+            <Label htmlFor="monitoring-edit-name">名称</Label>
             <Input
-              id="monitoring-address"
-              value={address}
-              onChange={(event) => setAddress(event.target.value)}
-              placeholder="probe.example.com:443"
+              id="monitoring-edit-name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              maxLength={64}
               autoComplete="off"
-              spellCheck={false}
               autoFocus
             />
           </div>
@@ -551,14 +692,19 @@ function CreateTargetDialog({
             </Button>
             <Button
               type="submit"
-              disabled={!address.trim() || mutation.isPending}
+              disabled={
+                !target ||
+                !name.trim() ||
+                name.trim() === target.name ||
+                mutation.isPending
+              }
             >
               {mutation.isPending ? (
                 <LoaderCircle className="animate-spin" />
               ) : (
-                <CirclePlus />
+                <Pencil />
               )}
-              添加
+              保存
             </Button>
           </DialogFooter>
         </form>

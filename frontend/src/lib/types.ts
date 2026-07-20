@@ -46,6 +46,7 @@ export interface Node {
 
 export interface MonitoringTarget {
   id: string;
+  name: string;
   address: string;
   enabled: boolean;
   created_at: string;
@@ -54,6 +55,7 @@ export interface MonitoringTarget {
 
 export interface MonitoringProbeResult {
   target_id: string;
+  target_name: string;
   address: string;
   attempts: number;
   successful_attempts: number;
@@ -85,6 +87,41 @@ export interface MonitoringOverview {
   attempts_per_round: number;
   healthy_score: number;
   auto_pause_after: number;
+}
+
+export type MonitoringHistoryRange = "1h" | "6h" | "12h" | "24h" | "7d";
+
+export interface MonitoringHistoryPoint {
+  time: string;
+  attempts: number;
+  successful_attempts: number;
+  success_rate: number;
+  average_latency_ms: number | null;
+  failed_rounds: number;
+}
+
+export interface MonitoringHistorySeries {
+  target_id: string;
+  name: string;
+  address: string;
+  points: MonitoringHistoryPoint[];
+}
+
+export interface MonitoringHistory {
+  available: boolean;
+  unavailable_reason?: string;
+  node: {
+    id: string;
+    name: string;
+    public_ipv4: string;
+    status: NodeStatus;
+    monitor_auto_paused: boolean;
+  };
+  range: MonitoringHistoryRange;
+  from: string;
+  to: string;
+  bucket_seconds: number;
+  series: MonitoringHistorySeries[];
 }
 
 export interface MachineReport {

@@ -133,12 +133,14 @@ func main() {
 	dns := &integrations.CloudflareDNS{Token: settings.CloudflareToken}
 	issuer := integrations.CertbotDNSIssuer{Email: os.Getenv("ACME_EMAIL"), ConfigDir: filepath.Join(dataDir, "letsencrypt"), Token: settings.CloudflareToken}
 	var logs logstore.Store = logstore.Noop{}
+	var monitoringHistory logstore.MonitoringHistoryStore
 	if os.Getenv("CLICKHOUSE_DISABLED") != "1" {
 		clickhouse := logstore.ClickHouse{Endpoint: env("CLICKHOUSE_URL", "http://127.0.0.1:8123"), Database: env("CLICKHOUSE_DATABASE", "cdn_platform"), Username: os.Getenv("CLICKHOUSE_USER"), Password: os.Getenv("CLICKHOUSE_PASSWORD")}
 		if err := clickhouse.EnsureSchema(context.Background()); err != nil {
 			logger.Warn("ClickHouse schema setup failed; log writes will retry", "error", err)
 		}
 		logs = clickhouse
+		monitoringHistory = clickhouse
 	}
 	publisher := control.Publisher{Store: database, Cipher: cipher}
 	var notifier integrations.Notifier = settings
@@ -165,9 +167,24 @@ func main() {
 	if err != nil {
 		fatal(err.Error())
 	}
-	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Cloudflare: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Settings: settings, BackupValidator: control.ResticBackupRepositoryValidator{}, BackupStatusPath: env("BACKUP_STATUS_FILE", "/var/lib/cdn-platform-operations/backup.json"), OnlineRestore: onlineRestore, Notifier: notifier, Logs: logs, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
+	server := &control.Server{Store: database, Cipher: cipher, CA: ca, Publisher: publisher, DNS: dns, Cloudflare: dns, Issuer: issuer, CertificateManager: certificateManager, SiteDeleter: siteDeleter, Settings: settings, BackupValidator: control.ResticBackupRepositoryValidator{}, BackupStatusPath: env("BACKUP_STATUS_FILE", "/var/lib/cdn-platform-operations/backup.json"), OnlineRestore: onlineRestore, Notifier: notifier, Logs: logs, MonitoringHistory: monitoringHistory, ControlURL: controlURL, EdgeControlURL: env("EDGE_CONTROL_URL", controlURL), EdgeBinaryURL: os.Getenv("EDGE_BINARY_URL"), EdgeBinarySHA256: edgeBinarySHA256, EdgeBinaryPath: edgeBinaryPath, SetupAllowCIDRs: setupCIDRs, TrustedProxyCIDRs: trustedProxyCIDRs, Logger: logger}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	var monitoringWriter *logstore.AsyncMonitoringWriter
+	var stopMonitoringWriter context.CancelFunc
+	if monitoringHistory != nil {
+		monitoringWriterContext, cancelMonitoringWriter := context.WithCancel(context.Background())
+		stopMonitoringWriter = cancelMonitoringWriter
+		monitoringWriter = logstore.NewAsyncMonitoringWriter(monitoringHistory, logger)
+		monitoringWriter.Start(monitoringWriterContext)
+		server.MonitoringWriter = monitoringWriter
+	}
+	defer func() {
+		stop()
+		if monitoringWriter != nil {
+			stopMonitoringWriter()
+			monitoringWriter.Wait()
+		}
+	}()
 	server.RestartControl = stop
 	healthManager := &control.HealthManager{Server: server}
 	server.HealthManager = healthManager

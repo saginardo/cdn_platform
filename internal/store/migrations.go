@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 
 	"cdn-platform/internal/domain"
 )
@@ -27,6 +28,73 @@ var schemaMigrations = []schemaMigration{
 	{Version: 10, Name: "node-cache-limits", Apply: migrateNodeCacheLimits},
 	{Version: 11, Name: "branding-logo", Apply: migrateBrandingLogo},
 	{Version: 12, Name: "tcp-monitoring", Apply: migrateTCPMonitoring},
+	{Version: 13, Name: "monitoring-target-names", Apply: migrateMonitoringTargetNames},
+}
+
+func migrateMonitoringTargetNames(tx *sql.Tx) error {
+	if err := addColumnIfMissing(tx, "monitoring_targets", "name", "name TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	rows, err := tx.Query(`SELECT id, name, address FROM monitoring_targets ORDER BY created_at, id`)
+	if err != nil {
+		return err
+	}
+	type targetName struct {
+		id      string
+		current string
+		base    string
+	}
+	targets := make([]targetName, 0)
+	for rows.Next() {
+		var target targetName
+		var address string
+		if err := rows.Scan(&target.id, &target.current, &address); err != nil {
+			rows.Close()
+			return err
+		}
+		target.base = strings.TrimSpace(target.current)
+		if target.base == "" {
+			target.base = address
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	used := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		name := uniqueMigratedMonitoringTargetName(target.base, used)
+		used[strings.ToLower(name)] = struct{}{}
+		if name == target.current {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE monitoring_targets SET name = ? WHERE id = ?`, name, target.id); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_monitoring_targets_name ON monitoring_targets(name COLLATE NOCASE)`)
+	return err
+}
+
+func uniqueMigratedMonitoringTargetName(base string, used map[string]struct{}) string {
+	baseRunes := []rune(base)
+	if len(baseRunes) > domain.MaxMonitoringTargetNameLength {
+		baseRunes = baseRunes[:domain.MaxMonitoringTargetNameLength]
+	}
+	candidate := string(baseRunes)
+	for sequence := 2; ; sequence++ {
+		if _, exists := used[strings.ToLower(candidate)]; !exists {
+			return candidate
+		}
+		suffix := []rune(fmt.Sprintf(" (%d)", sequence))
+		prefixLength := domain.MaxMonitoringTargetNameLength - len(suffix)
+		if prefixLength > len([]rune(base)) {
+			prefixLength = len([]rune(base))
+		}
+		candidate = string([]rune(base)[:prefixLength]) + string(suffix)
+	}
 }
 
 func migrateTCPMonitoring(tx *sql.Tx) error {

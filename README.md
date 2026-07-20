@@ -14,7 +14,7 @@ A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-
 - Cloudflare DNS-only A-record reconciliation after node reachability and per-site HTTPS/SNI/certificate health hysteresis: 3 failed probes remove a node; 5 successful probes restore it. If every node is bad, DNS is deliberately left unchanged.
 - Authenticated runtime settings for a 60-300 second DNS TTL, per-site published TTL overrides, encrypted Cloudflare and SMTP settings, and encrypted Restic S3/R2 backup credentials and scheduling. Database overrides take precedence over environment fallbacks without a controller restart.
 - DNS-01 certificates through Certbot's Cloudflare plugin; certificate private keys remain encrypted in SQLite and are only delivered over mTLS.
-- ClickHouse raw request logs with a 7-day TTL and minute aggregates with a 30-day TTL. Edge logs locally queue while the control plane is unavailable.
+- ClickHouse raw request logs with a 7-day TTL and minute aggregates with a 30-day TTL. Named TCP monitoring targets keep only their latest score, consecutive-failure count, and node scheduling state in SQLite; per-round probe history enters ClickHouse through a bounded asynchronous queue, expires after 7 days, and is available as multi-target 1-hour through 7-day charts. Edge access logs locally queue while the control plane is unavailable.
 - SMTP alerts and encrypted Restic S3-compatible daily backups for SQLite, ClickHouse, control TLS, the internal CA, and certificate material, with bounded retry/status reporting, offline restore drills, and a staged online-restore workflow.
 
 ## Deliberate boundaries
@@ -38,7 +38,7 @@ frontend/            React/Vite/Tailwind/shadcn management console source
 internal/edge        Enrollment, mTLS polling, atomic apply, local log queue
 internal/nginx       Generated Nginx cache and origin configuration
 internal/integrations Cloudflare, Certbot, SMTP adapters
-internal/logstore    ClickHouse access-log and aggregate storage
+internal/logstore    ClickHouse access-log, monitoring-history, and aggregate storage
 deploy/              Compose and environment templates
 scripts/             Compose control-plane helpers and release builds
 ```

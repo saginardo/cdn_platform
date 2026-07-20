@@ -24,8 +24,10 @@ Edge nodes use the Debian Nginx package and a host systemd service. Docker is no
     edge-client.crt
     edge-ca.crt
     applied-version
-    access-log-queue.ndjson
     access-log-offset
+    access-log-cursor.json
+    access-log-queue/
+      00000000000000000001.ndjson
     active-upgrade-task
     upgrades/                    # transient online-upgrade state
     security-bans.json
@@ -37,6 +39,8 @@ Edge nodes use the Debian Nginx package and a host systemd service. Docker is no
   systemd/cdn-edge-agent.service
   systemd/cdn-edge-updater@.service
 ```
+
+The access-log forwarder runs independently from the desired-state polling loop. It durably appends complete Nginx records to ordered 4 MiB queue segments, advances `access-log-offset` only after the segment has been synced, and stops advancing that offset when the physical queue reaches 256 MiB. Uploads consume up to 500 events at a time and persist `access-log-cursor.json`; partially consumed segments are not rewritten and are deleted only after their final batch is acknowledged. On first start after an upgrade, the Agent atomically migrates the legacy `access-log-queue.ndjson` file into the segmented queue. A legacy file created by a temporary binary rollback is appended after existing segments on the next upgrade.
 
 Two system integration links remain outside this root because systemd and the Debian Nginx package discover configuration there:
 

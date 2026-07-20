@@ -13,26 +13,132 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cdn-platform/internal/domain"
 	"github.com/google/uuid"
 )
 
-const maxLogQueueBytes int64 = 256 << 20
+const (
+	maxLogQueueBytes     int64 = 256 << 20
+	logQueueSegmentBytes int64 = 4 << 20
+	logUploadBatchSize         = 500
+	logUploadBatchBytes  int64 = 4 << 20
+	logQueueRecordBytes        = 2 << 20
+	logForwarderInterval       = time.Second
+	logDrainBudget             = 900 * time.Millisecond
+)
+
+var errAccessLogQueueFull = errors.New("access-log queue is full")
 
 type LogForwarder struct {
-	stateDir   string
-	logPath    string
-	queuePath  string
-	offsetPath string
+	stateDir        string
+	logPath         string
+	queueDir        string
+	legacyQueuePath string
+	offsetPath      string
+	cursorPath      string
+
+	maxQueueBytes int64
+	segmentBytes  int64
+	batchSize     int
+	interval      time.Duration
+	drainBudget   time.Duration
+
+	errorMu   sync.RWMutex
+	lastError string
 }
 
 func NewLogForwarder(stateDir, logPath string) *LogForwarder {
-	return &LogForwarder{stateDir: stateDir, logPath: logPath, queuePath: filepath.Join(stateDir, "access-log-queue.ndjson"), offsetPath: filepath.Join(stateDir, "access-log-offset")}
+	return &LogForwarder{
+		stateDir:        stateDir,
+		logPath:         logPath,
+		queueDir:        filepath.Join(stateDir, "access-log-queue"),
+		legacyQueuePath: filepath.Join(stateDir, "access-log-queue.ndjson"),
+		offsetPath:      filepath.Join(stateDir, "access-log-offset"),
+		cursorPath:      filepath.Join(stateDir, "access-log-cursor.json"),
+		maxQueueBytes:   maxLogQueueBytes,
+		segmentBytes:    logQueueSegmentBytes,
+		batchSize:       logUploadBatchSize,
+		interval:        logForwarderInterval,
+		drainBudget:     logDrainBudget,
+	}
+}
+
+func (f *LogForwarder) Run(ctx context.Context, controlURL string, clientFactory func() *http.Client) {
+	interval := f.interval
+	if interval <= 0 {
+		interval = logForwarderInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var client *http.Client
+	defer func() {
+		if client != nil {
+			client.CloseIdleConnections()
+		}
+	}()
+	runCycle := func() {
+		_, collectErr := f.Collect()
+		pending, uploadErr := f.hasPending()
+		if uploadErr == nil && pending {
+			if client == nil {
+				if clientFactory == nil {
+					uploadErr = errors.New("access-log HTTP client factory is not configured")
+				} else {
+					client = clientFactory()
+					if client == nil {
+						uploadErr = errors.New("access-log HTTP client factory returned nil")
+					}
+				}
+			}
+			if uploadErr == nil {
+				uploadErr = f.drain(ctx, controlURL, client)
+				if uploadErr != nil && client != nil {
+					client.CloseIdleConnections()
+					client = nil
+				}
+			}
+		}
+		f.setErrors(collectErr, uploadErr)
+	}
+
+	runCycle()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			runCycle()
+		}
+	}
+}
+
+func (f *LogForwarder) LastError() string {
+	f.errorMu.RLock()
+	defer f.errorMu.RUnlock()
+	return f.lastError
+}
+
+func (f *LogForwarder) setErrors(collectErr, uploadErr error) {
+	parts := make([]string, 0, 2)
+	if collectErr != nil {
+		parts = append(parts, "collect access logs: "+collectErr.Error())
+	}
+	if uploadErr != nil && !errors.Is(uploadErr, context.Canceled) {
+		parts = append(parts, "upload access logs: "+uploadErr.Error())
+	}
+	f.errorMu.Lock()
+	f.lastError = strings.Join(parts, "; ")
+	f.errorMu.Unlock()
 }
 
 func (f *LogForwarder) Collect() (int, error) {
+	if err := f.prepareQueue(); err != nil {
+		return 0, err
+	}
 	file, err := os.Open(f.logPath)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
@@ -52,96 +158,135 @@ func (f *LogForwarder) Collect() (int, error) {
 	if _, err := file.Seek(offset, io.SeekStart); err != nil {
 		return 0, err
 	}
-	if err := os.MkdirAll(f.stateDir, 0o750); err != nil {
-		return 0, err
-	}
-	queue, err := os.OpenFile(f.queuePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o640)
+	appender, err := f.newQueueAppender()
 	if err != nil {
 		return 0, err
 	}
-	defer queue.Close()
+
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	scanner.Split(splitCompleteLogLine)
 	count := 0
 	position := offset
+	var collectErr error
+	queueFull := false
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		position += int64(len(line) + 1)
+		nextPosition := position + int64(len(line)+1)
 		event, err := decodeNginxLog(line)
 		if err != nil {
+			position = nextPosition
 			continue
 		}
 		serialized, err := json.Marshal(event)
 		if err != nil {
-			return count, err
+			collectErr = err
+			break
 		}
-		if _, err := queue.Write(append(serialized, '\n')); err != nil {
-			return count, err
+		record := append(serialized, '\n')
+		appended, err := appender.Append(record)
+		if err != nil {
+			collectErr = err
+			break
 		}
+		if !appended {
+			queueFull = true
+			break
+		}
+		position = nextPosition
 		count++
 	}
-	if err := scanner.Err(); err != nil {
+	if err := scanner.Err(); err != nil && collectErr == nil {
+		collectErr = err
+	}
+	if err := appender.Close(); err != nil {
 		return count, err
 	}
-	if err := atomicWriteFile(f.offsetPath, []byte(strconv.FormatInt(position, 10)), 0o640); err != nil {
-		return count, err
+	if position != offset {
+		if err := atomicWriteFile(f.offsetPath, []byte(strconv.FormatInt(position, 10)), 0o640); err != nil {
+			return count, err
+		}
 	}
-	if queueInfo, err := queue.Stat(); err == nil && queueInfo.Size() > maxLogQueueBytes {
-		return count, fmt.Errorf("access-log queue exceeds %d bytes; resolve control-plane log delivery", maxLogQueueBytes)
+	if collectErr != nil {
+		return count, collectErr
+	}
+	if queueFull {
+		return count, fmt.Errorf("%w at %d bytes; collection paused until delivery resumes", errAccessLogQueueFull, f.queueLimit())
 	}
 	return count, nil
 }
 
+func splitCompleteLogLine(data []byte, _ bool) (advance int, token []byte, err error) {
+	if index := bytes.IndexByte(data, '\n'); index >= 0 {
+		return index + 1, data[:index], nil
+	}
+	return 0, nil, nil
+}
+
 func (f *LogForwarder) Flush(ctx context.Context, controlURL string, client *http.Client) error {
-	contents, err := os.ReadFile(f.queuePath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	_, err := f.flushBatch(ctx, controlURL, client)
+	return err
+}
+
+func (f *LogForwarder) drain(ctx context.Context, controlURL string, client *http.Client) error {
+	budget := f.drainBudget
+	if budget <= 0 {
+		budget = logDrainBudget
 	}
-	if err != nil {
-		return err
-	}
-	lines := bytes.Split(contents, []byte{'\n'})
-	var events []domain.AccessLogEvent
-	consumedLines := 0
-	for _, line := range lines {
-		if len(line) == 0 {
-			consumedLines++
-			continue
+	deadline := time.Now().Add(budget)
+	for {
+		progressed, err := f.flushBatch(ctx, controlURL, client)
+		if err != nil {
+			return err
 		}
-		if len(events) >= 500 {
-			break
+		if !progressed {
+			return nil
 		}
-		var event domain.AccessLogEvent
-		consumedLines++
-		if err := json.Unmarshal(line, &event); err != nil {
-			continue
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		events = append(events, event)
+		if time.Now().After(deadline) {
+			return nil
+		}
 	}
-	if consumedLines == 0 {
-		return nil
+}
+
+func (f *LogForwarder) flushBatch(ctx context.Context, controlURL string, client *http.Client) (bool, error) {
+	batch, err := f.nextBatch()
+	if err != nil || batch == nil {
+		return false, err
 	}
-	if len(events) == 0 {
-		return atomicWriteFile(f.queuePath, joinLines(lines[consumedLines:]), 0o640)
+	if len(batch.events) > 0 {
+		if client == nil {
+			return false, errors.New("access-log HTTP client is not configured")
+		}
+		payload, err := json.Marshal(batch.events)
+		if err != nil {
+			return false, err
+		}
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(controlURL, "/")+"/api/edge/v1/logs", bytes.NewReader(payload))
+		if err != nil {
+			return false, err
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			return false, err
+		}
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_, _ = io.Copy(io.Discard, response.Body)
+		closeErr := response.Body.Close()
+		if response.StatusCode != http.StatusAccepted {
+			return false, fmt.Errorf("log upload: %s: %s", response.Status, strings.TrimSpace(string(body)))
+		}
+		if closeErr != nil {
+			return false, closeErr
+		}
 	}
-	payload, err := json.Marshal(events)
-	if err != nil {
-		return err
+	if err := f.ackBatch(batch); err != nil {
+		return false, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(controlURL, "/")+"/api/edge/v1/logs", bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := client.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("log upload: %s", response.Status)
-	}
-	return atomicWriteFile(f.queuePath, joinLines(lines[consumedLines:]), 0o640)
+	return true, nil
 }
 
 func (f *LogForwarder) offset() int64 {
@@ -205,11 +350,4 @@ func decodeNginxLog(line []byte) (domain.AccessLogEvent, error) {
 		ContentType: raw.ContentType, ResponseContentType: raw.ResponseContentType,
 		Accept: raw.Accept, Range: raw.Range,
 	}, nil
-}
-
-func joinLines(lines [][]byte) []byte {
-	if len(lines) == 0 {
-		return nil
-	}
-	return bytes.Join(lines, []byte{'\n'})
 }

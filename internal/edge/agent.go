@@ -147,6 +147,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	go a.cacheUsage.Run(ctx)
+	go a.logs.Run(ctx, a.Config.ControlURL, a.client)
 	if a.security != nil {
 		go a.security.Run(ctx, a.Config.ControlURL, a.client)
 	}
@@ -159,11 +160,8 @@ func (a *Agent) Run(ctx context.Context) error {
 		if err := a.Sync(ctx); err != nil && lastError == "" {
 			lastError = err.Error()
 		}
-		if _, err := a.logs.Collect(); err != nil && lastError == "" {
-			lastError = "collect access logs: " + err.Error()
-		}
-		if err := a.logs.Flush(ctx, a.Config.ControlURL, a.client()); err != nil && lastError == "" {
-			lastError = "upload access logs: " + err.Error()
+		if logError := a.logs.LastError(); logError != "" && lastError == "" {
+			lastError = logError
 		}
 		if a.security != nil && a.security.LastError() != "" && lastError == "" {
 			lastError = "edge security: " + a.security.LastError()

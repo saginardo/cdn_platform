@@ -60,6 +60,7 @@ export function AppShell() {
       <AppSidebar
         brandName={branding?.name ?? ""}
         brandSubtitle={branding?.subtitle ?? ""}
+        brandLogoDataURL={branding?.logo_data_url ?? ""}
         brandPending={!branding}
         onLogout={() => void logout()}
       />

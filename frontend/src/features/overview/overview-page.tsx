@@ -1,7 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
+  ArrowDown,
   ArrowRight,
+  ArrowUp,
+  ArrowUpDown,
   DatabaseZap,
   RefreshCw,
   TriangleAlert,
@@ -49,10 +52,22 @@ import {
   formatNumber,
   formatPercent,
 } from "@/lib/format";
-import type { Overview, OverviewPoint } from "@/lib/types";
+import type { Overview, OverviewPoint, OverviewSite } from "@/lib/types";
 import { useListPagination } from "@/hooks/use-list-pagination";
 
 type Metric = "requests" | "bytes" | "error_requests";
+type SiteSortKey = "name" | "requests" | "bytes";
+type SortDirection = "asc" | "desc";
+
+interface SiteSort {
+  key: SiteSortKey;
+  direction: SortDirection;
+}
+
+const siteNameCollator = new Intl.Collator("zh-CN", {
+  numeric: true,
+  sensitivity: "base",
+});
 
 const metricConfig: Record<
   Metric,
@@ -69,6 +84,10 @@ const metricConfig: Record<
 
 export function OverviewPage() {
   const [metric, setMetric] = useState<Metric>("requests");
+  const [siteSort, setSiteSort] = useState<SiteSort>({
+    key: "requests",
+    direction: "desc",
+  });
   const query = useQuery({
     queryKey: ["overview"],
     queryFn: () => api<Overview>("/api/overview"),
@@ -83,7 +102,24 @@ export function OverviewPage() {
   const errorRate = totals?.requests
     ? totals.error_requests / totals.requests
     : 0;
-  const sitesPagination = useListPagination(query.data?.sites ?? []);
+  const sortedSites = useMemo(
+    () => sortOverviewSites(query.data?.sites ?? [], siteSort),
+    [query.data?.sites, siteSort],
+  );
+  const sitesPagination = useListPagination(sortedSites);
+
+  const handleSiteSort = (key: SiteSortKey) => {
+    setSiteSort((current) => ({
+      key,
+      direction:
+        current.key === key
+          ? current.direction === "asc"
+            ? "desc"
+            : "asc"
+          : defaultSiteSortDirection(key),
+    }));
+    sitesPagination.setPage(1);
+  };
 
   return (
     <>
@@ -223,7 +259,7 @@ export function OverviewPage() {
               <CardHeader>
                 <CardTitle>站点流量</CardTitle>
                 <CardDescription>
-                  按请求数排序，可进入站点分析详情
+                  最近 24 小时聚合，可进入站点分析详情
                 </CardDescription>
               </CardHeader>
               <CardContent className="px-0">
@@ -233,9 +269,25 @@ export function OverviewPage() {
                       <Table>
                         <TableHeader>
                           <TableRow>
-                            <TableHead className="pl-6">站点</TableHead>
-                            <TableHead>请求数</TableHead>
-                            <TableHead>传输量</TableHead>
+                            <SortableSiteTableHead
+                              className="pl-6"
+                              label="站点"
+                              sortKey="name"
+                              sort={siteSort}
+                              onSort={handleSiteSort}
+                            />
+                            <SortableSiteTableHead
+                              label="请求数"
+                              sortKey="requests"
+                              sort={siteSort}
+                              onSort={handleSiteSort}
+                            />
+                            <SortableSiteTableHead
+                              label="传输量"
+                              sortKey="bytes"
+                              sort={siteSort}
+                              onSort={handleSiteSort}
+                            />
                             <TableHead>错误率</TableHead>
                             <TableHead className="w-12 pr-6">
                               <span className="sr-only">详情</span>
@@ -300,6 +352,92 @@ export function OverviewPage() {
       </PageBody>
     </>
   );
+}
+
+function SortableSiteTableHead({
+  className,
+  label,
+  sortKey,
+  sort,
+  onSort,
+}: {
+  className?: string;
+  label: string;
+  sortKey: SiteSortKey;
+  sort: SiteSort;
+  onSort: (key: SiteSortKey) => void;
+}) {
+  const active = sort.key === sortKey;
+  const nextDirection = active
+    ? sort.direction === "asc"
+      ? "desc"
+      : "asc"
+    : defaultSiteSortDirection(sortKey);
+  const SortIcon = active
+    ? sort.direction === "asc"
+      ? ArrowUp
+      : ArrowDown
+    : ArrowUpDown;
+  const actionLabel = `按${label}${nextDirection === "asc" ? "升序" : "降序"}排序`;
+
+  return (
+    <TableHead
+      className={className}
+      aria-sort={
+        active
+          ? sort.direction === "asc"
+            ? "ascending"
+            : "descending"
+          : "none"
+      }
+    >
+      <Button
+        type="button"
+        variant="ghost"
+        size="sm"
+        className="-ml-3 font-medium"
+        aria-label={actionLabel}
+        title={actionLabel}
+        onClick={() => onSort(sortKey)}
+      >
+        <span>{label}</span>
+        <SortIcon
+          data-icon="inline-end"
+          className={active ? "text-foreground" : "text-muted-foreground"}
+          aria-hidden="true"
+        />
+      </Button>
+    </TableHead>
+  );
+}
+
+function defaultSiteSortDirection(key: SiteSortKey): SortDirection {
+  return key === "name" ? "asc" : "desc";
+}
+
+function sortOverviewSites(
+  sites: readonly OverviewSite[],
+  sort: SiteSort,
+): OverviewSite[] {
+  return [...sites].sort((left, right) => {
+    const comparison =
+      sort.key === "name"
+        ? siteNameCollator.compare(siteName(left), siteName(right))
+        : left[sort.key] - right[sort.key];
+    if (comparison) {
+      return sort.direction === "desc" ? -comparison : comparison;
+    }
+
+    const nameComparison = siteNameCollator.compare(
+      siteName(left),
+      siteName(right),
+    );
+    return nameComparison || siteNameCollator.compare(left.id, right.id);
+  });
+}
+
+function siteName(site: OverviewSite) {
+  return site.name || site.id || "未命名站点";
 }
 
 export function OverviewLineChart({

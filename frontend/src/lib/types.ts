@@ -331,6 +331,7 @@ export interface Settings {
   branding: {
     name: string;
     subtitle: string;
+    logo_data_url: string;
   };
   cache: { default_size_gb: number };
   dns: { default_ttl_seconds: number };

@@ -7,10 +7,12 @@ export type Branding = Settings["branding"];
 export const DEFAULT_BRANDING: Branding = {
   name: "CDN Platform",
   subtitle: "控制面板",
+  logo_data_url: "",
 };
 
 const STORAGE_KEY = "cdn-platform:branding:v1";
 const CHANGE_EVENT = "cdn:branding-changed";
+const MAX_CACHED_LOGO_LENGTH = 180_000;
 
 export function cacheBranding(branding: Branding) {
   const normalized = normalizeBranding(branding);
@@ -57,8 +59,16 @@ function normalizeBranding(value: unknown): Branding | null {
   const candidate = value as Partial<Branding>;
   if (typeof candidate.name !== "string" || !candidate.name.trim()) return null;
   if (typeof candidate.subtitle !== "string") return null;
+  const logoDataURL =
+    typeof candidate.logo_data_url === "string" &&
+    candidate.logo_data_url.length <= MAX_CACHED_LOGO_LENGTH &&
+    (candidate.logo_data_url.startsWith("data:image/png;base64,") ||
+      candidate.logo_data_url.startsWith("data:image/jpeg;base64,"))
+      ? candidate.logo_data_url
+      : "";
   return {
     name: candidate.name.trim(),
     subtitle: candidate.subtitle.trim(),
+    logo_data_url: logoDataURL,
   };
 }

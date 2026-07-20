@@ -12,6 +12,7 @@ import (
 )
 
 func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *testing.T) {
+	const logo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +47,7 @@ func TestSettingsManagerUsesEncryptedDatabaseOverridesAndEnvironmentFallback(t *
 	if view.Branding != domain.DefaultBrandingSettings() {
 		t.Fatalf("unexpected branding defaults: %#v", view.Branding)
 	}
-	branding := domain.BrandingSettings{Name: "DustK CDN", Subtitle: "运营面板"}
+	branding := domain.BrandingSettings{Name: "DustK CDN", Subtitle: "运营面板", LogoDataURL: logo}
 	if err := manager.SaveBranding(branding); err != nil {
 		t.Fatal(err)
 	}

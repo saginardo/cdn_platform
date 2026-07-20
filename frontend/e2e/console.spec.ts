@@ -138,7 +138,11 @@ const accessLogs = [
 ];
 
 async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
-  let branding = { name: "CDN Platform", subtitle: "控制面板" };
+  let branding = {
+    name: "CDN Platform",
+    subtitle: "控制面板",
+    logo_data_url: "",
+  };
   let cacheDefaultSizeGB = 1;
   let nodeCacheOverrideGB: number | null = null;
   await page.route("**/api/**", async (route) => {
@@ -147,7 +151,10 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       url.pathname === "/api/settings/branding" &&
       route.request().method() === "PUT"
     ) {
-      branding = route.request().postDataJSON() as typeof branding;
+      branding = {
+        ...branding,
+        ...(route.request().postDataJSON() as Partial<typeof branding>),
+      };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -191,6 +198,7 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
     }
     const responses: Record<string, unknown> = {
       "/api/session": { user: "admin", csrf_token: "e2e-csrf" },
+      "/api/branding": branding,
       "/api/messages": { messages: [], unread_count: 0 },
       "/api/overview": overview,
       "/api/sites": [site],
@@ -362,6 +370,59 @@ test("list pagination renders at most 20 entries per page", async ({
   await expect(page.getByText("分页站点 20")).toHaveCount(0);
 });
 
+test("overview site traffic sorts by the selected column", async ({ page }) => {
+  const sites = [
+    {
+      ...overview.sites[0],
+      id: "site-alpha",
+      name: "Alpha",
+      requests: 10,
+      bytes: 300,
+    },
+    {
+      ...overview.sites[0],
+      id: "site-bravo",
+      name: "Bravo",
+      requests: 30,
+      bytes: 100,
+    },
+    {
+      ...overview.sites[0],
+      id: "site-charlie",
+      name: "Charlie",
+      requests: 20,
+      bytes: 200,
+    },
+  ];
+  await mockAPI(page, { "/api/overview": { ...overview, sites } });
+  await page.goto("/#/overview");
+
+  const table = page.getByRole("table");
+  const firstRow = table.locator("tbody tr").first();
+  const requestsHeader = page.getByRole("columnheader", { name: "请求数" });
+
+  await expect(requestsHeader).toHaveAttribute("aria-sort", "descending");
+  await expect(firstRow).toContainText("Bravo");
+
+  await page.getByRole("button", { name: "按站点升序排序" }).click();
+  await expect(
+    page.getByRole("columnheader", { name: "站点" }),
+  ).toHaveAttribute("aria-sort", "ascending");
+  await expect(firstRow).toContainText("Alpha");
+
+  await page.getByRole("button", { name: "按站点降序排序" }).click();
+  await expect(firstRow).toContainText("Charlie");
+
+  await page.getByRole("button", { name: "按传输量降序排序" }).click();
+  await expect(
+    page.getByRole("columnheader", { name: "传输量" }),
+  ).toHaveAttribute("aria-sort", "descending");
+  await expect(firstRow).toContainText("Alpha");
+
+  await page.getByRole("button", { name: "按传输量升序排序" }).click();
+  await expect(firstRow).toContainText("Bravo");
+});
+
 test("sites list shows only the publish status", async ({ page }) => {
   const tlsRequests: string[] = [];
   page.on("request", (request) => {
@@ -397,15 +458,32 @@ test("branding settings update the sidebar immediately", async ({
   await mockAPI(page);
   await page.goto("/#/settings");
 
+  await expect(page.getByRole("tab", { name: "通用" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "品牌" })).toHaveCount(0);
   await expect(page.getByLabel("品牌标识")).toHaveValue("CDN Platform");
   await expect(page.getByLabel("副标题")).toHaveValue("控制面板");
   await page.getByLabel("品牌标识").fill("DustK Edge");
   await page.getByLabel("副标题").fill("边缘控制台");
-  await page.getByRole("button", { name: "保存品牌" }).click();
+  await page.getByLabel("品牌 Logo").setInputFiles({
+    name: "dustk-logo.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    ),
+  });
+  await page.getByRole("button", { name: "保存通用设置" }).click();
 
   const sidebar = page.locator('[data-sidebar="sidebar"]');
   await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("边缘控制台", { exact: true })).toBeVisible();
+  await expect(
+    sidebar.locator('img[src^="data:image/png;base64,"]'),
+  ).toBeVisible();
+  await expect(page).toHaveTitle("DustK Edge · 边缘控制台");
+  await expect(
+    page.locator('link[rel="icon"][data-branding-icon]'),
+  ).toHaveAttribute("href", /^data:image\/png;base64,/);
 
   await page.route("**/api/session", async (route) => {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -425,6 +503,7 @@ test("branding settings update the sidebar immediately", async ({
     bootScreen.getByText("CDN Platform", { exact: true }),
   ).toHaveCount(0);
   await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
+  await expect(page).toHaveTitle("DustK Edge · 边缘控制台");
 
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
@@ -433,8 +512,19 @@ test("branding settings update the sidebar immediately", async ({
     bootScreen.getByText("CDN Platform", { exact: true }),
   ).toHaveCount(0);
   await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
+  await expect(page).toHaveTitle("DustK Edge · 边缘控制台");
   await page.screenshot({
     path: testInfo.outputPath("branding-settings.png"),
+    fullPage: true,
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("branding-settings-mobile.png"),
     fullPage: true,
   });
 });

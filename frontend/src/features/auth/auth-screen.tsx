@@ -1,13 +1,13 @@
 import {
   AlertCircle,
   Check,
-  Globe2,
   LoaderCircle,
   LockKeyhole,
   ShieldCheck,
 } from "lucide-react";
 import { useState, type FormEvent } from "react";
 
+import { BrandMark } from "@/components/brand-mark";
 import { CopyButton } from "@/components/copy-button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -100,9 +100,11 @@ export function AuthScreen({
     <main className="grid min-h-svh place-items-center bg-muted/30 p-4 sm:p-8">
       <div className="w-full max-w-md">
         <div className="mb-6 flex items-center justify-center gap-3">
-          <span className="grid size-10 place-items-center rounded-md bg-primary text-primary-foreground">
-            <Globe2 className="size-5" />
-          </span>
+          <BrandMark
+            logoDataURL={branding?.logo_data_url ?? ""}
+            className="size-10"
+            iconClassName="size-5"
+          />
           {branding ? (
             <div>
               <div className="text-base font-semibold">{branding.name}</div>

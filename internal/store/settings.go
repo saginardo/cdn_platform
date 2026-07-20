@@ -63,11 +63,11 @@ func (s *Store) ControlSettings() (ControlSettings, error) {
 	var recipients, updatedAt string
 	err := s.db.QueryRow(`SELECT dns_default_ttl_seconds, cache_default_size_gb, smtp_override, smtp_enabled, smtp_host, smtp_port, smtp_username, smtp_from_address, smtp_recipients_json, smtp_security,
 		backup_override, backup_repository, backup_access_key_id, backup_region, backup_time, backup_random_delay_seconds,
-		brand_name, brand_subtitle, updated_at
+		brand_name, brand_subtitle, brand_logo_data_url, updated_at
 			FROM control_settings WHERE id = 1`).
 		Scan(&settings.DNSDefaultTTLSeconds, &settings.CacheDefaultSizeGB, &smtpOverride, &smtpEnabled, &settings.SMTP.Host, &settings.SMTP.Port, &settings.SMTP.Username, &settings.SMTP.FromAddress, &recipients, &settings.SMTP.Security,
 			&backupOverride, &settings.Backup.Repository, &settings.Backup.AccessKeyID, &settings.Backup.Region, &settings.Backup.BackupTime, &settings.Backup.RandomDelaySeconds,
-			&settings.Branding.Name, &settings.Branding.Subtitle, &updatedAt)
+			&settings.Branding.Name, &settings.Branding.Subtitle, &settings.Branding.LogoDataURL, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return settings, nil
 	}
@@ -104,9 +104,9 @@ func (s *Store) SaveBrandingSettings(settings domain.BrandingSettings) error {
 	if err := domain.ValidateBrandingSettings(settings); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`INSERT INTO control_settings(id, brand_name, brand_subtitle, updated_at) VALUES (1, ?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET brand_name=excluded.brand_name, brand_subtitle=excluded.brand_subtitle, updated_at=excluded.updated_at`,
-		settings.Name, settings.Subtitle, stamp(now()))
+	_, err := s.db.Exec(`INSERT INTO control_settings(id, brand_name, brand_subtitle, brand_logo_data_url, updated_at) VALUES (1, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET brand_name=excluded.brand_name, brand_subtitle=excluded.brand_subtitle, brand_logo_data_url=excluded.brand_logo_data_url, updated_at=excluded.updated_at`,
+		settings.Name, settings.Subtitle, settings.LogoDataURL, stamp(now()))
 	return err
 }
 

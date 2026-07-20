@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Cloud,
-  Globe2,
   HardDrive,
+  ImagePlus,
   LoaderCircle,
   Mail,
   Palette,
@@ -11,10 +11,12 @@ import {
   Save,
   Send,
   ShieldCheck,
+  Trash2,
 } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 
+import { BrandMark } from "@/components/brand-mark";
 import { BackupRestore } from "@/features/settings/backup-restore";
 import {
   PageBody,
@@ -55,7 +57,7 @@ export function SettingsPage() {
     <>
       <PageHeader
         title="设置"
-        description="品牌、运行参数与外部集成"
+        description="通用、运行参数与外部集成"
         actions={
           <Button
             variant="outline"
@@ -73,20 +75,17 @@ export function SettingsPage() {
         {query.isLoading ? <PageLoading /> : null}
         {query.error ? <PageError error={query.error} /> : null}
         {query.data ? (
-          <Tabs defaultValue="branding" className="space-y-5">
+          <Tabs defaultValue="common" className="space-y-5">
             <TabsList>
-              <TabsTrigger value="branding">品牌</TabsTrigger>
-              <TabsTrigger value="general">网络与 DNS</TabsTrigger>
+              <TabsTrigger value="common">通用</TabsTrigger>
+              <TabsTrigger value="network">网络与 DNS</TabsTrigger>
               <TabsTrigger value="notifications">通知</TabsTrigger>
               <TabsTrigger value="backup">备份与恢复</TabsTrigger>
             </TabsList>
-            <TabsContent value="branding">
-              <BrandingForm
-                key={`branding-${query.data.branding.name}-${query.data.branding.subtitle}`}
-                settings={query.data}
-              />
+            <TabsContent value="common">
+              <BrandingForm settings={query.data} />
             </TabsContent>
-            <TabsContent value="general" className="grid gap-4 lg:grid-cols-2">
+            <TabsContent value="network" className="grid gap-4 lg:grid-cols-2">
               <CacheForm
                 key={`cache-${query.data.cache.default_size_gb}`}
                 settings={query.data}
@@ -124,26 +123,34 @@ function BrandingForm({ settings }: { settings: Settings }) {
   const queryClient = useQueryClient();
   const [name, setName] = useState(settings.branding.name);
   const [subtitle, setSubtitle] = useState(settings.branding.subtitle);
+  const [logoDataURL, setLogoDataURL] = useState(
+    settings.branding.logo_data_url,
+  );
+  useEffect(() => {
+    setName(settings.branding.name);
+    setSubtitle(settings.branding.subtitle);
+    setLogoDataURL(settings.branding.logo_data_url);
+  }, [settings.branding]);
   const mutation = useMutation({
     mutationFn: () =>
       api<Settings["branding"]>("/api/settings/branding", {
         method: "PUT",
-        body: JSON.stringify({ name, subtitle }),
+        body: JSON.stringify({ name, subtitle, logo_data_url: logoDataURL }),
       }),
     onSuccess: (branding) => {
       cacheBranding(branding);
       queryClient.setQueryData<Settings>(["settings"], (current) =>
         current ? { ...current, branding } : current,
       );
-      toast.success("品牌设置已保存");
+      toast.success("通用设置已保存");
     },
     onError: (error) => toast.error(errorMessage(error)),
   });
 
   return (
     <FormCard
-      title="品牌"
-      description="控制台侧边栏标识"
+      title="控制台标识"
+      description="应用名称与品牌图片"
       icon={<Palette />}
       source="控制台设置"
     >
@@ -174,11 +181,52 @@ function BrandingForm({ settings }: { settings: Settings }) {
           </Field>
         </div>
         <div className="grid gap-2">
-          <Label>侧边栏预览</Label>
-          <div className="flex min-h-16 w-full max-w-sm items-center gap-3 border bg-sidebar px-3 py-2 text-sidebar-foreground">
-            <span className="grid size-8 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground">
-              <Globe2 className="size-4" />
+          <Label htmlFor="brand-logo">品牌 Logo</Label>
+          <input
+            id="brand-logo"
+            type="file"
+            accept="image/png,image/jpeg"
+            className="sr-only"
+            aria-label="品牌 Logo"
+            onChange={(event) => {
+              const input = event.currentTarget;
+              const file = input.files?.[0];
+              input.value = "";
+              if (file) {
+                void readBrandLogo(file).then(setLogoDataURL, (error) =>
+                  toast.error(
+                    error instanceof Error ? error.message : "无法读取 Logo",
+                  ),
+                );
+              }
+            }}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Button asChild variant="outline">
+              <label htmlFor="brand-logo" className="cursor-pointer">
+                <ImagePlus />
+                选择图片
+              </label>
+            </Button>
+            {logoDataURL ? (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setLogoDataURL("")}
+              >
+                <Trash2 />
+                移除 Logo
+              </Button>
+            ) : null}
+            <span className="text-xs text-muted-foreground">
+              PNG 或 JPEG，最大 128 KiB
             </span>
+          </div>
+        </div>
+        <div className="grid gap-2">
+          <Label>预览</Label>
+          <div className="flex min-h-16 w-full max-w-sm items-center gap-3 border bg-sidebar px-3 py-2 text-sidebar-foreground">
+            <BrandMark logoDataURL={logoDataURL} className="size-8" />
             <span className="grid min-w-0 text-left leading-tight">
               <span className="truncate font-semibold">
                 {name.trim() || DEFAULT_BRANDING.name}
@@ -198,7 +246,7 @@ function BrandingForm({ settings }: { settings: Settings }) {
             ) : (
               <Save />
             )}
-            保存品牌
+            保存通用设置
           </Button>
           <Button
             type="button"
@@ -207,6 +255,7 @@ function BrandingForm({ settings }: { settings: Settings }) {
             onClick={() => {
               setName(DEFAULT_BRANDING.name);
               setSubtitle(DEFAULT_BRANDING.subtitle);
+              setLogoDataURL(DEFAULT_BRANDING.logo_data_url);
             }}
           >
             <RotateCcw />
@@ -216,6 +265,26 @@ function BrandingForm({ settings }: { settings: Settings }) {
       </form>
     </FormCard>
   );
+}
+
+const MAX_BRAND_LOGO_BYTES = 128 << 10;
+
+function readBrandLogo(file: File): Promise<string> {
+  if (file.type !== "image/png" && file.type !== "image/jpeg") {
+    return Promise.reject(new Error("Logo 仅支持 PNG 或 JPEG 图片"));
+  }
+  if (file.size > MAX_BRAND_LOGO_BYTES) {
+    return Promise.reject(new Error("Logo 图片不能超过 128 KiB"));
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      typeof reader.result === "string"
+        ? resolve(reader.result)
+        : reject(new Error("无法读取 Logo"));
+    reader.onerror = () => reject(new Error("无法读取 Logo"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function DNSForm({ settings }: { settings: Settings }) {

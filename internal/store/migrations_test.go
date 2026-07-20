@@ -32,6 +32,30 @@ func TestMigrationsRecordCurrentVersionAndRemainIdempotent(t *testing.T) {
 	}
 }
 
+func TestBrandingLogoMigrationAddsLegacyColumn(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.db.Exec(`ALTER TABLE control_settings DROP COLUMN brand_logo_data_url`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version = 11`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	found, err := columnExists(database.db, "control_settings", "brand_logo_data_url")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("branding logo migration did not add control_settings.brand_logo_data_url")
+	}
+}
+
 func TestFailedMigrationRollsBackSchemaAndVersionRecord(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

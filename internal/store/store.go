@@ -240,6 +240,7 @@ CREATE TABLE IF NOT EXISTS control_settings (
 	cache_default_size_gb INTEGER NOT NULL DEFAULT 1,
   brand_name TEXT NOT NULL DEFAULT 'CDN Platform',
   brand_subtitle TEXT NOT NULL DEFAULT '控制面板',
+  brand_logo_data_url TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS node_health (

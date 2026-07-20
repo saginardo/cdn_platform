@@ -236,6 +236,12 @@ func (m *SettingsManager) SaveBranding(settings domain.BrandingSettings) error {
 	return nil
 }
 
+func (m *SettingsManager) Branding() domain.BrandingSettings {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.branding
+}
+
 func (m *SettingsManager) DNSDefaultTTL() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

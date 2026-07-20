@@ -12,6 +12,7 @@ import (
 )
 
 func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
+	const logo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	path := filepath.Join(t.TempDir(), "control.db")
 	database, err := Open(path)
 	if err != nil {
@@ -32,7 +33,7 @@ func TestControlSettingsDefaultsAndOverrides(t *testing.T) {
 	if settings.Branding != domain.DefaultBrandingSettings() {
 		t.Fatalf("unexpected branding defaults: %#v", settings.Branding)
 	}
-	branding := domain.BrandingSettings{Name: "DustK CDN", Subtitle: "运营面板"}
+	branding := domain.BrandingSettings{Name: "DustK CDN", Subtitle: "运营面板", LogoDataURL: logo}
 	if err := database.SaveBrandingSettings(branding); err != nil {
 		t.Fatal(err)
 	}

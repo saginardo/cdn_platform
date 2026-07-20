@@ -25,6 +25,11 @@ var schemaMigrations = []schemaMigration{
 	{Version: 8, Name: "ephemeral-machine-status-and-cache-limits", Apply: migrateCacheLimits},
 	{Version: 9, Name: "rate-limit-ban-escalation", Apply: migrateRateLimitBanEscalation},
 	{Version: 10, Name: "node-cache-limits", Apply: migrateNodeCacheLimits},
+	{Version: 11, Name: "branding-logo", Apply: migrateBrandingLogo},
+}
+
+func migrateBrandingLogo(tx *sql.Tx) error {
+	return addColumnIfMissing(tx, "control_settings", "brand_logo_data_url", "brand_logo_data_url TEXT NOT NULL DEFAULT ''")
 }
 
 func migrateNodeCacheLimits(tx *sql.Tx) error {

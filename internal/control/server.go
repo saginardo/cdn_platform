@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /uninstall-edge.sh", s.uninstallEdgeScript)
 	mux.HandleFunc("GET /downloads/cdn-edge-agent-linux-amd64", s.edgeBinary)
 	mux.HandleFunc("GET /api/setup/status", s.setupStatus)
+	mux.HandleFunc("GET /api/branding", s.getPublicBranding)
 	mux.HandleFunc("POST /api/setup", s.setup)
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.requireAdmin(s.logout))

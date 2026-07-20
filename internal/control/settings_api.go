@@ -19,21 +19,42 @@ func (s *Server) getSettings(response http.ResponseWriter, _ *http.Request) {
 	writeJSON(response, http.StatusOK, s.Settings.View())
 }
 
+func (s *Server) getPublicBranding(response http.ResponseWriter, _ *http.Request) {
+	response.Header().Set("Cache-Control", "no-cache")
+	branding := domain.DefaultBrandingSettings()
+	if s.Settings != nil {
+		branding = s.Settings.Branding()
+	}
+	writeJSON(response, http.StatusOK, branding)
+}
+
+type brandingSettingsRequest struct {
+	Name        string  `json:"name"`
+	Subtitle    string  `json:"subtitle"`
+	LogoDataURL *string `json:"logo_data_url"`
+}
+
 func (s *Server) updateBrandingSettings(response http.ResponseWriter, request *http.Request) {
 	if s.Settings == nil {
 		writeError(response, http.StatusServiceUnavailable, errors.New("settings are not configured"))
 		return
 	}
-	var input domain.BrandingSettings
+	var input brandingSettingsRequest
 	if !readJSON(response, request, &input) {
 		return
 	}
-	if err := s.Settings.SaveBranding(input); err != nil {
+	branding := s.Settings.Branding()
+	branding.Name = input.Name
+	branding.Subtitle = input.Subtitle
+	if input.LogoDataURL != nil {
+		branding.LogoDataURL = *input.LogoDataURL
+	}
+	if err := s.Settings.SaveBranding(branding); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
 	view := s.Settings.View().Branding
-	s.audit(request, adminID(request.Context()), "update_branding", "settings", "branding", fmt.Sprintf("name=%q; subtitle_length=%d", view.Name, len([]rune(view.Subtitle))))
+	s.audit(request, adminID(request.Context()), "update_branding", "settings", "branding", fmt.Sprintf("name=%q; subtitle_length=%d; logo_configured=%t", view.Name, len([]rune(view.Subtitle)), view.LogoDataURL != ""))
 	writeJSON(response, http.StatusOK, view)
 }
 

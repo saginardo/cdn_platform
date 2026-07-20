@@ -27,6 +27,7 @@ func (v *recordingBackupValidator) Validate(_ context.Context, runtime BackupRun
 }
 
 func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testing.T) {
+	const logo = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -83,9 +84,22 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("invalid branding = %d %s", response.Code, response.Body.String())
 	}
-	response = settingsRequest(t, server, http.MethodPut, "/api/settings/branding", map[string]any{"name": "DustK CDN", "subtitle": "运营面板"}, true)
-	if response.Code != http.StatusOK || settings.View().Branding.Name != "DustK CDN" || settings.View().Branding.Subtitle != "运营面板" {
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/branding", map[string]any{"name": "DustK CDN", "subtitle": "运营面板", "logo_data_url": logo}, true)
+	if response.Code != http.StatusOK || settings.View().Branding.Name != "DustK CDN" || settings.View().Branding.Subtitle != "运营面板" || settings.View().Branding.LogoDataURL != logo {
 		t.Fatalf("valid branding = %d %s", response.Code, response.Body.String())
+	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/branding", map[string]any{"name": "DustK CDN", "subtitle": "运营面板"}, true)
+	if response.Code != http.StatusOK || settings.View().Branding.LogoDataURL != logo {
+		t.Fatalf("legacy branding update did not preserve logo = %d %s", response.Code, response.Body.String())
+	}
+	response = settingsRequest(t, server, http.MethodPut, "/api/settings/branding", map[string]any{"name": "DustK CDN", "subtitle": "运营面板", "logo_data_url": "data:image/png;base64,invalid"}, true)
+	if response.Code != http.StatusBadRequest || settings.View().Branding.LogoDataURL != logo {
+		t.Fatalf("invalid branding logo = %d %s", response.Code, response.Body.String())
+	}
+	publicBranding := httptest.NewRecorder()
+	server.Handler().ServeHTTP(publicBranding, httptest.NewRequest(http.MethodGet, "/api/branding", nil))
+	if publicBranding.Code != http.StatusOK || !strings.Contains(publicBranding.Body.String(), logo) {
+		t.Fatalf("public branding = %d %s", publicBranding.Code, publicBranding.Body.String())
 	}
 
 	response = settingsRequest(t, server, http.MethodPut, "/api/settings/dns", map[string]any{"default_ttl_seconds": 59}, true)
@@ -169,7 +183,7 @@ func TestSettingsAPIPreservesSecretsAndValidatesCloudflareBeforeSaving(t *testin
 	if !strings.Contains(body, `"secret_access_key_configured":true`) || !strings.Contains(body, `"restic_password_configured":true`) {
 		t.Fatalf("settings response lacks backup secret status: %s", body)
 	}
-	if !strings.Contains(body, `"branding":{"name":"DustK CDN","subtitle":"运营面板"}`) {
+	if !strings.Contains(body, `"branding":{"name":"DustK CDN","subtitle":"运营面板","logo_data_url":"data:image/png;base64,`) {
 		t.Fatalf("settings response lacks branding: %s", body)
 	}
 	if !strings.Contains(body, `"cache":{"default_size_gb":4}`) {

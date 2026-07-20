@@ -1,5 +1,4 @@
 import {
-  Globe2,
   LayoutDashboard,
   LogOut,
   ScrollText,
@@ -10,6 +9,7 @@ import {
 } from "lucide-react";
 import { Link, useLocation } from "react-router-dom";
 
+import { BrandMark } from "@/components/brand-mark";
 import {
   Sidebar,
   SidebarContent,
@@ -51,11 +51,13 @@ const groups = [
 export function AppSidebar({
   brandName,
   brandSubtitle,
+  brandLogoDataURL,
   brandPending,
   onLogout,
 }: {
   brandName: string;
   brandSubtitle: string;
+  brandLogoDataURL: string;
   brandPending?: boolean;
   onLogout: () => void;
 }) {
@@ -71,9 +73,7 @@ export function AppSidebar({
               tooltip={brandName || "控制面板"}
               className="h-11 justify-start px-2"
             >
-              <span className="grid size-8 shrink-0 place-items-center rounded-md bg-primary text-primary-foreground">
-                <Globe2 className="size-4" />
-              </span>
+              <BrandMark logoDataURL={brandLogoDataURL} className="size-8" />
               {brandPending ? (
                 <span
                   className="grid min-w-0 gap-1.5"

@@ -4,6 +4,7 @@ import { lazy } from "react";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 
 import { AppShell } from "@/components/app-shell";
+import { BrandingSync } from "@/components/branding-sync";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider, AuthGate } from "@/features/auth/auth-provider";
@@ -72,6 +73,7 @@ const queryClient = new QueryClient({
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
+      <BrandingSync />
       <ThemeProvider
         attribute="class"
         defaultTheme="system"

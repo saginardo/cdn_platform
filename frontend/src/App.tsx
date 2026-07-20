@@ -34,6 +34,11 @@ const SecurityPage = lazy(() =>
     default: module.SecurityPage,
   })),
 );
+const MonitoringPage = lazy(() =>
+  import("@/features/monitoring/monitoring-page").then((module) => ({
+    default: module.MonitoringPage,
+  })),
+);
 const NodesPage = lazy(() =>
   import("@/features/nodes/nodes-page").then((module) => ({
     default: module.NodesPage,
@@ -98,6 +103,7 @@ export default function App() {
                     <Route path="/logs" element={<LogsPage />} />
                     <Route path="/logs/:logId" element={<LogDetailPage />} />
                     <Route path="/security" element={<SecurityPage />} />
+                    <Route path="/monitoring" element={<MonitoringPage />} />
                     <Route path="/nodes" element={<NodesPage />} />
                     <Route path="/nodes/:nodeId" element={<NodeDetailPage />} />
                     <Route path="/sites" element={<SitesPage />} />

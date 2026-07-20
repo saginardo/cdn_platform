@@ -50,6 +50,10 @@ type Config struct {
 	UpgradeRunner         UpgradeRunner
 	SecurityFirewall      SecurityFirewall
 	SecurityPollInterval  time.Duration
+	MonitoringDialer      MonitoringDialer
+	MonitoringTimeout     time.Duration
+	MonitoringAttempts    int
+	MonitoringWorkers     int
 }
 
 type Agent struct {
@@ -121,6 +125,8 @@ func New(config Config) (*Agent, error) {
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityCacheUsage)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityMachineStatus)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityNginxFragments)
+	configureMonitoring(&config)
+	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityTCPMonitoring)
 	config.SecurityFirewall = defaultSecurityFirewall(config.SecurityFirewall)
 	if config.SecurityFirewall != nil {
 		config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilitySecurity)
@@ -152,6 +158,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		go a.security.Run(ctx, a.Config.ControlURL, a.client)
 	}
 	for {
+		roundStarted := time.Now()
 		lastError := a.lastUpgradeError
 		a.lastUpgradeError = ""
 		if err := a.renewIfNeeded(ctx); err != nil {
@@ -159,6 +166,9 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 		if err := a.Sync(ctx); err != nil && lastError == "" {
 			lastError = err.Error()
+		}
+		if err := a.Monitor(ctx); err != nil && lastError == "" {
+			lastError = "TCP monitoring: " + err.Error()
 		}
 		if logError := a.logs.LastError(); logError != "" && lastError == "" {
 			lastError = logError
@@ -173,10 +183,18 @@ func (a *Agent) Run(ctx context.Context) error {
 				a.lastUpgradeError = "process online upgrade: " + err.Error()
 			}
 		}
+		delay := a.Config.PollInterval - time.Since(roundStarted)
+		if delay < 0 {
+			delay = 0
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
 			return ctx.Err()
-		case <-time.After(a.Config.PollInterval):
+		case <-timer.C:
 		}
 	}
 }

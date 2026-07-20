@@ -28,6 +28,7 @@ const pageNames: Record<string, string> = {
   overview: "概览",
   logs: "日志",
   security: "安全",
+  monitoring: "监测",
   nodes: "节点",
   sites: "站点",
   settings: "设置",

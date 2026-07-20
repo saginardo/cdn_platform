@@ -41,7 +41,7 @@ func TestBrandingLogoMigrationAddsLegacyColumn(t *testing.T) {
 	if _, err := database.db.Exec(`ALTER TABLE control_settings DROP COLUMN brand_logo_data_url`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version = 11`); err != nil {
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version >= 11`); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Migrate(); err != nil {
@@ -53,6 +53,62 @@ func TestBrandingLogoMigrationAddsLegacyColumn(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("branding logo migration did not add control_settings.brand_logo_data_url")
+	}
+}
+
+func TestTCPMonitoringMigrationAddsSchema(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	found, err := columnExists(database.db, "nodes", "monitor_auto_paused")
+	if err != nil || !found {
+		t.Fatalf("monitor_auto_paused column = %v, %v", found, err)
+	}
+	for _, table := range []string{"monitoring_targets", "node_monitoring_status", "monitoring_probe_results"} {
+		var count int
+		if err := database.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("missing monitoring table %s", table)
+		}
+	}
+}
+
+func TestTCPMonitoringMigrationUpgradesLegacyNodesTable(t *testing.T) {
+	database, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "legacy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE nodes (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateTCPMonitoring(tx); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	found, err := columnExists(database, "nodes", "monitor_auto_paused")
+	if err != nil || !found {
+		t.Fatalf("monitor_auto_paused column = %v, %v", found, err)
+	}
+	for _, table := range []string{"monitoring_targets", "node_monitoring_status", "monitoring_probe_results"} {
+		var count int
+		if err := database.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("migration did not create %s", table)
+		}
 	}
 }
 

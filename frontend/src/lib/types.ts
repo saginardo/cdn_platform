@@ -27,6 +27,7 @@ export interface Node {
   public_ipv4: string;
   cache_max_size_gb?: number;
   status: NodeStatus;
+  monitor_auto_paused: boolean;
   capabilities: string[];
   agent_sha256?: string;
   active_upgrade_task_id?: string;
@@ -41,6 +42,49 @@ export interface Node {
   can_upgrade: boolean;
   upgrade_blocker?: string;
   upgrade_task?: NodeUpgradeTask;
+}
+
+export interface MonitoringTarget {
+  id: string;
+  address: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MonitoringProbeResult {
+  target_id: string;
+  address: string;
+  attempts: number;
+  successful_attempts: number;
+  average_latency_ms: number;
+  error?: string;
+  checked_at: string;
+}
+
+export interface MonitoringNode {
+  node_id: string;
+  name: string;
+  public_ipv4: string;
+  status: NodeStatus;
+  monitor_auto_paused: boolean;
+  capable: boolean;
+  score?: number;
+  success_rate?: number;
+  average_latency_ms?: number;
+  consecutive_abnormal: number;
+  last_checked_at?: string;
+  stale: boolean;
+  results: MonitoringProbeResult[];
+}
+
+export interface MonitoringOverview {
+  targets: MonitoringTarget[];
+  nodes: MonitoringNode[];
+  interval_seconds: number;
+  attempts_per_round: number;
+  healthy_score: number;
+  auto_pause_after: number;
 }
 
 export interface MachineReport {

@@ -1,4 +1,5 @@
 import {
+  Activity,
   LayoutDashboard,
   LogOut,
   ScrollText,
@@ -38,6 +39,7 @@ const groups = [
     label: "运营",
     items: [
       { label: "安全", to: "/security", icon: ShieldCheck },
+      { label: "监测", to: "/monitoring", icon: Activity },
       { label: "节点", to: "/nodes", icon: Server },
       { label: "站点", to: "/sites", icon: Waypoints },
     ],

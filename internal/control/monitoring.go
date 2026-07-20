@@ -1,0 +1,219 @@
+package control
+
+import (
+	"errors"
+	"net/http"
+	"slices"
+	"time"
+
+	"cdn-platform/internal/domain"
+	"cdn-platform/internal/store"
+)
+
+const monitoringStaleAfter = 75 * time.Second
+
+type monitoringOverviewResponse struct {
+	Targets          []domain.MonitoringTarget `json:"targets"`
+	Nodes            []monitoringNodeResponse  `json:"nodes"`
+	IntervalSeconds  int                       `json:"interval_seconds"`
+	AttemptsPerRound int                       `json:"attempts_per_round"`
+	HealthyScore     int                       `json:"healthy_score"`
+	AutoPauseAfter   int                       `json:"auto_pause_after"`
+}
+
+type monitoringNodeResponse struct {
+	NodeID              string                    `json:"node_id"`
+	Name                string                    `json:"name"`
+	PublicIPv4          string                    `json:"public_ipv4"`
+	Status              domain.NodeStatus         `json:"status"`
+	MonitorAutoPaused   bool                      `json:"monitor_auto_paused"`
+	Capable             bool                      `json:"capable"`
+	Score               *int                      `json:"score,omitempty"`
+	SuccessRate         *float64                  `json:"success_rate,omitempty"`
+	AverageLatencyMS    *float64                  `json:"average_latency_ms,omitempty"`
+	ConsecutiveAbnormal int                       `json:"consecutive_abnormal"`
+	LastCheckedAt       *time.Time                `json:"last_checked_at,omitempty"`
+	Stale               bool                      `json:"stale"`
+	Results             []monitoringProbeResponse `json:"results"`
+}
+
+type monitoringProbeResponse struct {
+	TargetID           string    `json:"target_id"`
+	Address            string    `json:"address"`
+	Attempts           int       `json:"attempts"`
+	SuccessfulAttempts int       `json:"successful_attempts"`
+	AverageLatencyMS   float64   `json:"average_latency_ms"`
+	Error              string    `json:"error,omitempty"`
+	CheckedAt          time.Time `json:"checked_at"`
+}
+
+func (s *Server) monitoringOverview(response http.ResponseWriter, _ *http.Request) {
+	targets, err := s.Store.ListMonitoringTargets(false)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	nodes, err := s.Store.ListNodes()
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	statuses, err := s.Store.ListNodeMonitoringStatuses()
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	results, err := s.Store.ListMonitoringProbeSnapshots()
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	statusByNode := make(map[string]store.NodeMonitoringStatus, len(statuses))
+	for _, status := range statuses {
+		statusByNode[status.NodeID] = status
+	}
+	targetByID := make(map[string]domain.MonitoringTarget, len(targets))
+	for _, target := range targets {
+		targetByID[target.ID] = target
+	}
+	resultsByNode := make(map[string][]monitoringProbeResponse)
+	for _, result := range results {
+		target, found := targetByID[result.TargetID]
+		if !found {
+			continue
+		}
+		resultsByNode[result.NodeID] = append(resultsByNode[result.NodeID], monitoringProbeResponse{
+			TargetID: result.TargetID, Address: target.Address, Attempts: result.Attempts,
+			SuccessfulAttempts: result.SuccessfulAttempts, AverageLatencyMS: result.AverageLatencyMS,
+			Error: result.Error, CheckedAt: result.CheckedAt,
+		})
+	}
+	now := time.Now().UTC()
+	responseNodes := make([]monitoringNodeResponse, 0, len(nodes))
+	for _, node := range nodes {
+		if node.Status == domain.NodeUninstalled {
+			continue
+		}
+		item := monitoringNodeResponse{
+			NodeID: node.ID, Name: node.Name, PublicIPv4: node.PublicIPv4, Status: node.Status,
+			MonitorAutoPaused: node.MonitorAutoPaused,
+			Capable:           slices.Contains(node.Capabilities, domain.EdgeCapabilityTCPMonitoring),
+			Results:           resultsByNode[node.ID],
+		}
+		if item.Results == nil {
+			item.Results = []monitoringProbeResponse{}
+		}
+		if status, found := statusByNode[node.ID]; found {
+			item.Score = &status.Score
+			item.SuccessRate = &status.SuccessRate
+			item.AverageLatencyMS = &status.AverageLatencyMS
+			item.ConsecutiveAbnormal = status.ConsecutiveAbnormal
+			item.LastCheckedAt = status.LastCheckedAt
+			item.Stale = status.LastCheckedAt == nil || status.LastCheckedAt.Before(now.Add(-monitoringStaleAfter))
+		}
+		responseNodes = append(responseNodes, item)
+	}
+	writeJSON(response, http.StatusOK, monitoringOverviewResponse{
+		Targets: targets, Nodes: responseNodes, IntervalSeconds: 30, AttemptsPerRound: 3,
+		HealthyScore: store.MonitoringHealthyScore, AutoPauseAfter: store.MonitoringAutoPauseAfter,
+	})
+}
+
+type createMonitoringTargetRequest struct {
+	Address string `json:"address"`
+}
+
+func (s *Server) createMonitoringTarget(response http.ResponseWriter, request *http.Request) {
+	var input createMonitoringTargetRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	target, err := s.Store.CreateMonitoringTarget(input.Address)
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	s.audit(request, adminID(request.Context()), "create_monitoring_target", "monitoring_target", target.ID, target.Address)
+	writeJSON(response, http.StatusCreated, target)
+}
+
+type updateMonitoringTargetRequest struct {
+	Enabled *bool `json:"enabled"`
+}
+
+func (s *Server) updateMonitoringTarget(response http.ResponseWriter, request *http.Request) {
+	var input updateMonitoringTargetRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	if input.Enabled == nil {
+		writeError(response, http.StatusBadRequest, errors.New("enabled is required"))
+		return
+	}
+	target, err := s.Store.SetMonitoringTargetEnabled(request.PathValue("id"), *input.Enabled)
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	s.audit(request, adminID(request.Context()), "update_monitoring_target", "monitoring_target", target.ID, target.Address)
+	writeJSON(response, http.StatusOK, target)
+}
+
+func (s *Server) deleteMonitoringTarget(response http.ResponseWriter, request *http.Request) {
+	if err := s.Store.DeleteMonitoringTarget(request.PathValue("id")); err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	s.audit(request, adminID(request.Context()), "delete_monitoring_target", "monitoring_target", request.PathValue("id"), "")
+	writeJSON(response, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) edgeMonitoringTargets(response http.ResponseWriter, _ *http.Request) {
+	targets, err := s.Store.ListMonitoringTargets(true)
+	if err != nil {
+		writeError(response, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(response, http.StatusOK, targets)
+}
+
+type monitoringReportRequest struct {
+	Results []domain.MonitoringProbeResult `json:"results"`
+}
+
+func (s *Server) edgeMonitoringReport(response http.ResponseWriter, request *http.Request) {
+	var input monitoringReportRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	if len(input.Results) == 0 || len(input.Results) > domain.MaxMonitoringTargets {
+		writeError(response, http.StatusBadRequest, errors.New("monitoring results must contain every enabled target"))
+		return
+	}
+	now := time.Now().UTC()
+	for index := range input.Results {
+		input.Results[index].CheckedAt = input.Results[index].CheckedAt.UTC()
+		if !domain.ValidMonitoringProbeResult(input.Results[index]) || input.Results[index].CheckedAt.After(now.Add(maxEdgeReportClockSkew)) {
+			writeError(response, http.StatusBadRequest, errors.New("monitoring result is invalid"))
+			return
+		}
+	}
+	nodeID := edgeNodeID(request.Context())
+	outcome, err := s.Store.RecordMonitoringRound(nodeID, input.Results)
+	if errors.Is(err, store.ErrMonitoringReportStale) {
+		writeJSON(response, http.StatusOK, map[string]bool{"accepted": false})
+		return
+	}
+	if err != nil {
+		writeStoreError(response, err)
+		return
+	}
+	if outcome.StatusChanged {
+		action := "monitor_auto_pause"
+		if outcome.NodeStatus == domain.NodeActive {
+			action = "monitor_auto_resume"
+		}
+		s.audit(request, "edge:"+nodeID, action, "node", nodeID, outcome.Status.String())
+	}
+	writeJSON(response, http.StatusOK, map[string]bool{"accepted": true})
+}

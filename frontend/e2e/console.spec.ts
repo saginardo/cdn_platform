@@ -82,6 +82,96 @@ const site = {
   updated_at: now.toISOString(),
 };
 
+const monitoring = {
+  interval_seconds: 30,
+  attempts_per_round: 3,
+  healthy_score: 80,
+  auto_pause_after: 4,
+  targets: [
+    {
+      id: "target-1",
+      address: "probe-a.example.com:443",
+      enabled: true,
+      created_at: series[20].time,
+      updated_at: series[20].time,
+    },
+    {
+      id: "target-2",
+      address: "192.0.2.50:8443",
+      enabled: true,
+      created_at: series[20].time,
+      updated_at: series[21].time,
+    },
+  ],
+  nodes: [
+    {
+      node_id: "node-1",
+      name: "edge-hong-kong",
+      public_ipv4: "203.0.113.41",
+      status: "active",
+      monitor_auto_paused: false,
+      capable: true,
+      score: 96,
+      success_rate: 100,
+      average_latency_ms: 63.4,
+      consecutive_abnormal: 0,
+      last_checked_at: now.toISOString(),
+      stale: false,
+      results: [
+        {
+          target_id: "target-1",
+          address: "probe-a.example.com:443",
+          attempts: 3,
+          successful_attempts: 3,
+          average_latency_ms: 58.2,
+          checked_at: now.toISOString(),
+        },
+        {
+          target_id: "target-2",
+          address: "192.0.2.50:8443",
+          attempts: 3,
+          successful_attempts: 3,
+          average_latency_ms: 68.6,
+          checked_at: now.toISOString(),
+        },
+      ],
+    },
+    {
+      node_id: "node-2",
+      name: "edge-singapore",
+      public_ipv4: "203.0.113.42",
+      status: "draining",
+      monitor_auto_paused: true,
+      capable: true,
+      score: 35,
+      success_rate: 50,
+      average_latency_ms: 1320,
+      consecutive_abnormal: 4,
+      last_checked_at: now.toISOString(),
+      stale: false,
+      results: [
+        {
+          target_id: "target-1",
+          address: "probe-a.example.com:443",
+          attempts: 3,
+          successful_attempts: 3,
+          average_latency_ms: 1320,
+          checked_at: now.toISOString(),
+        },
+        {
+          target_id: "target-2",
+          address: "192.0.2.50:8443",
+          attempts: 3,
+          successful_attempts: 0,
+          average_latency_ms: 0,
+          error: "connect: connection timed out",
+          checked_at: now.toISOString(),
+        },
+      ],
+    },
+  ],
+};
+
 const accessLogs = [
   {
     id: "request-404",
@@ -196,6 +286,53 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       });
       return;
     }
+    if (
+      url.pathname === "/api/monitoring/targets" &&
+      route.request().method() === "POST"
+    ) {
+      const input = route.request().postDataJSON() as { address: string };
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "target-created",
+          address: input.address,
+          enabled: true,
+          created_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        }),
+      });
+      return;
+    }
+    if (
+      url.pathname.startsWith("/api/monitoring/targets/") &&
+      route.request().method() === "PUT"
+    ) {
+      const input = route.request().postDataJSON() as { enabled: boolean };
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: url.pathname.split("/").at(-1),
+          address: "probe-a.example.com:443",
+          enabled: input.enabled,
+          created_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        }),
+      });
+      return;
+    }
+    if (
+      url.pathname.startsWith("/api/monitoring/targets/") &&
+      route.request().method() === "DELETE"
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true }),
+      });
+      return;
+    }
     const responses: Record<string, unknown> = {
       "/api/session": { user: "admin", csrf_token: "e2e-csrf" },
       "/api/branding": branding,
@@ -243,6 +380,7 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
         events: [],
         nodes: [],
       },
+      "/api/monitoring": monitoring,
       "/api/settings": {
         branding,
         cache: { default_size_gb: cacheDefaultSizeGB },
@@ -916,6 +1054,7 @@ test("all primary workspaces and the new-site editor mount without runtime error
 
   for (const [path, heading] of [
     ["security", "安全"],
+    ["monitoring", "监测"],
     ["nodes", "节点"],
     ["sites", "站点"],
     ["sites/new", "添加站点"],
@@ -928,6 +1067,57 @@ test("all primary workspaces and the new-site editor mount without runtime error
   }
   await page.getByRole("tab", { name: "备份与恢复" }).click();
   await expect(page.getByText("S3 在线恢复")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("monitoring workspace shows scoring, probe results, and target controls", async ({
+  page,
+}, testInfo) => {
+  const errors = trackPageErrors(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockAPI(page);
+  await page.goto("/#/monitoring");
+
+  await expect(
+    page.getByRole("heading", { name: "监测", level: 1 }),
+  ).toBeVisible();
+  await expect(page.getByText("edge-hong-kong")).toBeVisible();
+  await expect(page.getByText("监测暂停")).toBeVisible();
+  await expect(page.getByText("96", { exact: true })).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("monitoring-desktop.png"),
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "监测", level: 1 }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("monitoring-mobile.png"),
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  await page.getByRole("tab", { name: "拨测明细" }).click();
+  await expect(page.getByText("connect: connection timed out")).toBeVisible();
+  await expect(page.getByText("3 / 3").first()).toBeVisible();
+
+  await page.getByRole("tab", { name: "目标配置" }).click();
+  await expect(page.getByText("probe-a.example.com:443")).toBeVisible();
+  await page.getByRole("button", { name: "添加目标" }).click();
+  await page
+    .getByLabel("IP:端口 或 域名:端口")
+    .fill("probe-new.example.com:9443");
+  await page.getByRole("button", { name: "添加", exact: true }).click();
+  await expect(page.getByText("拨测目标已添加")).toBeVisible();
   expect(errors).toEqual([]);
 });
 

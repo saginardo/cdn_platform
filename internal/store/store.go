@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   name TEXT NOT NULL UNIQUE,
   public_ipv4 TEXT NOT NULL UNIQUE,
   status TEXT NOT NULL,
+	monitor_auto_paused INTEGER NOT NULL DEFAULT 0,
 	capabilities_json TEXT NOT NULL DEFAULT '[]',
 	cache_max_size_gb INTEGER,
   cert_fingerprint TEXT,
@@ -258,6 +259,32 @@ CREATE TABLE IF NOT EXISTS node_cache_storage (
   collected_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS monitoring_targets (
+  id TEXT PRIMARY KEY,
+  address TEXT NOT NULL UNIQUE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_monitoring_status (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+  score INTEGER NOT NULL,
+  success_rate REAL NOT NULL,
+  average_latency_ms REAL NOT NULL,
+  consecutive_abnormal INTEGER NOT NULL DEFAULT 0,
+  last_checked_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS monitoring_probe_results (
+  node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+  target_id TEXT NOT NULL REFERENCES monitoring_targets(id) ON DELETE CASCADE,
+  attempts INTEGER NOT NULL,
+  successful_attempts INTEGER NOT NULL,
+  average_latency_ms REAL NOT NULL,
+  error TEXT NOT NULL DEFAULT '',
+  checked_at TEXT NOT NULL,
+  PRIMARY KEY(node_id, target_id)
+);
 CREATE TABLE IF NOT EXISTS site_node_health (
   site_id TEXT NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
   node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -365,6 +392,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_security_policies_priority ON security_policies(priority, created_at);
 	CREATE INDEX IF NOT EXISTS idx_security_bans_expires ON security_bans(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_security_events_created ON security_events(created_at DESC);
+	CREATE INDEX IF NOT EXISTS idx_monitoring_probe_target ON monitoring_probe_results(target_id, checked_at DESC);
 `
 
 func seedBuiltinSecurityPoliciesTx(tx *sql.Tx) error {
@@ -650,11 +678,11 @@ func (s *Store) CreateNode(name, publicIPv4 string) (domain.Node, error) {
 }
 
 func (s *Store) GetNode(id string) (domain.Node, error) {
-	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, capabilities_json, cache_max_size_gb, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
+	return scanNode(s.db.QueryRow(`SELECT id, name, public_ipv4, status, monitor_auto_paused, capabilities_json, cache_max_size_gb, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes WHERE id = ?`, id))
 }
 
 func (s *Store) ListNodes() ([]domain.Node, error) {
-	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, capabilities_json, cache_max_size_gb, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, public_ipv4, status, monitor_auto_paused, capabilities_json, cache_max_size_gb, agent_sha256, active_upgrade_task_id, last_heartbeat_at, applied_version, last_error, created_at, updated_at FROM nodes ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -695,16 +723,18 @@ type scanner interface{ Scan(...any) error }
 func scanNode(row scanner) (domain.Node, error) {
 	var node domain.Node
 	var capabilities string
+	var monitorAutoPaused int
 	var cacheMaxSizeGB sql.NullInt64
 	var heartbeat sql.NullString
 	var createdAt, updatedAt string
-	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &capabilities, &cacheMaxSizeGB, &node.AgentSHA256, &node.ActiveUpgradeID, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
+	err := row.Scan(&node.ID, &node.Name, &node.PublicIPv4, &node.Status, &monitorAutoPaused, &capabilities, &cacheMaxSizeGB, &node.AgentSHA256, &node.ActiveUpgradeID, &heartbeat, &node.AppliedVersion, &node.LastError, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return domain.Node{}, ErrNotFound
 	}
 	if err != nil {
 		return domain.Node{}, err
 	}
+	node.MonitorAutoPaused = monitorAutoPaused != 0
 	if err := json.Unmarshal([]byte(capabilities), &node.Capabilities); err != nil {
 		return domain.Node{}, fmt.Errorf("decode node capabilities: %w", err)
 	}
@@ -1111,7 +1141,7 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 		return ErrUninstallActive
 	}
 	if status == domain.NodeRevoked {
-		result, err := tx.Exec(`UPDATE nodes SET status = ?, cert_fingerprint = NULL, active_upgrade_task_id = '', updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
+		result, err := tx.Exec(`UPDATE nodes SET status = ?, monitor_auto_paused = 0, cert_fingerprint = NULL, active_upgrade_task_id = '', updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
 		if err != nil {
 			return err
 		}
@@ -1136,7 +1166,7 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 			return err
 		}
 	} else {
-		result, err := tx.Exec(`UPDATE nodes SET status = ?, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
+		result, err := tx.Exec(`UPDATE nodes SET status = ?, monitor_auto_paused = 0, updated_at = ? WHERE id = ?`, status, stamp(now()), nodeID)
 		if err != nil {
 			return err
 		}
@@ -1147,6 +1177,9 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 		if changed != 1 {
 			return ErrNotFound
 		}
+	}
+	if _, err := tx.Exec(`UPDATE node_monitoring_status SET consecutive_abnormal = 0, updated_at = ? WHERE node_id = ?`, stamp(now()), nodeID); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

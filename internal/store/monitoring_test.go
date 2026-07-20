@@ -1,0 +1,236 @@
+package store
+
+import (
+	"errors"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"cdn-platform/internal/domain"
+)
+
+func TestMonitoringRoundAutoPausesAndRecoversNode(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-monitor", "203.0.113.91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	target, err := database.CreateMonitoringTarget("probe.example.test:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedAt := time.Now().UTC().Add(-time.Minute)
+	for round := 1; round <= MonitoringAutoPauseAfter; round++ {
+		result := failedMonitoringResult(target.ID, checkedAt.Add(time.Duration(round)*time.Second))
+		outcome, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{result})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantStatus := domain.NodeActive
+		if round == MonitoringAutoPauseAfter {
+			wantStatus = domain.NodeDraining
+		}
+		if outcome.NodeStatus != wantStatus || outcome.Status.ConsecutiveAbnormal != round {
+			t.Fatalf("round %d outcome = %#v", round, outcome)
+		}
+	}
+	paused, err := database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.Status != domain.NodeDraining || !paused.MonitorAutoPaused {
+		t.Fatalf("paused node = %#v", paused)
+	}
+	healthy := domain.MonitoringProbeResult{
+		TargetID: target.ID, Attempts: 3, SuccessfulAttempts: 3, AverageLatencyMS: 20,
+		CheckedAt: checkedAt.Add((MonitoringAutoPauseAfter + 1) * time.Second),
+	}
+	outcome, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{healthy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NodeStatus != domain.NodeActive || !outcome.StatusChanged || outcome.Status.Score != 100 || outcome.Status.ConsecutiveAbnormal != 0 {
+		t.Fatalf("recovery outcome = %#v", outcome)
+	}
+	recovered, err := database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Status != domain.NodeActive || recovered.MonitorAutoPaused {
+		t.Fatalf("recovered node = %#v", recovered)
+	}
+}
+
+func TestMonitoringNeverResumesManuallyPausedNode(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-manual-pause", "203.0.113.92")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeDraining); err != nil {
+		t.Fatal(err)
+	}
+	target, err := database.CreateMonitoringTarget("192.0.2.20:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := domain.MonitoringProbeResult{
+		TargetID: target.ID, Attempts: 3, SuccessfulAttempts: 3, AverageLatencyMS: 15, CheckedAt: time.Now().UTC(),
+	}
+	if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{result}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Status != domain.NodeDraining || loaded.MonitorAutoPaused {
+		t.Fatalf("manual pause was changed: %#v", loaded)
+	}
+}
+
+func TestManualPauseTakesOwnershipAndTargetChangeReleasesAutoPause(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-pause-owner", "203.0.113.93")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	target, err := database.CreateMonitoringTarget("probe.example.test:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedAt := time.Now().UTC().Add(-time.Minute)
+	for round := 0; round < MonitoringAutoPauseAfter; round++ {
+		if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{failedMonitoringResult(target.ID, checkedAt.Add(time.Duration(round)*time.Second))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeDraining); err != nil {
+		t.Fatal(err)
+	}
+	manual, err := database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manual.MonitorAutoPaused {
+		t.Fatal("manual pause retained automatic ownership")
+	}
+	if err := database.SetNodeStatus(node.ID, domain.NodeActive); err != nil {
+		t.Fatal(err)
+	}
+	for round := 0; round < MonitoringAutoPauseAfter; round++ {
+		if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{failedMonitoringResult(target.ID, checkedAt.Add(time.Duration(10+round)*time.Second))}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secondTarget, err := database.CreateMonitoringTarget("probe-b.example.test:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stillPaused, err := database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillPaused.Status != domain.NodeDraining || !stillPaused.MonitorAutoPaused {
+		t.Fatalf("target change released pause before a healthy report: %#v", stillPaused)
+	}
+	if err := database.DeleteMonitoringTarget(target.ID); err != nil {
+		t.Fatal(err)
+	}
+	stillPaused, err = database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillPaused.Status != domain.NodeDraining || !stillPaused.MonitorAutoPaused {
+		t.Fatalf("remaining target did not retain automatic pause: %#v", stillPaused)
+	}
+	if err := database.DeleteMonitoringTarget(secondTarget.ID); err != nil {
+		t.Fatal(err)
+	}
+	released, err := database.GetNode(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released.Status != domain.NodeActive || released.MonitorAutoPaused {
+		t.Fatalf("target change did not release automatic pause: %#v", released)
+	}
+	statuses, err := database.ListNodeMonitoringStatuses()
+	if err != nil || len(statuses) != 0 {
+		t.Fatalf("monitoring status after target reset = %#v, %v", statuses, err)
+	}
+}
+
+func TestMonitoringRejectsChangedTargetsAndDuplicateReports(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, _ := database.CreateNode("edge-stale-report", "203.0.113.94")
+	target, _ := database.CreateMonitoringTarget("probe.example.test:443")
+	result := failedMonitoringResult(target.ID, time.Now().UTC())
+	if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{result}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{result}); !errors.Is(err, ErrMonitoringReportStale) {
+		t.Fatalf("duplicate report error = %v", err)
+	}
+	if _, err := database.RecordMonitoringRound(node.ID, []domain.MonitoringProbeResult{{TargetID: "unknown", Attempts: 1, CheckedAt: time.Now().UTC()}}); !errors.Is(err, ErrMonitoringTargetsChanged) {
+		t.Fatalf("changed target error = %v", err)
+	}
+}
+
+func TestMonitoringScoreCombinesSuccessRateAndLatency(t *testing.T) {
+	checkedAt := time.Now().UTC()
+	for _, test := range []struct {
+		name      string
+		result    domain.MonitoringProbeResult
+		wanted    int
+		isHealthy bool
+	}{
+		{
+			name: "healthy low latency", result: domain.MonitoringProbeResult{
+				TargetID: "target", Attempts: 10, SuccessfulAttempts: 9, AverageLatencyMS: 100, CheckedAt: checkedAt,
+			}, wanted: 93, isHealthy: true,
+		},
+		{
+			name: "partial reachability", result: domain.MonitoringProbeResult{
+				TargetID: "target", Attempts: 3, SuccessfulAttempts: 2, AverageLatencyMS: 50, CheckedAt: checkedAt,
+			}, wanted: 77,
+		},
+		{
+			name: "high latency", result: domain.MonitoringProbeResult{
+				TargetID: "target", Attempts: 3, SuccessfulAttempts: 3, AverageLatencyMS: 1000, CheckedAt: checkedAt,
+			}, wanted: 70,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			status := scoreMonitoringRound("node", []domain.MonitoringProbeResult{test.result})
+			if status.Score != test.wanted || (status.Score >= MonitoringHealthyScore) != test.isHealthy {
+				t.Fatalf("score = %d, healthy = %v; want %d, %v", status.Score, status.Score >= MonitoringHealthyScore, test.wanted, test.isHealthy)
+			}
+		})
+	}
+}
+
+func failedMonitoringResult(targetID string, checkedAt time.Time) domain.MonitoringProbeResult {
+	return domain.MonitoringProbeResult{TargetID: targetID, Attempts: 3, Error: "connection refused", CheckedAt: checkedAt}
+}

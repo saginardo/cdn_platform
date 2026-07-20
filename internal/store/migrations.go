@@ -26,6 +26,41 @@ var schemaMigrations = []schemaMigration{
 	{Version: 9, Name: "rate-limit-ban-escalation", Apply: migrateRateLimitBanEscalation},
 	{Version: 10, Name: "node-cache-limits", Apply: migrateNodeCacheLimits},
 	{Version: 11, Name: "branding-logo", Apply: migrateBrandingLogo},
+	{Version: 12, Name: "tcp-monitoring", Apply: migrateTCPMonitoring},
+}
+
+func migrateTCPMonitoring(tx *sql.Tx) error {
+	if err := addColumnIfMissing(tx, "nodes", "monitor_auto_paused", "monitor_auto_paused INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`CREATE TABLE IF NOT EXISTS monitoring_targets (
+		id TEXT PRIMARY KEY,
+		address TEXT NOT NULL UNIQUE,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS node_monitoring_status (
+		node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+		score INTEGER NOT NULL,
+		success_rate REAL NOT NULL,
+		average_latency_ms REAL NOT NULL,
+		consecutive_abnormal INTEGER NOT NULL DEFAULT 0,
+		last_checked_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS monitoring_probe_results (
+		node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+		target_id TEXT NOT NULL REFERENCES monitoring_targets(id) ON DELETE CASCADE,
+		attempts INTEGER NOT NULL,
+		successful_attempts INTEGER NOT NULL,
+		average_latency_ms REAL NOT NULL,
+		error TEXT NOT NULL DEFAULT '',
+		checked_at TEXT NOT NULL,
+		PRIMARY KEY(node_id, target_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_monitoring_probe_target ON monitoring_probe_results(target_id, checked_at DESC);`)
+	return err
 }
 
 func migrateBrandingLogo(tx *sql.Tx) error {

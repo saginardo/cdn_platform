@@ -111,6 +111,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/backups/restores/{id}/commit", s.requireAdmin(s.commitOnlineRestore))
 	mux.HandleFunc("DELETE /api/backups/restores/{id}", s.requireAdmin(s.cancelOnlineRestore))
 	mux.HandleFunc("GET /api/security", s.requireAdmin(s.getSecurityOverview))
+	mux.HandleFunc("GET /api/monitoring", s.requireAdmin(s.monitoringOverview))
+	mux.HandleFunc("POST /api/monitoring/targets", s.requireAdmin(s.createMonitoringTarget))
+	mux.HandleFunc("PUT /api/monitoring/targets/{id}", s.requireAdmin(s.updateMonitoringTarget))
+	mux.HandleFunc("DELETE /api/monitoring/targets/{id}", s.requireAdmin(s.deleteMonitoringTarget))
 	mux.HandleFunc("POST /api/security/policies", s.requireAdmin(s.createSecurityPolicy))
 	mux.HandleFunc("PUT /api/security/policies/{id}", s.requireAdmin(s.updateSecurityPolicy))
 	mux.HandleFunc("DELETE /api/security/policies/{id}", s.requireAdmin(s.deleteSecurityPolicy))
@@ -154,6 +158,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/edge/v1/renew", s.requireEdge(s.renew))
 	mux.HandleFunc("GET /api/edge/v1/desired-state", s.requireEdge(s.desiredState))
 	mux.HandleFunc("POST /api/edge/v1/heartbeat", s.requireEdge(s.heartbeat))
+	mux.HandleFunc("GET /api/edge/v1/monitoring-targets", s.requireEdge(s.edgeMonitoringTargets))
+	mux.HandleFunc("POST /api/edge/v1/monitoring-results", s.requireEdge(s.edgeMonitoringReport))
 	mux.HandleFunc("GET /api/edge/v1/upgrade", s.requireEdge(s.edgeUpgradeInstruction))
 	mux.HandleFunc("POST /api/edge/v1/upgrade-report", s.requireEdge(s.edgeUpgradeReport))
 	mux.HandleFunc("POST /api/edge/v1/security-events", s.requireEdge(s.edgeSecurityEvents))
@@ -1560,7 +1566,7 @@ func writeStoreError(response http.ResponseWriter, err error) {
 		writeError(response, http.StatusNotFound, err)
 		return
 	}
-	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteChanged) || errors.Is(err, store.ErrNodeUpgradeActive) || errors.Is(err, store.ErrNodeOperationActive) || errors.Is(err, store.ErrUpgradeRetryNotReady) {
+	if errors.Is(err, store.ErrUninstallActive) || errors.Is(err, store.ErrUninstallNotActive) || errors.Is(err, store.ErrNodeAssigned) || errors.Is(err, store.ErrSiteDeleting) || errors.Is(err, store.ErrSiteTaskActive) || errors.Is(err, store.ErrSiteChanged) || errors.Is(err, store.ErrNodeUpgradeActive) || errors.Is(err, store.ErrNodeOperationActive) || errors.Is(err, store.ErrUpgradeRetryNotReady) || errors.Is(err, store.ErrMonitoringTargetExists) || errors.Is(err, store.ErrMonitoringTargetLimit) || errors.Is(err, store.ErrMonitoringTargetsChanged) {
 		writeError(response, http.StatusConflict, err)
 		return
 	}

@@ -26,19 +26,20 @@ const (
 )
 
 type Node struct {
-	ID              string     `json:"id"`
-	Name            string     `json:"name"`
-	PublicIPv4      string     `json:"public_ipv4"`
-	CacheMaxSizeGB  *int       `json:"cache_max_size_gb,omitempty"`
-	Status          NodeStatus `json:"status"`
-	Capabilities    []string   `json:"capabilities"`
-	AgentSHA256     string     `json:"agent_sha256,omitempty"`
-	ActiveUpgradeID string     `json:"active_upgrade_task_id,omitempty"`
-	LastHeartbeatAt *time.Time `json:"last_heartbeat_at,omitempty"`
-	AppliedVersion  int64      `json:"applied_version"`
-	LastError       string     `json:"last_error,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                string     `json:"id"`
+	Name              string     `json:"name"`
+	PublicIPv4        string     `json:"public_ipv4"`
+	CacheMaxSizeGB    *int       `json:"cache_max_size_gb,omitempty"`
+	Status            NodeStatus `json:"status"`
+	MonitorAutoPaused bool       `json:"monitor_auto_paused"`
+	Capabilities      []string   `json:"capabilities"`
+	AgentSHA256       string     `json:"agent_sha256,omitempty"`
+	ActiveUpgradeID   string     `json:"active_upgrade_task_id,omitempty"`
+	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
+	AppliedVersion    int64      `json:"applied_version"`
+	LastError         string     `json:"last_error,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type CacheStorageUsage struct {
@@ -81,6 +82,7 @@ const (
 	EdgeCapabilityCacheUsage     = "cache_usage_v1"
 	EdgeCapabilityMachineStatus  = "machine_status_v1"
 	EdgeCapabilityNginxFragments = "nginx_fragments_v1"
+	EdgeCapabilityTCPMonitoring  = "tcp_monitoring_v1"
 )
 
 type TCPForward struct {

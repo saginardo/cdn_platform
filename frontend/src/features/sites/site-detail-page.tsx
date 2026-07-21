@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
-  Cloud,
   KeyRound,
   LoaderCircle,
   Network,
@@ -74,7 +73,6 @@ import type {
 
 interface SiteDraft {
   name: string;
-  zone_id: string;
   domains: string;
   node_ids: string[];
   primary_url: string;
@@ -304,7 +302,7 @@ export function SiteDetailPage() {
                   </AlertDescription>
                 </Alert>
               ) : null}
-              <BasicSettings draft={draft} setDraft={setDraft} isNew={isNew} />
+              <BasicSettings draft={draft} setDraft={setDraft} />
               <TrafficSettings draft={draft} setDraft={setDraft} />
               <NodeSelector
                 nodes={nodes.data ?? []}
@@ -433,43 +431,30 @@ export function SiteDetailPage() {
 function BasicSettings({
   draft,
   setDraft,
-  isNew,
 }: {
   draft: SiteDraft;
   setDraft: (draft: SiteDraft) => void;
-  isNew: boolean;
 }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>基本配置</CardTitle>
-        <CardDescription>名称、Cloudflare 区域与入口域名</CardDescription>
+        <CardDescription>站点名称与入口域名</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-2">
-        <Field label="站点名称" id="site-name">
-          <Input
-            id="site-name"
-            required
-            maxLength={100}
-            value={draft.name}
-            onChange={(event) =>
-              setDraft({ ...draft, name: event.target.value })
-            }
-          />
-        </Field>
-        <Field label="Cloudflare 区域" id="site-zone">
-          {isNew ? (
-            <div
-              id="site-zone"
-              className="flex h-8 items-center gap-2 border bg-muted/30 px-3 text-sm text-muted-foreground"
-            >
-              <Cloud className="size-4" aria-hidden="true" />
-              根据域名自动识别
-            </div>
-          ) : (
-            <Input id="site-zone" disabled value={draft.zone_id} />
-          )}
-        </Field>
+        <div className="sm:col-span-2 sm:max-w-xl">
+          <Field label="站点名称" id="site-name">
+            <Input
+              id="site-name"
+              required
+              maxLength={100}
+              value={draft.name}
+              onChange={(event) =>
+                setDraft({ ...draft, name: event.target.value })
+              }
+            />
+          </Field>
+        </div>
         <div className="grid gap-2 sm:col-span-2">
           <Label htmlFor="site-domains">域名</Label>
           <Textarea
@@ -1504,7 +1489,6 @@ function localizeTaskDetail(detail?: string) {
 function emptyDraft(ttl: number): SiteDraft {
   return {
     name: "",
-    zone_id: "",
     domains: "",
     node_ids: [],
     primary_url: "https://",
@@ -1540,7 +1524,6 @@ function emptyForward(): TCPForward {
 function draftFromSite(site: Site, ttl: number): SiteDraft {
   return {
     name: site.name,
-    zone_id: site.zone_id,
     domains: site.domains.join(", "),
     node_ids: [...site.node_ids],
     primary_url: site.primary_origin.url,
@@ -1587,7 +1570,6 @@ function sitePayload(draft: SiteDraft) {
     tcp_forwards: draft.tcp_forwards,
     enabled: draft.enabled,
   };
-  if (draft.zone_id) payload.zone_id = draft.zone_id;
   if (draft.backup_enabled && draft.backup_url.trim())
     payload.backup_origin = {
       url: draft.backup_url,

@@ -782,6 +782,10 @@ test("sites list shows only the publish status", async ({ page }) => {
   await expect(
     page.getByText("Cache Version V2", { exact: true }),
   ).toBeVisible();
+  await expect(page.getByText("Cloudflare 区域", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.getByLabel("Cloudflare Zone ID")).toHaveCount(0);
 });
 
 test("certificate workspace shows renewal state and manual actions", async ({
@@ -852,7 +856,12 @@ test("new site discovers its Cloudflare zone from domains", async ({
   });
   await page.goto("/#/sites/new");
 
-  await expect(page.getByText("根据域名自动识别")).toBeVisible();
+  await expect(page.getByText("Cloudflare 区域", { exact: true })).toHaveCount(
+    0,
+  );
+  await expect(page.getByText("根据域名自动识别", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(page.getByLabel("Cloudflare Zone ID")).toHaveCount(0);
   await page.getByLabel("站点名称").fill("自动区域站点");
   await page.getByLabel("域名").fill("cdn.auto.example.com");

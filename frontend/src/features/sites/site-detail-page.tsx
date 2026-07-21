@@ -100,6 +100,12 @@ interface TLSStatus {
 interface Allowlist {
   site_id: string;
   ipv4_cidrs: string[];
+  nodes?: Array<{
+    node_id: string;
+    node_name: string;
+    ipv4_cidr: string;
+    assignment: "current" | "current_and_published" | "published_only";
+  }>;
   note: string;
 }
 
@@ -193,7 +199,20 @@ export function SiteDetailPage() {
       setDraft(next);
       setBaseline(JSON.stringify(next));
       setLoadedKey(saved.id);
+      queryClient.setQueryData<Site[]>(["sites"], (current) => {
+        if (!current) return current;
+        if (!current.some((item) => item.id === saved.id)) {
+          return [...current, saved];
+        }
+        return current.map((item) => (item.id === saved.id ? saved : item));
+      });
       void queryClient.invalidateQueries({ queryKey: ["sites"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["site-publish", saved.id],
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["site-allowlist", saved.id],
+      });
       toast.success(isNew ? "站点已创建" : "站点配置已保存");
       if (isNew)
         navigate(`/sites/${encodeURIComponent(saved.id)}`, { replace: true });
@@ -354,6 +373,7 @@ export function SiteDetailPage() {
               {site ? (
                 <SiteOperations
                   site={site}
+                  nodes={nodes.data ?? []}
                   tls={tls.data}
                   publish={publish.data}
                   deletion={deletion.data}
@@ -971,6 +991,7 @@ function TCPForwards({
 
 function SiteOperations({
   site,
+  nodes,
   tls,
   publish,
   deletion,
@@ -982,6 +1003,7 @@ function SiteOperations({
   onDelete,
 }: {
   site: Site;
+  nodes: Node[];
   tls?: TLSStatus;
   publish?: PublishStatus;
   deletion?: PublishStatus;
@@ -992,9 +1014,30 @@ function SiteOperations({
   onAllowlist: () => void;
   onDelete: () => void;
 }) {
-  const publishActive = activeTask(publish?.task);
+  const publishTask = site.deleting ? deletion?.task : publish?.task;
+  const operationNodes = site.deleting ? deletion?.nodes : publish?.nodes;
+  const publishActive = activeTask(publishTask);
   const certActive = activeTask(tls?.certificate_task);
-  const publishPagination = useListPagination(publish?.nodes ?? []);
+  const publishTaskCurrent = taskMatchesCurrentSite(publishTask, site);
+  const visiblePublishTask = publishTaskCurrent ? publishTask : undefined;
+  const nodeByID = new Map(nodes.map((node) => [node.id, node]));
+  const assignedNodes = site.node_ids.map((nodeID) => {
+    const node = nodeByID.get(nodeID);
+    return {
+      id: nodeID,
+      name: node?.name || nodeID,
+      publicIPv4: node?.public_ipv4,
+      status: node?.status,
+    };
+  });
+  const assignedPagination = useListPagination(assignedNodes);
+  const publishPagination = useListPagination(operationNodes ?? []);
+  const showPublishTargets = Boolean(
+    publishTaskCurrent &&
+    operationNodes?.length &&
+    (publishActive ||
+      ["partial", "failed"].includes(publishTask?.status ?? "")),
+  );
   const cacheable =
     !site.tcp_only &&
     !site.passthrough &&
@@ -1011,8 +1054,17 @@ function SiteOperations({
       <CardContent className="grid gap-3">
         <OperationState
           label="发布"
-          task={site.deleting ? deletion?.task : publish?.task}
-          fallback={site.published ? "已发布" : "尚未发布"}
+          task={visiblePublishTask}
+          fallback={
+            site.published
+              ? "已发布"
+              : `有未发布更改，目标 ${site.node_ids.length} 个节点`
+          }
+          detail={
+            site.published && visiblePublishTask?.status === "succeeded"
+              ? `当前配置已发布到 ${site.node_ids.length} 个边缘节点`
+              : undefined
+          }
         />
         {needsTLS ? (
           <OperationState
@@ -1022,6 +1074,63 @@ function SiteOperations({
             extra={tls?.published_after_certificate ? "已部署" : undefined}
           />
         ) : null}
+        <div className="border px-3 py-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm">节点分配</div>
+              <div className="text-xs text-muted-foreground">
+                {site.published ? "当前承载节点" : "待发布节点"} ·{" "}
+                {site.node_ids.length} 个
+              </div>
+            </div>
+            <StatusBadge
+              status={site.published ? "succeeded" : "pending"}
+              label={site.published ? "已发布" : "待发布"}
+            />
+          </div>
+          {assignedNodes.length ? (
+            <>
+              <div className="mt-3 max-h-44 overflow-auto border">
+                <Table>
+                  <TableBody>
+                    {assignedPagination.items.map((node) => (
+                      <TableRow key={node.id}>
+                        <TableCell className="text-xs">
+                          <span className="block">{node.name}</span>
+                          {node.publicIPv4 ? (
+                            <span className="font-mono text-muted-foreground">
+                              {node.publicIPv4}
+                            </span>
+                          ) : null}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {node.status ? (
+                            <StatusBadge status={node.status} />
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              信息缺失
+                            </span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              {assignedNodes.length > 20 ? (
+                <ListPagination
+                  pagination={assignedPagination}
+                  itemLabel="个节点"
+                  className="border-x border-b"
+                />
+              ) : null}
+            </>
+          ) : (
+            <p className="mt-3 text-xs text-muted-foreground">
+              当前配置未分配边缘节点
+            </p>
+          )}
+        </div>
         <Button
           type="button"
           disabled={site.deleting || pending || publishActive}
@@ -1070,8 +1179,11 @@ function SiteOperations({
           <ShieldCheck />
           源站白名单
         </Button>
-        {publish?.nodes?.length ? (
+        {showPublishTargets ? (
           <div className="border">
+            <div className="border-b px-3 py-2 text-xs text-muted-foreground">
+              {site.deleting ? "本次删除涉及节点" : "本次发布涉及节点"}
+            </div>
             <div className="max-h-44 overflow-auto">
               <Table>
                 <TableBody>
@@ -1117,16 +1229,29 @@ function AllowlistDialog({
   data?: Allowlist;
   loading: boolean;
 }) {
-  const pagination = useListPagination(data?.ipv4_cidrs ?? []);
+  const entries = data?.nodes?.length
+    ? data.nodes
+    : (data?.ipv4_cidrs ?? []).map((cidr, index) => ({
+        node_id: `legacy-${index}`,
+        node_name: "边缘节点",
+        ipv4_cidr: cidr,
+        assignment: "current" as const,
+      }));
+  const currentNodes = entries.filter(
+    (node) => node.assignment !== "published_only",
+  );
+  const pendingRemovalNodes = entries.filter(
+    (node) => node.assignment === "published_only",
+  );
+  const currentPagination = useListPagination(currentNodes);
+  const pendingRemovalPagination = useListPagination(pendingRemovalNodes);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>源站防火墙白名单</DialogTitle>
-          <DialogDescription>
-            允许当前草稿和已发布节点的 IPv4 CIDR
-          </DialogDescription>
+          <DialogDescription>当前配置与发布过渡期的节点地址</DialogDescription>
         </DialogHeader>
         {loading ? (
           <div className="py-8 text-center text-sm text-muted-foreground">
@@ -1134,22 +1259,38 @@ function AllowlistDialog({
           </div>
         ) : (
           <div className="space-y-3">
-            {data?.ipv4_cidrs.length ? (
+            {entries.length ? (
               <>
-                {pagination.items.map((cidr) => (
-                  <div
-                    key={cidr}
-                    className="flex items-center gap-2 border px-3 py-2"
-                  >
-                    <code className="min-w-0 flex-1 text-sm">{cidr}</code>
-                    <CopyButton value={cidr} />
-                  </div>
-                ))}
-                <ListPagination
-                  pagination={pagination}
-                  itemLabel="个地址"
-                  className="border"
+                <AllowlistNodeGroup
+                  title="当前配置节点"
+                  nodes={currentPagination.items}
+                  assignmentLabel="当前配置"
+                  assignmentStatus="succeeded"
                 />
+                {currentNodes.length > 20 ? (
+                  <ListPagination
+                    pagination={currentPagination}
+                    itemLabel="个节点"
+                    className="border"
+                  />
+                ) : null}
+                {pendingRemovalNodes.length ? (
+                  <>
+                    <AllowlistNodeGroup
+                      title="发布后移除"
+                      nodes={pendingRemovalPagination.items}
+                      assignmentLabel="过渡期保留"
+                      assignmentStatus="pending"
+                    />
+                    {pendingRemovalNodes.length > 20 ? (
+                      <ListPagination
+                        pagination={pendingRemovalPagination}
+                        itemLabel="个节点"
+                        className="border"
+                      />
+                    ) : null}
+                  </>
+                ) : null}
               </>
             ) : (
               <EmptyState title="暂无可用地址" />
@@ -1167,23 +1308,60 @@ function AllowlistDialog({
   );
 }
 
+function AllowlistNodeGroup({
+  title,
+  nodes,
+  assignmentLabel,
+  assignmentStatus,
+}: {
+  title: string;
+  nodes: NonNullable<Allowlist["nodes"]>;
+  assignmentLabel: string;
+  assignmentStatus: string;
+}) {
+  if (!nodes.length) return null;
+  return (
+    <div className="space-y-2">
+      <div className="text-xs font-medium text-muted-foreground">{title}</div>
+      {nodes.map((node) => (
+        <div
+          key={node.node_id}
+          className="flex flex-wrap items-center gap-2 border px-3 py-2"
+        >
+          <div className="min-w-40 flex-1">
+            <div className="truncate text-sm font-medium">{node.node_name}</div>
+            <code className="text-xs text-muted-foreground">
+              {node.ipv4_cidr}
+            </code>
+          </div>
+          <StatusBadge status={assignmentStatus} label={assignmentLabel} />
+          <CopyButton value={node.ipv4_cidr} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function OperationState({
   label,
   task,
   fallback,
   extra,
+  detail,
 }: {
   label: string;
   task?: DeploymentTask | null;
   fallback: string;
   extra?: string;
+  detail?: string;
 }) {
+  const visibleDetail = detail || localizeTaskDetail(task?.detail);
   return (
     <div className="flex items-start justify-between gap-3 border px-3 py-2 text-sm">
       <div>
         <span>{label}</span>
-        {task?.detail ? (
-          <p className="mt-1 text-xs text-muted-foreground">{task.detail}</p>
+        {visibleDetail ? (
+          <p className="mt-1 text-xs text-muted-foreground">{visibleDetail}</p>
         ) : null}
       </div>
       {task ? (
@@ -1269,6 +1447,59 @@ function activeTask(task?: DeploymentTask | null) {
   return Boolean(
     task && ["queued", "dispatching", "applying"].includes(task.status),
   );
+}
+
+function taskMatchesCurrentSite(
+  task: DeploymentTask | null | undefined,
+  site: Site,
+) {
+  if (!task) return false;
+  if (site.deleting || site.published || activeTask(task)) return true;
+  const taskCreatedAt = Date.parse(task.created_at);
+  const siteUpdatedAt = Date.parse(site.updated_at);
+  return (
+    Number.isFinite(taskCreatedAt) &&
+    Number.isFinite(siteUpdatedAt) &&
+    taskCreatedAt >= siteUpdatedAt
+  );
+}
+
+function localizeTaskDetail(detail?: string) {
+  if (!detail) return undefined;
+  const exact: Record<string, string> = {
+    "building node configurations": "正在生成边缘节点配置",
+    "preparing edge configuration confirmation": "正在等待边缘节点确认配置",
+    "configuration staged; no active assigned edge nodes to confirm":
+      "配置已暂存，当前没有需要确认的在线分配节点",
+    "publish task did not create edge confirmation targets; retry Publish":
+      "发布任务未生成边缘确认目标，请重试发布",
+    "queued for DNS-01 certificate issuance": "TLS 证书签发已排队",
+    "queued for certificate renewal": "TLS 证书续期已排队",
+    "preparing DNS-01 certificate issuance": "正在准备 DNS-01 证书签发",
+    "waiting for DNS-01 validation": "正在等待 DNS-01 验证",
+    "certificate renewed": "TLS 证书已续期",
+    "certificate stored; publish the site to deploy it":
+      "TLS 证书已保存，请发布站点以部署到边缘节点",
+    "certificate queue is full; retry Issue TLS":
+      "证书任务队列已满，请重试 TLS 签发",
+    "certificate issuance interrupted by control-plane shutdown; retry Issue TLS":
+      "控制面停止导致证书签发中断，请重试 TLS 签发",
+  };
+  if (exact[detail]) return exact[detail];
+  let match = detail.match(
+    /^configuration applied by (\d+) active edge node\(s\)$/,
+  );
+  if (match) return `配置变更已由 ${match[1]} 个受影响的在线边缘节点应用`;
+  match = detail.match(
+    /^configuration applied by (\d+) of (\d+) active edge node\(s\)$/,
+  );
+  if (match)
+    return `配置变更已由 ${match[1]}/${match[2]} 个受影响的在线边缘节点应用`;
+  match = detail.match(
+    /^(\d+) edge node\(s\) did not apply the configuration$/,
+  );
+  if (match) return `${match[1]} 个受影响的边缘节点未能应用配置`;
+  return detail;
 }
 
 function emptyDraft(ttl: number): SiteDraft {

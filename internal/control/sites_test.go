@@ -198,8 +198,12 @@ func TestOriginAllowlistIncludesPublishedAndDraftAssignments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sharedNode, err := database.CreateNode("edge-shared", "203.0.113.74")
+	if err != nil {
+		t.Fatal(err)
+	}
 	site, err := database.CreateSite(domain.Site{
-		Name: "allowlist", Domains: []string{"allowlist.example.test"}, Nodes: []string{oldNode.ID},
+		Name: "allowlist", Domains: []string{"allowlist.example.test"}, Nodes: []string{oldNode.ID, sharedNode.ID},
 		PrimaryOrigin: domain.Origin{URL: "https://origin.example.test", Enabled: true}, Enabled: true,
 	}, "zone")
 	if err != nil {
@@ -212,7 +216,7 @@ func TestOriginAllowlistIncludesPublishedAndDraftAssignments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	draft.Nodes = []string{newNode.ID}
+	draft.Nodes = []string{sharedNode.ID, newNode.ID}
 	if _, err := database.UpdateSite(draft, zoneID); err != nil {
 		t.Fatal(err)
 	}
@@ -224,14 +228,21 @@ func TestOriginAllowlistIncludesPublishedAndDraftAssignments(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("allowlist response = %d %s", response.Code, response.Body.String())
 	}
-	var payload struct {
-		CIDRs []string `json:"ipv4_cidrs"`
-	}
+	var payload originAllowlistResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if len(payload.CIDRs) != 2 || payload.CIDRs[0] != newNode.PublicIPv4+"/32" || payload.CIDRs[1] != oldNode.PublicIPv4+"/32" {
-		t.Fatalf("allowlist omitted a published or draft node: %#v", payload.CIDRs)
+	if len(payload.IPv4CIDRs) != 3 || payload.IPv4CIDRs[0] != sharedNode.PublicIPv4+"/32" ||
+		payload.IPv4CIDRs[1] != newNode.PublicIPv4+"/32" || payload.IPv4CIDRs[2] != oldNode.PublicIPv4+"/32" {
+		t.Fatalf("allowlist omitted a published or draft node: %#v", payload.IPv4CIDRs)
+	}
+	if len(payload.Nodes) != 3 || payload.Nodes[0].NodeName != sharedNode.Name || payload.Nodes[0].Assignment != "current_and_published" ||
+		payload.Nodes[1].NodeName != newNode.Name || payload.Nodes[1].Assignment != "current" ||
+		payload.Nodes[2].NodeName != oldNode.Name || payload.Nodes[2].Assignment != "published_only" {
+		t.Fatalf("allowlist node assignments = %#v", payload.Nodes)
+	}
+	if !strings.Contains(payload.Note, "待移除") {
+		t.Fatalf("allowlist note did not explain the published-only node: %q", payload.Note)
 	}
 }
 

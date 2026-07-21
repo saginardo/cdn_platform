@@ -683,6 +683,142 @@ test("sites list shows only the publish status", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("site operations show current assignments instead of publish task targets", async ({
+  page,
+}, testInfo) => {
+  const previous = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const currentSite = {
+    ...site,
+    name: "API 加速",
+    domains: ["api.dustk.com"],
+    node_ids: ["gateway", "vmiss-lax"],
+    published: true,
+    updated_at: now.toISOString(),
+  };
+  const edgeNodes = [
+    ["andnode", "andnode", "203.0.113.10"],
+    ["gateway", "gateway", "203.0.113.11"],
+    ["geelinx", "geelinx", "203.0.113.12"],
+    ["vmiss-lax", "vmiss-lax", "203.0.113.13"],
+  ].map(([id, name, publicIPv4]) => ({
+    id,
+    name,
+    public_ipv4: publicIPv4,
+    status: "active",
+  }));
+  await mockAPI(page, {
+    "/api/sites": [currentSite],
+    "/api/nodes": edgeNodes,
+    "/api/sites/site-1/publish-status": {
+      task: {
+        id: "publish-old",
+        kind: "publish_site",
+        site_id: "site-1",
+        status: "succeeded",
+        detail: "configuration applied by 3 active edge node(s)",
+        created_at: previous,
+        updated_at: previous,
+      },
+      nodes: [
+        {
+          node_id: "andnode",
+          node_name: "andnode",
+          target_version: 7,
+          status: "succeeded",
+        },
+        {
+          node_id: "gateway",
+          node_name: "gateway",
+          target_version: 7,
+          status: "succeeded",
+        },
+        {
+          node_id: "geelinx",
+          node_name: "geelinx",
+          target_version: 7,
+          status: "succeeded",
+        },
+      ],
+    },
+    "/api/sites/site-1/tls-status": {
+      certificate_task: {
+        id: "tls-1",
+        kind: "issue_certificate",
+        site_id: "site-1",
+        status: "succeeded",
+        detail: "certificate stored; publish the site to deploy it",
+        created_at: previous,
+        updated_at: previous,
+      },
+      published_after_certificate: false,
+    },
+    "/api/sites/site-1/origin-allowlist": {
+      site_id: "site-1",
+      ipv4_cidrs: ["203.0.113.11/32", "203.0.113.13/32"],
+      nodes: [
+        {
+          node_id: "gateway",
+          node_name: "gateway",
+          ipv4_cidr: "203.0.113.11/32",
+          assignment: "current_and_published",
+        },
+        {
+          node_id: "vmiss-lax",
+          node_name: "vmiss-lax",
+          ipv4_cidr: "203.0.113.13/32",
+          assignment: "current_and_published",
+        },
+      ],
+      note: "源站防火墙或安全组需允许当前配置节点的 IPv4 CIDR。",
+    },
+  });
+  await page.goto("/#/sites/site-1");
+
+  const operations = page
+    .locator('[data-slot="card"]')
+    .filter({ hasText: "发布与运维" });
+  await expect(
+    operations.getByText("当前配置已发布到 2 个边缘节点"),
+  ).toBeVisible();
+  await expect(operations.getByText(/当前承载节点.*2 个/)).toBeVisible();
+  await expect(operations.getByText("gateway", { exact: true })).toBeVisible();
+  await expect(
+    operations.getByText("vmiss-lax", { exact: true }),
+  ).toBeVisible();
+  await expect(operations.getByText("andnode", { exact: true })).toHaveCount(0);
+  await expect(operations.getByText("geelinx", { exact: true })).toHaveCount(0);
+  await expect(
+    operations.getByText("TLS 证书已保存，请发布站点以部署到边缘节点"),
+  ).toBeVisible();
+  await expect(operations.getByText(/configuration applied by/)).toHaveCount(0);
+  await expect(operations.getByText(/certificate stored/)).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("site-operations-current-nodes.png"),
+    fullPage: true,
+  });
+
+  await operations.getByRole("button", { name: "源站白名单" }).click();
+  const dialog = page.getByRole("dialog", { name: "源站防火墙白名单" });
+  await expect(dialog.getByText("当前配置节点", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("gateway", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("vmiss-lax", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("发布后移除")).toHaveCount(0);
+  await expect(dialog.getByText("andnode", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText("geelinx", { exact: true })).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("origin-allowlist-assignments.png"),
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("origin-allowlist-mobile.png"),
+  });
+});
+
 test("SMTP test shows progress and keeps timeout feedback visible", async ({
   page,
 }) => {

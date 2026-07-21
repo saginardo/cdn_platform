@@ -908,21 +908,52 @@ func (s *Server) tlsStatus(response http.ResponseWriter, request *http.Request) 
 	writeJSON(response, http.StatusOK, status)
 }
 
+type originAllowlistNode struct {
+	NodeID     string `json:"node_id"`
+	NodeName   string `json:"node_name"`
+	IPv4CIDR   string `json:"ipv4_cidr"`
+	Assignment string `json:"assignment"`
+}
+
+type originAllowlistResponse struct {
+	SiteID    string                `json:"site_id"`
+	IPv4CIDRs []string              `json:"ipv4_cidrs"`
+	Nodes     []originAllowlistNode `json:"nodes"`
+	Note      string                `json:"note"`
+}
+
 func (s *Server) originAllowlist(response http.ResponseWriter, request *http.Request) {
 	site, _, err := s.Store.GetSite(request.PathValue("id"))
 	if err != nil {
 		writeStoreError(response, err)
 		return
 	}
-	nodeIDs := append([]string(nil), site.Nodes...)
+	currentNodes := make(map[string]bool, len(site.Nodes))
+	publishedNodes := make(map[string]bool)
+	nodeIDs := make([]string, 0, len(site.Nodes))
+	for _, nodeID := range site.Nodes {
+		currentNodes[nodeID] = true
+		nodeIDs = append(nodeIDs, nodeID)
+	}
 	publication, publicationErr := s.Store.SitePublication(site.ID)
 	if publicationErr == nil {
-		nodeIDs = append(nodeIDs, publication.Site.Nodes...)
+		publishedNodes = make(map[string]bool, len(publication.Site.Nodes))
+		for _, nodeID := range publication.Site.Nodes {
+			publishedNodes[nodeID] = true
+			if !currentNodes[nodeID] {
+				nodeIDs = append(nodeIDs, nodeID)
+			}
+		}
 	} else if !errors.Is(publicationErr, store.ErrNotFound) {
 		writeStoreError(response, publicationErr)
 		return
 	}
-	addresses := make([]string, 0, len(nodeIDs))
+	result := originAllowlistResponse{
+		SiteID:    site.ID,
+		IPv4CIDRs: make([]string, 0, len(nodeIDs)),
+		Nodes:     make([]originAllowlistNode, 0, len(nodeIDs)),
+		Note:      "源站防火墙或安全组需允许当前配置节点的 IPv4 CIDR。",
+	}
 	seenNodes := make(map[string]bool, len(nodeIDs))
 	for _, nodeID := range nodeIDs {
 		if seenNodes[nodeID] {
@@ -933,9 +964,20 @@ func (s *Server) originAllowlist(response http.ResponseWriter, request *http.Req
 		if err != nil || node.Status == domain.NodeRevoked || node.Status == domain.NodeUninstalling || node.Status == domain.NodeUninstalled {
 			continue
 		}
-		addresses = append(addresses, node.PublicIPv4+"/32")
+		assignment := "current"
+		if currentNodes[nodeID] && publishedNodes[nodeID] {
+			assignment = "current_and_published"
+		} else if publishedNodes[nodeID] {
+			assignment = "published_only"
+			result.Note = "发布完成前，源站防火墙需同时允许当前配置节点和待移除的已发布节点。"
+		}
+		cidr := node.PublicIPv4 + "/32"
+		result.IPv4CIDRs = append(result.IPv4CIDRs, cidr)
+		result.Nodes = append(result.Nodes, originAllowlistNode{
+			NodeID: node.ID, NodeName: node.Name, IPv4CIDR: cidr, Assignment: assignment,
+		})
 	}
-	writeJSON(response, http.StatusOK, map[string]any{"site_id": site.ID, "ipv4_cidrs": addresses, "note": "Allow these edge IPv4 CIDRs at the origin firewall or security group. While node changes are pending, the list includes both published and draft assignments."})
+	writeJSON(response, http.StatusOK, result)
 }
 
 func (s *Server) getTask(response http.ResponseWriter, request *http.Request) {

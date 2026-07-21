@@ -428,7 +428,9 @@ func (s *Server) notifyMonitoringTransition(ctx context.Context, nodeID string, 
 		notification.Severity = integrations.NotificationSeverityError
 		notification.Subject = "[CDN] 节点拨测异常，已暂停流量"
 		notification.Message = "节点连续多轮拨测低于健康阈值，控制面已自动暂停该节点，避免继续调度流量。"
-		notification.SuppressUntilResolved = false
+		// Repeated reports retry a failed first delivery, while a successfully
+		// delivered incident remains suppressed until its recovery notification.
+		notification.SuppressUntilResolved = true
 	} else {
 		notification.Severity = integrations.NotificationSeveritySuccess
 		notification.Subject = "[CDN] 节点拨测恢复，已恢复流量"

@@ -141,7 +141,7 @@ func TestMonitoringReportNotifiesConfirmedAnomalyAndRecovery(t *testing.T) {
 		t.Fatalf("anomaly notifications = %#v", notifier.notifications)
 	}
 	anomaly := notifier.notifications[0]
-	if anomaly.Category != integrations.NotificationCategoryMonitoring || anomaly.Severity != integrations.NotificationSeverityError || anomaly.SuppressUntilResolved || anomaly.Cooldown != 5*time.Minute || anomaly.Key == "" {
+	if anomaly.Category != integrations.NotificationCategoryMonitoring || anomaly.Severity != integrations.NotificationSeverityError || !anomaly.SuppressUntilResolved || anomaly.Cooldown != 5*time.Minute || anomaly.Key == "" {
 		t.Fatalf("anomaly notification = %#v", anomaly)
 	}
 	healthyBody, _ := json.Marshal(monitoringReportRequest{Results: []domain.MonitoringProbeResult{{

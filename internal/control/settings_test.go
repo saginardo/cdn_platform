@@ -230,6 +230,15 @@ func TestSettingsManagerFiltersCategoriesAndPersistsNotificationCooldown(t *test
 	if len(delivered) != 1 {
 		t.Fatalf("same incident delivered %d notifications", len(delivered))
 	}
+	if err := database.MarkNotificationDelivered(deliveryKey, true, time.Now().UTC().Add(-6*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.NotifyNotification(context.Background(), anomaly); err != nil {
+		t.Fatal(err)
+	}
+	if len(delivered) != 1 {
+		t.Fatal("active incident was resent after the cooldown elapsed")
+	}
 	reloaded, err := NewSettingsManager(database, cipher, environment)
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +251,7 @@ func TestSettingsManagerFiltersCategoriesAndPersistsNotificationCooldown(t *test
 		t.Fatal(err)
 	}
 	if len(delivered) != 1 {
-		t.Fatal("cooldown did not survive settings manager restart")
+		t.Fatal("active incident suppression did not survive settings manager restart")
 	}
 	recovery := integrations.Notification{
 		Category: integrations.NotificationCategoryMonitoring, Subject: "recovered", Key: deliveryKey,
@@ -253,6 +262,9 @@ func TestSettingsManagerFiltersCategoriesAndPersistsNotificationCooldown(t *test
 	}
 	if len(delivered) != 2 || !delivered[1].Resolved {
 		t.Fatalf("recovery notifications = %#v", delivered)
+	}
+	if err := database.MarkNotificationDelivered(deliveryKey, false, time.Now().UTC()); err != nil {
+		t.Fatal(err)
 	}
 	if err := reloaded.NotifyNotification(context.Background(), anomaly); err != nil {
 		t.Fatal(err)

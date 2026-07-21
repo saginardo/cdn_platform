@@ -82,6 +82,67 @@ const site = {
   updated_at: now.toISOString(),
 };
 
+const certificateOverview = {
+  renewal_window_days: 30,
+  reconcile_interval_seconds: 43_200,
+  sites: [
+    {
+      site_id: "site-1",
+      site_name: "静态资源主站",
+      domains: ["cdn.example.com"],
+      enabled: true,
+      published: true,
+      deleting: false,
+      needs_certificate: true,
+      certificate_present: true,
+      certificate_updated_at: now.toISOString(),
+      not_after: new Date(now.getTime() + 60 * 86_400_000).toISOString(),
+      renewal_due_at: new Date(now.getTime() + 30 * 86_400_000).toISOString(),
+      published_after_certificate: true,
+      task: null,
+    },
+    {
+      site_id: "site-2",
+      site_name: "临近续期 API",
+      domains: ["api.example.com"],
+      enabled: true,
+      published: true,
+      deleting: false,
+      needs_certificate: true,
+      certificate_present: true,
+      certificate_updated_at: series[20].time,
+      not_after: new Date(now.getTime() + 10 * 86_400_000).toISOString(),
+      renewal_due_at: new Date(now.getTime() - 20 * 86_400_000).toISOString(),
+      published_after_certificate: false,
+      task: null,
+    },
+    {
+      site_id: "site-3",
+      site_name: "尚未签发站点",
+      domains: ["new.example.com"],
+      enabled: true,
+      published: false,
+      deleting: false,
+      needs_certificate: true,
+      certificate_present: false,
+      published_after_certificate: false,
+      task: null,
+    },
+    {
+      site_id: "site-4",
+      site_name: "明文 TCP 入口",
+      domains: ["tcp.example.com"],
+      enabled: true,
+      published: true,
+      deleting: false,
+      needs_certificate: false,
+      certificate_present: false,
+      published_after_certificate: false,
+      task: null,
+    },
+  ],
+};
+
 const monitoring = {
   interval_seconds: 30,
   attempts_per_round: 3,
@@ -304,6 +365,45 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     if (
+      route.request().method() === "POST" &&
+      (url.pathname.match(/^\/api\/certificates\/[^/]+\/renew$/) ||
+        url.pathname.match(/^\/api\/sites\/[^/]+\/certificate$/))
+    ) {
+      const siteID = url.pathname.split("/")[3];
+      await route.fulfill({
+        status: 202,
+        contentType: "application/json",
+        body: JSON.stringify({
+          id: "certificate-task-new",
+          kind: url.pathname.endsWith("renew")
+            ? "renew_certificate"
+            : "issue_certificate",
+          site_id: siteID,
+          status: "queued",
+          created_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        }),
+      });
+      return;
+    }
+    if (url.pathname === "/api/sites" && route.request().method() === "POST") {
+      const input = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...site,
+          ...input,
+          id: "site-created",
+          zone_id: "zone-resolved",
+          published: false,
+          created_at: now.toISOString(),
+          updated_at: now.toISOString(),
+        }),
+      });
+      return;
+    }
+    if (
       url.pathname === "/api/settings/branding" &&
       route.request().method() === "PUT"
     ) {
@@ -425,6 +525,7 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       "/api/branding": branding,
       "/api/messages": { messages: [], unread_count: 0 },
       "/api/overview": overview,
+      "/api/certificates": certificateOverview,
       "/api/sites": [site],
       "/api/sites/site-1/publish-status": {
         task: {
@@ -681,6 +782,92 @@ test("sites list shows only the publish status", async ({ page }) => {
   await expect(
     page.getByText("Cache Version V2", { exact: true }),
   ).toBeVisible();
+});
+
+test("certificate workspace shows renewal state and manual actions", async ({
+  page,
+}, testInfo) => {
+  const errors = trackPageErrors(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockAPI(page);
+  await page.goto("/#/certificates");
+
+  await expect(
+    page.getByRole("heading", { name: "证书", level: 1 }),
+  ).toBeVisible();
+  const table = page.getByRole("table");
+  await expect(table.getByRole("link", { name: "静态资源主站" })).toBeVisible();
+  await expect(table.getByText("有效", { exact: true })).toBeVisible();
+  await expect(table.getByText("待续期", { exact: true })).toBeVisible();
+  await expect(table.getByText("未签发", { exact: true })).toBeVisible();
+  await expect(table.getByText("无需证书", { exact: true })).toBeVisible();
+  await expect(table.getByText("待发布", { exact: true })).toBeVisible();
+
+  const renewalRequest = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname === "/api/certificates/site-1/renew" &&
+      request.method() === "POST",
+  );
+  await page.getByRole("button", { name: "手动续期" }).first().click();
+  await renewalRequest;
+  await expect(page.getByText("证书续期已排队")).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("certificates-desktop.png"),
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "证书", level: 1 }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("certificates-mobile.png"),
+    fullPage: true,
+  });
+  expect(errors).toEqual([]);
+});
+
+test("new site discovers its Cloudflare zone from domains", async ({
+  page,
+}) => {
+  await mockAPI(page, {
+    "/api/nodes": [
+      {
+        id: "node-auto",
+        name: "edge-auto",
+        public_ipv4: "203.0.113.92",
+        status: "active",
+        capabilities: [],
+        applied_version: 1,
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      },
+    ],
+  });
+  await page.goto("/#/sites/new");
+
+  await expect(page.getByText("根据域名自动识别")).toBeVisible();
+  await expect(page.getByLabel("Cloudflare Zone ID")).toHaveCount(0);
+  await page.getByLabel("站点名称").fill("自动区域站点");
+  await page.getByLabel("域名").fill("cdn.auto.example.com");
+  await page.getByLabel("源站 URL").fill("https://origin.auto.example.com");
+  await page.getByText("edge-auto", { exact: true }).click();
+
+  const createRequest = page.waitForRequest(
+    (request) =>
+      new URL(request.url()).pathname === "/api/sites" &&
+      request.method() === "POST",
+  );
+  await page.getByRole("button", { name: "创建站点" }).click();
+  const request = await createRequest;
+  expect(request.postDataJSON()).not.toHaveProperty("zone_id");
+  await expect(page.getByText("站点已创建")).toBeVisible();
 });
 
 test("site operations show current assignments instead of publish task targets", async ({
@@ -1415,6 +1602,7 @@ test("all primary workspaces and the new-site editor mount without runtime error
     ["monitoring", "监测"],
     ["nodes", "节点"],
     ["sites", "站点"],
+    ["certificates", "证书"],
     ["sites/new", "添加站点"],
     ["settings", "设置"],
   ]) {

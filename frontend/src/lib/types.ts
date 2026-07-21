@@ -255,6 +255,28 @@ export interface DeploymentTask {
   updated_at: string;
 }
 
+export interface CertificateSiteStatus {
+  site_id: string;
+  site_name: string;
+  domains: string[];
+  enabled: boolean;
+  published: boolean;
+  deleting: boolean;
+  needs_certificate: boolean;
+  certificate_present: boolean;
+  certificate_updated_at?: string;
+  not_after?: string;
+  renewal_due_at?: string;
+  published_after_certificate: boolean;
+  task: DeploymentTask | null;
+}
+
+export interface CertificateOverview {
+  renewal_window_days: number;
+  reconcile_interval_seconds: number;
+  sites: CertificateSiteStatus[];
+}
+
 export interface PublishStatus {
   task: DeploymentTask | null;
   nodes: Array<{

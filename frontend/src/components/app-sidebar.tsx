@@ -1,5 +1,6 @@
 import {
   Activity,
+  BadgeCheck,
   LayoutDashboard,
   LogOut,
   ScrollText,
@@ -42,6 +43,7 @@ const groups = [
       { label: "监测", to: "/monitoring", icon: Activity },
       { label: "节点", to: "/nodes", icon: Server },
       { label: "站点", to: "/sites", icon: Waypoints },
+      { label: "证书", to: "/certificates", icon: BadgeCheck },
     ],
   },
   {

@@ -244,6 +244,100 @@ func TestTLSStatusReportsPublicationAfterCertificate(t *testing.T) {
 	}
 }
 
+func TestCertificateOverviewAndManualRenewalAPI(t *testing.T) {
+	database, site, manager, issuer := newCertificateTestManager(t)
+	manager.Start(context.Background())
+	t.Cleanup(manager.Stop)
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	notAfter := time.Now().UTC().Add(45 * 24 * time.Hour).Round(0)
+	if err := database.SaveCertificate(site.ID, []byte("encrypted-certificate"), []byte("encrypted-key"), &notAfter); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	publishTask, err := database.CreateTask("publish_site", site.ID, "certificate published")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateTask(publishTask.ID, domain.TaskSucceeded, publishTask.Detail); err != nil {
+		t.Fatal(err)
+	}
+	withoutTLS, err := database.CreateSite(domain.Site{
+		Name:    "tcp cleartext",
+		Domains: []string{"tcp.example.test"},
+		Nodes:   append([]string(nil), site.Nodes...),
+		TCPOnly: true,
+		TCPForwards: []domain.TCPForward{{
+			Name: "SMTP", ListenPort: 25, UpstreamHost: "mail.example.test", UpstreamPort: 25,
+		}},
+		Enabled: true,
+	}, "zone")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{Store: database, CertificateManager: manager}
+	request := httptest.NewRequest(http.MethodGet, "/api/certificates", nil)
+	request.AddCookie(&http.Cookie{Name: "cdn_session", Value: "session-token"})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("overview response = %d %s", response.Code, response.Body.String())
+	}
+	var overview certificateOverviewResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &overview); err != nil {
+		t.Fatal(err)
+	}
+	if overview.RenewalWindowDays != 30 || overview.ReconcileIntervalSeconds != 12*60*60 || len(overview.Sites) != 2 {
+		t.Fatalf("overview metadata = %#v", overview)
+	}
+	var certificateStatus, noTLSStatus *certificateSiteStatus
+	for index := range overview.Sites {
+		entry := &overview.Sites[index]
+		if entry.SiteID == site.ID {
+			certificateStatus = entry
+		}
+		if entry.SiteID == withoutTLS.ID {
+			noTLSStatus = entry
+		}
+	}
+	if certificateStatus == nil || !certificateStatus.CertificatePresent || !certificateStatus.PublishedAfterCertificate || certificateStatus.NotAfter == nil || certificateStatus.RenewalDueAt == nil {
+		t.Fatalf("certificate status = %#v", certificateStatus)
+	}
+	wantRenewalDue := notAfter.Add(-certificateRenewalWindow)
+	if !certificateStatus.NotAfter.Equal(notAfter) || !certificateStatus.RenewalDueAt.Equal(wantRenewalDue) {
+		t.Fatalf("certificate dates = notAfter %v, renewal %v", certificateStatus.NotAfter, certificateStatus.RenewalDueAt)
+	}
+	if noTLSStatus == nil || noTLSStatus.NeedsCertificate || noTLSStatus.CertificatePresent {
+		t.Fatalf("cleartext TCP status = %#v", noTLSStatus)
+	}
+
+	renewRequest := httptest.NewRequest(http.MethodPost, "/api/certificates/"+site.ID+"/renew", nil)
+	renewRequest.AddCookie(&http.Cookie{Name: "cdn_session", Value: "session-token"})
+	renewRequest.Header.Set("X-CSRF-Token", "csrf-token")
+	renewResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(renewResponse, renewRequest)
+	if renewResponse.Code != http.StatusAccepted {
+		t.Fatalf("renew response = %d %s", renewResponse.Code, renewResponse.Body.String())
+	}
+	var renewalTask domain.DeploymentTask
+	if err := json.Unmarshal(renewResponse.Body.Bytes(), &renewalTask); err != nil {
+		t.Fatal(err)
+	}
+	if renewalTask.Kind != renewCertificateTask || renewalTask.SiteID != site.ID {
+		t.Fatalf("renewal task = %#v", renewalTask)
+	}
+	select {
+	case <-issuer.started:
+	case <-time.After(time.Second):
+		t.Fatal("renewal issuer was not started")
+	}
+}
+
 func getTLSStatus(t *testing.T, server *Server, siteID string) tlsStatusResponse {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodGet, "/api/sites/"+siteID+"/tls-status", nil)

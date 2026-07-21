@@ -37,8 +37,10 @@ type certificateJob struct {
 }
 
 const (
-	manualCertificateTask = "issue_certificate"
-	renewCertificateTask  = "renew_certificate"
+	manualCertificateTask        = "issue_certificate"
+	renewCertificateTask         = "renew_certificate"
+	certificateReconcileInterval = 12 * time.Hour
+	certificateRenewalWindow     = 30 * 24 * time.Hour
 )
 
 // Start establishes the worker lifetime independently of individual HTTP
@@ -78,7 +80,7 @@ func (m *CertificateManager) Stop() {
 
 func (m *CertificateManager) Run(ctx context.Context) {
 	m.Start(ctx)
-	ticker := time.NewTicker(12 * time.Hour)
+	ticker := time.NewTicker(certificateReconcileInterval)
 	defer ticker.Stop()
 	for {
 		m.Reconcile(ctx)
@@ -104,7 +106,7 @@ func (m *CertificateManager) Reconcile(ctx context.Context) {
 			continue
 		}
 		_, _, notAfter, certificateErr := m.Store.Certificate(site.ID)
-		if certificateErr == nil && notAfter != nil && notAfter.After(time.Now().UTC().Add(30*24*time.Hour)) {
+		if certificateErr == nil && notAfter != nil && notAfter.After(time.Now().UTC().Add(certificateRenewalWindow)) {
 			continue
 		}
 		if _, _, err := m.QueueRenewal(site); err != nil && m.Notifier != nil {

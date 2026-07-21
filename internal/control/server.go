@@ -43,6 +43,7 @@ type Server struct {
 	CA                  *InternalCA
 	Publisher           Publisher
 	DNS                 integrations.DNSProvider
+	ZoneResolver        integrations.ZoneResolver
 	Cloudflare          *integrations.CloudflareDNS
 	Issuer              integrations.CertificateIssuer
 	CertificateManager  *CertificateManager
@@ -144,6 +145,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/nodes/{id}/uninstall/force-complete", s.requireAdmin(s.forceCompleteNodeUninstall))
 	mux.HandleFunc("DELETE /api/nodes/{id}", s.requireAdmin(s.deleteNode))
 	mux.HandleFunc("GET /api/sites", s.requireAdmin(s.listSites))
+	mux.HandleFunc("GET /api/certificates", s.requireAdmin(s.certificatesOverview))
+	mux.HandleFunc("POST /api/certificates/{id}/renew", s.requireAdmin(s.renewCertificate))
 	mux.HandleFunc("POST /api/sites", s.requireAdmin(s.createSite))
 	mux.HandleFunc("PUT /api/sites/{id}", s.requireAdmin(s.updateSite))
 	mux.HandleFunc("DELETE /api/sites/{id}", s.requireAdmin(s.deleteSite))
@@ -696,7 +699,29 @@ func (s *Server) createSite(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
-	site, err := s.Store.CreateSite(input.site("", nil), input.ZoneID)
+	siteInput := input.site("", nil)
+	if err := domain.NormalizeAndValidateSite(&siteInput); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	zoneID := strings.TrimSpace(input.ZoneID)
+	if zoneID == "" {
+		if s.ZoneResolver == nil {
+			writeError(response, http.StatusServiceUnavailable, errors.New("Cloudflare zone discovery is not configured"))
+			return
+		}
+		var err error
+		zoneID, err = s.ZoneResolver.ResolveZoneID(request.Context(), siteInput.Domains)
+		if err != nil {
+			status := http.StatusBadGateway
+			if errors.Is(err, integrations.ErrZoneNotFound) || errors.Is(err, integrations.ErrZoneMismatch) {
+				status = http.StatusBadRequest
+			}
+			writeError(response, status, err)
+			return
+		}
+	}
+	site, err := s.Store.CreateSite(siteInput, zoneID)
 	if err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
@@ -710,7 +735,7 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 	if !readJSON(response, request, &input) {
 		return
 	}
-	current, _, err := s.Store.GetSite(request.PathValue("id"))
+	current, currentZoneID, err := s.Store.GetSite(request.PathValue("id"))
 	if err != nil {
 		writeStoreError(response, err)
 		return
@@ -736,7 +761,11 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 	if input.ReadWriteTimeoutSeconds == nil {
 		siteInput.ReadWriteTimeoutSeconds = current.ReadWriteTimeoutSeconds
 	}
-	site, err := s.Store.UpdateSite(siteInput, input.ZoneID)
+	zoneID := strings.TrimSpace(input.ZoneID)
+	if zoneID == "" {
+		zoneID = currentZoneID
+	}
+	site, err := s.Store.UpdateSite(siteInput, zoneID)
 	if err != nil {
 		writeStoreError(response, err)
 		return

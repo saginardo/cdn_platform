@@ -59,6 +59,11 @@ const SitesPage = lazy(() =>
     default: module.SitesPage,
   })),
 );
+const CertificatesPage = lazy(() =>
+  import("@/features/certificates/certificates-page").then((module) => ({
+    default: module.CertificatesPage,
+  })),
+);
 const SiteDetailPage = lazy(() =>
   import("@/features/sites/site-detail-page").then((module) => ({
     default: module.SiteDetailPage,
@@ -118,6 +123,10 @@ export default function App() {
                     <Route path="/sites" element={<SitesPage />} />
                     <Route path="/sites/new" element={<SiteDetailPage />} />
                     <Route path="/sites/:siteId" element={<SiteDetailPage />} />
+                    <Route
+                      path="/certificates"
+                      element={<CertificatesPage />}
+                    />
                     <Route path="/settings" element={<SettingsPage />} />
                     <Route
                       path="*"

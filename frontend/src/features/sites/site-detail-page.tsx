@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft,
+  Cloud,
   KeyRound,
   LoaderCircle,
   Network,
@@ -303,11 +304,7 @@ export function SiteDetailPage() {
                   </AlertDescription>
                 </Alert>
               ) : null}
-              <BasicSettings
-                draft={draft}
-                setDraft={setDraft}
-                zoneLocked={!isNew}
-              />
+              <BasicSettings draft={draft} setDraft={setDraft} isNew={isNew} />
               <TrafficSettings draft={draft} setDraft={setDraft} />
               <NodeSelector
                 nodes={nodes.data ?? []}
@@ -436,11 +433,11 @@ export function SiteDetailPage() {
 function BasicSettings({
   draft,
   setDraft,
-  zoneLocked,
+  isNew,
 }: {
   draft: SiteDraft;
   setDraft: (draft: SiteDraft) => void;
-  zoneLocked: boolean;
+  isNew: boolean;
 }) {
   return (
     <Card>
@@ -460,16 +457,18 @@ function BasicSettings({
             }
           />
         </Field>
-        <Field label="Cloudflare Zone ID" id="site-zone">
-          <Input
-            id="site-zone"
-            required
-            disabled={zoneLocked}
-            value={draft.zone_id}
-            onChange={(event) =>
-              setDraft({ ...draft, zone_id: event.target.value })
-            }
-          />
+        <Field label="Cloudflare 区域" id="site-zone">
+          {isNew ? (
+            <div
+              id="site-zone"
+              className="flex h-8 items-center gap-2 border bg-muted/30 px-3 text-sm text-muted-foreground"
+            >
+              <Cloud className="size-4" aria-hidden="true" />
+              根据域名自动识别
+            </div>
+          ) : (
+            <Input id="site-zone" disabled value={draft.zone_id} />
+          )}
         </Field>
         <div className="grid gap-2 sm:col-span-2">
           <Label htmlFor="site-domains">域名</Label>
@@ -1570,7 +1569,6 @@ function splitList(value: string) {
 function sitePayload(draft: SiteDraft) {
   const payload: Record<string, unknown> = {
     name: draft.name,
-    zone_id: draft.zone_id,
     domains: splitList(draft.domains),
     node_ids: draft.node_ids,
     primary_origin: {
@@ -1589,6 +1587,7 @@ function sitePayload(draft: SiteDraft) {
     tcp_forwards: draft.tcp_forwards,
     enabled: draft.enabled,
   };
+  if (draft.zone_id) payload.zone_id = draft.zone_id;
   if (draft.backup_enabled && draft.backup_url.trim())
     payload.backup_origin = {
       url: draft.backup_url,

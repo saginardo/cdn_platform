@@ -3,11 +3,70 @@ package integrations
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestCloudflareDNSResolvesMostSpecificZoneAcrossPages(t *testing.T) {
+	pages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/zones" {
+			t.Fatalf("unexpected request %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer token" {
+			t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+		}
+		pages++
+		if request.URL.Query().Get("page") == "1" {
+			_ = json.NewEncoder(response).Encode(map[string]any{
+				"success":     true,
+				"result":      []map[string]string{{"id": "zone-parent", "name": "dustk.com"}},
+				"result_info": map[string]any{"total_pages": 2},
+			})
+			return
+		}
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"success":     true,
+			"result":      []map[string]string{{"id": "zone-api", "name": "api.dustk.com"}},
+			"result_info": map[string]any{"total_pages": 2},
+		})
+	}))
+	defer server.Close()
+
+	dns := CloudflareDNS{BaseURL: server.URL, Token: func() (string, error) { return "token", nil }}
+	zoneID, err := dns.ResolveZoneID(context.Background(), []string{"API.DUSTK.COM.", "cdn.api.dustk.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zoneID != "zone-api" || pages != 2 {
+		t.Fatalf("zone ID = %q, pages = %d", zoneID, pages)
+	}
+}
+
+func TestCloudflareDNSRejectsMissingAndMismatchedZones(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(response).Encode(map[string]any{
+			"success": true,
+			"result": []map[string]string{
+				{"id": "zone-example", "name": "example.com"},
+				{"id": "zone-other", "name": "other.test"},
+			},
+			"result_info": map[string]any{"total_pages": 1},
+		})
+	}))
+	defer server.Close()
+	dns := CloudflareDNS{BaseURL: server.URL, Token: func() (string, error) { return "token", nil }}
+
+	if _, err := dns.ResolveZoneID(context.Background(), []string{"cdn.example.com", "api.other.test"}); !errors.Is(err, ErrZoneMismatch) {
+		t.Fatalf("mismatched zones error = %v", err)
+	}
+	if _, err := dns.ResolveZoneID(context.Background(), []string{"cdn.unknown.test"}); !errors.Is(err, ErrZoneNotFound) {
+		t.Fatalf("missing zone error = %v", err)
+	}
+}
 
 func TestCloudflareDNSRejectsUnmanagedNameCollision(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {

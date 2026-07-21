@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,10 +31,70 @@ type DNSProvider interface {
 	RemoveNode(ctx context.Context, zoneID, nodeID string) error
 }
 
+type ZoneResolver interface {
+	ResolveZoneID(ctx context.Context, domains []string) (string, error)
+}
+
+var (
+	ErrZoneNotFound = errors.New("no accessible Cloudflare zone matches the site domains")
+	ErrZoneMismatch = errors.New("site domains belong to different Cloudflare zones")
+)
+
 type CloudflareDNS struct {
 	BaseURL string
 	Token   func() (string, error)
 	Client  *http.Client
+}
+
+type cloudflareZone struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (c CloudflareDNS) ResolveZoneID(ctx context.Context, domains []string) (string, error) {
+	if len(domains) == 0 {
+		return "", ErrZoneNotFound
+	}
+	if c.Token == nil {
+		return "", errors.New("Cloudflare API token is not configured")
+	}
+	token, err := c.Token()
+	if err != nil {
+		return "", err
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", errors.New("Cloudflare API token is empty")
+	}
+	zones, err := c.listZones(ctx, token)
+	if err != nil {
+		return "", err
+	}
+
+	resolvedID := ""
+	resolvedName := ""
+	for _, domainName := range domains {
+		domainName = canonicalRecordName(domainName)
+		best := cloudflareZone{}
+		for _, zone := range zones {
+			zoneName := canonicalRecordName(zone.Name)
+			if zoneName == "" || (domainName != zoneName && !strings.HasSuffix(domainName, "."+zoneName)) {
+				continue
+			}
+			if len(zoneName) > len(best.Name) {
+				best = cloudflareZone{ID: strings.TrimSpace(zone.ID), Name: zoneName}
+			}
+		}
+		if best.ID == "" {
+			return "", fmt.Errorf("%w: %s", ErrZoneNotFound, domainName)
+		}
+		if resolvedID != "" && best.ID != resolvedID {
+			return "", fmt.Errorf("%w: %s matches %s, not %s", ErrZoneMismatch, domainName, best.Name, resolvedName)
+		}
+		resolvedID = best.ID
+		resolvedName = best.Name
+	}
+	return resolvedID, nil
 }
 
 func (c CloudflareDNS) Reconcile(ctx context.Context, zoneID, owner string, desired []DNSRecord) error {
@@ -227,6 +288,34 @@ func (c CloudflareDNS) listRecords(ctx context.Context, zoneID, token, recordTyp
 		}
 		if !payload.Success {
 			return nil, fmt.Errorf("Cloudflare list DNS records: %s", payload.message())
+		}
+		all = append(all, payload.Result...)
+		if payload.ResultInfo == nil || payload.ResultInfo.TotalPages <= page || len(payload.Result) == 0 {
+			return all, nil
+		}
+	}
+}
+
+func (c CloudflareDNS) listZones(ctx context.Context, token string) ([]cloudflareZone, error) {
+	var all []cloudflareZone
+	for page := 1; ; page++ {
+		values := url.Values{"per_page": {"50"}, "page": {strconv.Itoa(page)}}
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL()+"/zones?"+values.Encode(), nil)
+		if err != nil {
+			return nil, err
+		}
+		response, err := c.doWithRetry(ctx, request, token)
+		if err != nil {
+			return nil, err
+		}
+		var payload cloudflareResponse[[]cloudflareZone]
+		decodeErr := json.NewDecoder(response.Body).Decode(&payload)
+		response.Body.Close()
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if !payload.Success {
+			return nil, fmt.Errorf("Cloudflare list zones: %s", payload.message())
 		}
 		all = append(all, payload.Result...)
 		if payload.ResultInfo == nil || payload.ResultInfo.TotalPages <= page || len(payload.Result) == 0 {

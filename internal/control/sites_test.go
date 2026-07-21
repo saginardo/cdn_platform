@@ -2,6 +2,7 @@ package control
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,8 +13,83 @@ import (
 	"time"
 
 	"cdn-platform/internal/domain"
+	"cdn-platform/internal/integrations"
 	"cdn-platform/internal/store"
 )
+
+type recordingZoneResolver struct {
+	zoneID  string
+	err     error
+	domains []string
+	calls   int
+}
+
+func (r *recordingZoneResolver) ResolveZoneID(_ context.Context, domains []string) (string, error) {
+	r.calls++
+	r.domains = append([]string(nil), domains...)
+	return r.zoneID, r.err
+}
+
+func TestSiteAPIAutomaticallyResolvesCloudflareZone(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-zone", "203.0.113.90")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &recordingZoneResolver{zoneID: "zone-auto"}
+	server := &Server{Store: database, ZoneResolver: resolver}
+	created := requestSite(t, server, http.MethodPost, "/api/sites", map[string]any{
+		"name": "automatic zone", "domains": []string{"CDN.Example.Test."}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "enabled": true,
+	})
+	if created.ZoneID != "zone-auto" || resolver.calls != 1 || len(resolver.domains) != 1 || resolver.domains[0] != "cdn.example.test" {
+		t.Fatalf("automatic zone result = %#v, resolver = %#v", created, resolver)
+	}
+
+	updated := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, map[string]any{
+		"name": created.Name, "domains": created.Domains, "node_ids": created.Nodes,
+		"primary_origin": created.PrimaryOrigin, "enabled": created.Enabled,
+	})
+	if updated.ZoneID != "zone-auto" || resolver.calls != 1 {
+		t.Fatalf("omitted update zone = %q, resolver calls = %d", updated.ZoneID, resolver.calls)
+	}
+}
+
+func TestSiteAPIReturnsBadRequestWhenCloudflareZoneCannotBeResolved(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("edge-zone", "203.0.113.91")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database, ZoneResolver: &recordingZoneResolver{err: integrations.ErrZoneNotFound}}
+	response := requestSiteResponse(t, server, http.MethodPost, "/api/sites", map[string]any{
+		"name": "missing zone", "domains": []string{"cdn.unknown.test"}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "enabled": true,
+	})
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "no accessible Cloudflare zone") {
+		t.Fatalf("missing zone response = %d %s", response.Code, response.Body.String())
+	}
+}
 
 func TestSiteClientMaxBodySizeAPI(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))

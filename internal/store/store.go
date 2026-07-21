@@ -1197,7 +1197,8 @@ func (s *Store) SetNodeStatus(nodeID string, status domain.NodeStatus) error {
 }
 
 func (s *Store) CreateSite(site domain.Site, zoneID string) (domain.Site, error) {
-	if strings.TrimSpace(zoneID) == "" {
+	zoneID = strings.TrimSpace(zoneID)
+	if zoneID == "" {
 		return domain.Site{}, errors.New("Cloudflare zone ID is required")
 	}
 	if err := domain.NormalizeAndValidateSite(&site); err != nil {
@@ -1352,7 +1353,8 @@ func (s *Store) UpdateSite(site domain.Site, zoneID string) (domain.Site, error)
 	if current.Deleting {
 		return domain.Site{}, ErrSiteDeleting
 	}
-	if strings.TrimSpace(zoneID) == "" {
+	zoneID = strings.TrimSpace(zoneID)
+	if zoneID == "" {
 		return domain.Site{}, errors.New("Cloudflare zone ID is required")
 	}
 	if zoneID != currentZoneID {
@@ -1986,6 +1988,36 @@ func (s *Store) Certificate(siteID string) ([]byte, []byte, *time.Time, error) {
 		return nil, nil, nil, err
 	}
 	return cert, key, &parsed, nil
+}
+
+type CertificateMetadata struct {
+	NotAfter  *time.Time
+	UpdatedAt time.Time
+}
+
+func (s *Store) CertificateMetadata(siteID string) (CertificateMetadata, error) {
+	var notAfter sql.NullString
+	var updatedAt string
+	err := s.db.QueryRow(`SELECT not_after, updated_at FROM certificates WHERE site_id = ?`, siteID).Scan(&notAfter, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CertificateMetadata{}, ErrNotFound
+	}
+	if err != nil {
+		return CertificateMetadata{}, err
+	}
+	metadata := CertificateMetadata{}
+	metadata.UpdatedAt, err = parseTime(updatedAt)
+	if err != nil {
+		return CertificateMetadata{}, err
+	}
+	if notAfter.Valid {
+		parsed, parseErr := parseTime(notAfter.String)
+		if parseErr != nil {
+			return CertificateMetadata{}, parseErr
+		}
+		metadata.NotAfter = &parsed
+	}
+	return metadata, nil
 }
 
 func (s *Store) Audit(actor, action, resourceType, resourceID, remoteAddr, detail string) error {

@@ -1,6 +1,6 @@
 # CDN Platform
 
-English | [简体中文](readme_cn.md)
+English | [简体中文](README_CN.md)
 
 A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-10 Debian 12 edge VPSs. Cloudflare is authoritative DNS only: end users connect directly to the edge nodes.
 

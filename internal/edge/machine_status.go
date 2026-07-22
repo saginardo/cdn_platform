@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 type machineStatusReporter interface {

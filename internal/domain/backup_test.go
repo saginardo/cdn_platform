@@ -4,7 +4,7 @@ import "testing"
 
 func TestValidateBackupSettings(t *testing.T) {
 	valid := BackupSettings{
-		Repository:         "s3:https://account.r2.cloudflarestorage.com/cdn-platform-backup",
+		Repository:         "s3:https://account.r2.cloudflarestorage.com/simple-cdn-backup",
 		AccessKeyID:        "access-key",
 		Region:             "auto",
 		BackupTime:         "03:25",

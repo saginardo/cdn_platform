@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/store"
 )
 
 func TestNodeOnlineUpgradeAPIQueuesInstructionAndAcceptsEdgeResult(t *testing.T) {

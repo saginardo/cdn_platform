@@ -9,14 +9,14 @@ if [[ $EUID -ne 0 ]]; then
   echo "install-control-compose.sh must run as root" >&2
   exit 2
 fi
-if [[ ! -f compose.yaml || ! -d deploy || ! -d scripts ]]; then
+if [[ ! -f deploy/docker-compose.yaml || ! -d scripts ]]; then
   echo "run this script from the repository root" >&2
   exit 2
 fi
 
 root="${1:-/opt/cdn-platform}"
-control_image="${2:-${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/cdn_platform:main}}"
-image_pattern='^ghcr\.io/saginardo/cdn_platform(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$'
+control_image="${2:-${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/simple_cdn:main}}"
+image_pattern='^ghcr\.io/saginardo/simple_cdn(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$'
 if [[ "$root" != /* || "$root" == "/" ]]; then
   echo "root must be an absolute path below /" >&2
   exit 2
@@ -27,7 +27,7 @@ if [[ "$root" == "/" ]]; then
   exit 2
 fi
 if [[ ! "$control_image" =~ $image_pattern ]]; then
-  echo "control image must be a ghcr.io/saginardo/cdn_platform tag or digest" >&2
+  echo "control image must be a ghcr.io/saginardo/simple_cdn tag or digest" >&2
   exit 2
 fi
 
@@ -54,7 +54,7 @@ chown -R 101:101 "$root/backup/staging/clickhouse"
 rm -rf "$deploy_dir"
 install -d -m 0750 "$deploy_dir"
 cp -a deploy scripts "$deploy_dir/"
-install -m 0644 compose.yaml "$root/compose.yaml"
+install -m 0644 deploy/docker-compose.yaml "$root/compose.yaml"
 printf 'CDN_CONTROL_IMAGE=%s\nCDN_DEPLOY_DIR=./app\n' "$control_image" >"$root/.env"
 chmod 0644 "$root/.env"
 

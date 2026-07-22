@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"cdn-platform/internal/control"
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/control"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/store"
 )
 
 func TestWriteCloudflareCredentialsUsesDatabaseOverride(t *testing.T) {
@@ -332,7 +332,7 @@ func TestComposeBackupCommandsResolveRuntimeSettings(t *testing.T) {
 	if !strings.Contains(string(loopContents), "if ((sleep_seconds > 60))") {
 		t.Fatal("backup scheduler does not bound settings refresh latency")
 	}
-	composeContents, err := os.ReadFile(filepath.Join(repositoryRoot, "compose.yaml"))
+	composeContents, err := os.ReadFile(filepath.Join(repositoryRoot, "deploy", "docker-compose.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,12 +347,12 @@ func TestComposeBackupCommandsResolveRuntimeSettings(t *testing.T) {
 
 func TestComposeDeploymentPullsPublishedImageWithoutHostBuild(t *testing.T) {
 	repositoryRoot := filepath.Join("..", "..")
-	composeContents, err := os.ReadFile(filepath.Join(repositoryRoot, "compose.yaml"))
+	composeContents, err := os.ReadFile(filepath.Join(repositoryRoot, "deploy", "docker-compose.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	compose := string(composeContents)
-	if !strings.Contains(compose, "image: ${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/cdn_platform:main}") {
+	if !strings.Contains(compose, "image: ${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/simple_cdn:main}") {
 		t.Fatal("Compose does not default to the GitHub Actions image")
 	}
 	if strings.Contains(compose, "build:") || strings.Contains(compose, "CDN_SOURCE_DIR") {

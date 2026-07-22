@@ -11,10 +11,15 @@ import (
 	"syscall"
 	"time"
 
-	"cdn-platform/internal/edge"
+	"simple_cdn/internal/edge"
+	"simple_cdn/internal/version"
 )
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Println(version.Version)
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "upgrade-helper" {
 		if err := edge.RunUpgradeHelper(env("EDGE_STATE_DIR", "/opt/cdn-edge/data"), os.Args[2]); err != nil {
 			fatal("online upgrade helper: " + err.Error())

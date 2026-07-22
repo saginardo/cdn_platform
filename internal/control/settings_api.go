@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/integrations"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/integrations"
 )
 
 func (s *Server) getSettings(response http.ResponseWriter, _ *http.Request) {
@@ -278,7 +278,7 @@ func (s *Server) testSMTPSettings(response http.ResponseWriter, request *http.Re
 	if err := integrations.SendNotification(testCtx, notifier, integrations.Notification{
 		Category: integrations.NotificationCategoryAvailability,
 		Severity: integrations.NotificationSeverityInfo,
-		Subject:  "CDN Platform SMTP 测试邮件",
+		Subject:  "simple_cdn SMTP 测试邮件",
 		Message:  "SMTP 通知通道配置有效，控制面可以向当前收件人发送告警。",
 		Details: []integrations.NotificationDetail{
 			{Label: "SMTP 服务器", Value: net.JoinHostPort(profile.Host, fmt.Sprintf("%d", profile.Port))},

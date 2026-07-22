@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/store"
 )
 
 type onlineRestoreArtifacts struct {

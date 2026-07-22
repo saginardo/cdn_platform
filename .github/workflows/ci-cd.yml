@@ -45,6 +45,17 @@ jobs:
       - name: Validate frontend
         run: npm --prefix frontend run check
 
+      - name: Validate project version
+        shell: bash
+        run: |
+          version=$(tr -d '[:space:]' <VERSION)
+          frontend_version=$(node -p "require('./frontend/package.json').version")
+          test "$version" = "$frontend_version"
+          grep -Fxq "ARG VERSION=$version" Dockerfile
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+          fi
+
       - name: Test Go packages
         shell: bash
         run: |
@@ -82,9 +93,9 @@ jobs:
           cp deploy/examples/compose-backup.env.example config/backup.env
           : >config/restic-password
           printf '%s\n' \
-            'CDN_CONTROL_IMAGE=ghcr.io/saginardo/cdn_platform:main' \
+            'CDN_CONTROL_IMAGE=ghcr.io/saginardo/simple_cdn:main' \
             'CDN_DEPLOY_DIR=.' >.env
-          docker compose --profile backup config --quiet
+          docker compose --project-directory . -f deploy/docker-compose.yaml --profile backup config --quiet
 
   browser:
     name: Browser smoke tests
@@ -127,6 +138,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
+      - name: Read project version
+        id: version
+        shell: bash
+        run: echo "version=$(tr -d '[:space:]' <VERSION)" >>"$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -149,6 +165,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
 
       - name: Build and optionally publish image
         id: build
@@ -160,6 +177,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.version.outputs.version }}
           cache-from: type=gha,scope=control-image
           cache-to: type=gha,mode=max,scope=control-image
           provenance: mode=max

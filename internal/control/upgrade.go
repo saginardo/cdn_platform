@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/store"
 	"github.com/google/uuid"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/store"
 )
 
 const (

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestNodeUninstallLifecycleCleansPlatformState(t *testing.T) {

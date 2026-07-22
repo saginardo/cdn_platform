@@ -15,14 +15,19 @@ import (
 	"syscall"
 	"time"
 
-	"cdn-platform/internal/control"
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/integrations"
-	"cdn-platform/internal/logstore"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/control"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/integrations"
+	"simple_cdn/internal/logstore"
+	"simple_cdn/internal/store"
+	"simple_cdn/internal/version"
 )
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Println(version.Version)
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "keygen" {
 		key, err := control.NewEncryptionKey()
 		if err != nil {

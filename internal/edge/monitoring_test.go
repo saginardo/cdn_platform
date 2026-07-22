@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 type monitoringRoundTripFunc func(*http.Request) (*http.Response, error)

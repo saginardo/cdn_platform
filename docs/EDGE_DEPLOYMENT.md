@@ -1,6 +1,6 @@
 # Edge deployment and migration
 
-Edge nodes use the Debian Nginx package and a host systemd service. Docker is not used. CDN Platform-owned binaries, configuration, persistent state, access logs, and cache are kept below one operational root:
+Edge nodes use the Debian Nginx package and a host systemd service. Docker is not used. simple_cdn-owned binaries, configuration, persistent state, access logs, and cache are kept below one operational root:
 
 ```text
 /opt/cdn-edge/

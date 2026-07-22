@@ -1,4 +1,4 @@
-module cdn-platform
+module simple_cdn
 
 go 1.26.0
 

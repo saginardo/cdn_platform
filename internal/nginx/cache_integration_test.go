@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestRenderedStaticAssetsCacheAcrossCookies(t *testing.T) {

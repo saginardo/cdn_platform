@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 type machineStatusReporterFunc func() (*domain.MachineStatus, error)

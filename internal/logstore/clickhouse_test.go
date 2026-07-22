@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestRecentDecodesJSONEachRow(t *testing.T) {

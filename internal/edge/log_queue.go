@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 type logQueueSegment struct {

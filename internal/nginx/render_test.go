@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestRenderIncludesCacheAndFailoverPolicy(t *testing.T) {

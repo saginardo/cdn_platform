@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 // SitePublication is the immutable configuration and certificate material

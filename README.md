@@ -1,8 +1,10 @@
-# CDN Platform
+# simple_cdn
 
 English | [简体中文](README_CN.md)
 
 A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-10 Debian 12 edge VPSs. Cloudflare is authoritative DNS only: end users connect directly to the edge nodes.
+
+Current version: `0.1.0` (defined by [`VERSION`](VERSION)).
 
 ## What is implemented
 
@@ -53,9 +55,9 @@ The UI build requires Node.js 24 LTS and npm 11 or newer. The generated Vite out
 npm --prefix frontend ci
 npm --prefix frontend run check
 
-GOCACHE=/private/tmp/cdn_platform_go_cache \
-GOMODCACHE=/private/tmp/cdn_platform_gomodcache \
-GOPATH=/private/tmp/cdn_platform_gopath \
+GOCACHE=/private/tmp/simple_cdn_go_cache \
+GOMODCACHE=/private/tmp/simple_cdn_gomodcache \
+GOPATH=/private/tmp/simple_cdn_gopath \
 go test ./...
 
 ./scripts/build-release.sh dist
@@ -67,7 +69,7 @@ For UI development, run the TLS control plane on `127.0.0.1:8443`, then start `n
 
 `dist/SHA256SUMS` contains the exact digest required by `EDGE_BINARY_SHA256`. The controller can also serve the signed edge binary itself when `EDGE_BINARY_PATH` is configured; use `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` as `EDGE_BINARY_URL`.
 
-GitHub Actions runs the same compilation and validation checks, browser smoke tests, and a complete Docker build for every pull request. Successful `main` builds publish `ghcr.io/saginardo/cdn_platform`; the workflow never connects to production. Private deployment automation consumes the immutable digest, and the control host only pulls that image instead of compiling source or running `docker compose build`. See [the Compose deployment guide](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery).
+GitHub Actions runs the same compilation and validation checks, browser smoke tests, and a complete Docker build for every pull request. Successful `main` builds publish `ghcr.io/saginardo/simple_cdn`; the workflow never connects to production. Private deployment automation consumes the immutable digest, and the control host only pulls that image instead of compiling source or running `docker compose build`. See [the Compose deployment guide](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery).
 
 ## Control-plane installation
 
@@ -131,7 +133,7 @@ Revoking authorization only invalidates the node certificate; it does not remove
 1. Pause scheduling or revoke authorization for the node.
 2. Remove it from every site, assign replacement active nodes, and publish each changed site. A disabled site is exempt from the replacement-node requirement.
 3. Start uninstall preparation. The controller removes only Cloudflare A records whose managed comment exactly identifies that node, then enforces a 75-second DNS safety wait.
-4. Generate the 30-minute workflow command and run it as root on the edge host. The script stops the agent and removes `/opt/cdn-edge`, its systemd/Nginx integration links, and any legacy CDN Platform paths. It validates and reloads Nginx, but preserves the Nginx package, service, system logs, and unrelated configuration.
+4. Generate the 30-minute workflow command and run it as root on the edge host. The script stops the agent and removes `/opt/cdn-edge`, its systemd/Nginx integration links, and any legacy project paths. It validates and reloads Nginx, but preserves the Nginx package, service, system logs, and unrelated configuration.
 5. A successful callback retains the node as **Uninstalled** for audit history. Deleting that control-plane record is a separate confirmation-protected action.
 
 If Nginx validation or reload fails before cleanup is committed, the script restores the platform configuration and the previous edge-agent service state. **Force complete** only changes control-plane state when a host is permanently unreachable; it does not verify or perform remote cleanup.

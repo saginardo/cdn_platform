@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func (s *Store) RecordNodeCacheStorage(nodeID string, usage domain.CacheStorageUsage) error {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestMigrationsRecordCurrentVersionAndRemainIdempotent(t *testing.T) {

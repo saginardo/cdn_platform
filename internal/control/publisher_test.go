@@ -21,9 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/nginx"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/nginx"
+	"simple_cdn/internal/store"
 )
 
 func TestPublishRequiresCertificateAndThenMarksPublished(t *testing.T) {

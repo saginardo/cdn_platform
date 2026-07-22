@@ -1,4 +1,4 @@
-# CDN Platform 项目状态与参考技术架构
+# simple_cdn 项目状态与参考技术架构
 
 更新时间：2026-07-20（基于仓库实现和占位符部署拓扑，不记录实际生产环境信息）
 
@@ -193,13 +193,13 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 ### 本地验证
 
 ```bash
-cd /path/to/cdn_platform
+cd /path/to/simple_cdn
 npm --prefix frontend ci
 npm --prefix frontend run check
 npm --prefix frontend run test:e2e
 
-GOCACHE=/tmp/cdn_platform_go_cache \
-GOMODCACHE=/tmp/cdn_platform_go_modcache \
+GOCACHE=/tmp/simple_cdn_go_cache \
+GOMODCACHE=/tmp/simple_cdn_go_modcache \
 go test ./...
 ```
 
@@ -255,7 +255,7 @@ curl -fsS http://127.0.0.1/__cdn_health
 | `internal/logstore/clickhouse.go` | ClickHouse schema、访问日志和指标查询。 |
 | `frontend/` | React/Vite/Tailwind/shadcn 中文控制台源码、组件注册表和 Playwright 响应式测试。 |
 | `internal/control/web/dist/` | Vite 生成并由 Go 嵌入的哈希静态产物。 |
-| `compose.yaml` | 主控、ClickHouse、证书续期和可选备份服务。 |
+| `deploy/docker-compose.yaml` | 主控、ClickHouse、证书续期和可选备份服务的唯一受版本控制模板。 |
 | `scripts/install-control-compose.sh` | Compose 主控目录初始化与安装。 |
 | `internal/control/install-edge.sh` | 控制面嵌入并提供的边缘新装、旧布局迁移与升级脚本。 |
 | `scripts/compose-backup-run.sh` | 备份重试、原子状态记录与最终失败告警包装。 |

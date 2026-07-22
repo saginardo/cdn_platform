@@ -79,7 +79,7 @@ func TestNotificationHTMLIsStyledAndEscapesContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	html := string(rendered)
-	for _, expected := range []string{"CDN Platform", "拨测监控", "#b91c1c", "&lt;script&gt;", "&lt;img"} {
+	for _, expected := range []string{"simple_cdn", "拨测监控", "#b91c1c", "&lt;script&gt;", "&lt;img"} {
 		if !strings.Contains(html, expected) {
 			t.Fatalf("rendered HTML does not contain %q: %s", expected, html)
 		}

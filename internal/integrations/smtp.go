@@ -200,7 +200,7 @@ var notificationEmailTemplate = template.Must(template.New("notification-email")
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;border-collapse:separate;background:#ffffff;border:1px solid #e5e7eb;border-top:4px solid {{.Accent}};">
         <tr><td style="padding:24px 28px 16px;">
           <table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>
-            <td style="font-size:12px;font-weight:700;color:#4b5563;text-transform:uppercase;">CDN Platform</td>
+            <td style="font-size:12px;font-weight:700;color:#4b5563;text-transform:uppercase;">simple_cdn</td>
             <td align="right"><span style="display:inline-block;padding:4px 8px;background:{{.Tint}};color:{{.Accent}};font-size:12px;font-weight:700;">{{.CategoryLabel}} · {{.SeverityLabel}}</span></td>
           </tr></table>
           <h1 style="margin:18px 0 10px;font-size:21px;line-height:1.4;font-weight:700;letter-spacing:0;color:#111827;">{{.Subject}}</h1>

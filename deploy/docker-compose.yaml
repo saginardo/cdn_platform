@@ -1,7 +1,7 @@
-name: cdn-platform
+name: simple_cdn
 
 x-control-image: &control-image
-  image: ${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/cdn_platform:main}
+  image: ${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/simple_cdn:main}
 
 x-control-environment: &control-environment
   env_file:

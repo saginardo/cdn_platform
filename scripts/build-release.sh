@@ -2,6 +2,11 @@
 set -euo pipefail
 
 OUTPUT_DIR="${1:-dist}"
+VERSION=$(tr -d '[:space:]' <VERSION)
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "VERSION must contain a semantic version such as 0.1.0" >&2
+  exit 2
+fi
 mkdir -p "$OUTPUT_DIR"
 
 if ! command -v npm >/dev/null 2>&1; then
@@ -15,7 +20,9 @@ npm --prefix frontend run build
 build() {
   local package="$1"
   local output="$2"
-  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o "$OUTPUT_DIR/$output" "$package"
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+    -ldflags="-s -w -X simple_cdn/internal/version.Version=$VERSION" \
+    -o "$OUTPUT_DIR/$output" "$package"
 }
 
 build ./cmd/control cdn-control-linux-amd64

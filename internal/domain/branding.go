@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultBrandName       = "CDN Platform"
+	DefaultBrandName       = "simple_cdn"
 	DefaultBrandSubtitle   = "控制面板"
 	MaxBrandNameLength     = 48
 	MaxBrandSubtitleLength = 80

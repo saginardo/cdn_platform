@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/integrations"
-	"cdn-platform/internal/nginx"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/integrations"
+	"simple_cdn/internal/nginx"
 )
 
 type HealthManager struct {

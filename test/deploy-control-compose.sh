@@ -7,7 +7,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-image_ref="ghcr.io/saginardo/cdn_platform@sha256:$(printf 'a%.0s' {1..64})"
+image_ref="ghcr.io/saginardo/simple_cdn@sha256:$(printf 'a%.0s' {1..64})"
 
 run_case() (
   local mode="$1"
@@ -19,7 +19,7 @@ run_case() (
   trap 'rm -rf "$case_root"' EXIT
 
   install -d "$deployment_root/app" "$fake_bin"
-  printf 'old compose\n' >"$deployment_root/compose.yaml"
+  printf 'name: cdn-platform\n' >"$deployment_root/compose.yaml"
   printf 'CDN_SOURCE_DIR=./app\n' >"$deployment_root/.env"
   printf 'old support files\n' >"$deployment_root/app/marker"
 
@@ -31,17 +31,23 @@ run_case() (
       "$repository_root/scripts/deploy-control-compose.sh" "$image_ref" "$deployment_root"
 
     grep -Fxq "CDN_CONTROL_IMAGE=$image_ref" "$deployment_root/.env"
+    cmp "$repository_root/deploy/docker-compose.yaml" "$deployment_root/compose.yaml"
     [[ -d "$deployment_root/app/deploy" && ! -e "$deployment_root/app/marker" ]]
     grep -Fq -- '--no-build' "$log_file"
+    grep -Fq 'compose -p cdn-platform -f' "$log_file"
+    grep -Fq 'compose -p simple_cdn up -d --no-build control' "$log_file"
     for obsolete in \
-      'ghcr.io/saginardo/cdn_platform:sha-old' \
-      'ghcr.io/saginardo/cdn_platform@sha256:old-digest' \
+      'ghcr.io/saginardo/simple_cdn:sha-old' \
+      'ghcr.io/saginardo/simple_cdn@sha256:old-digest' \
       'sha256:old-ghcr' \
+      'ghcr.io/saginardo/cdn_platform:main' \
+      'ghcr.io/saginardo/cdn_platform@sha256:legacy-digest' \
+      'sha256:legacy-ghcr' \
       'cdn-platform-control:local' \
       'sha256:old-local'; do
       grep -Fq "image rm $obsolete" "$log_file"
     done
-    if grep -Eq 'image rm (ghcr\.io/saginardo/cdn_platform:main|sha256:requested-image|unrelated/service|sha256:unrelated-image)' "$log_file"; then
+    if grep -Eq 'image rm (ghcr\.io/saginardo/simple_cdn:main|sha256:requested-image|unrelated/service|sha256:unrelated-image)' "$log_file"; then
       echo "deployment attempted to remove the current or an unrelated image" >&2
       return 1
     fi
@@ -54,11 +60,11 @@ run_case() (
       return 1
     fi
 
-    grep -Fxq 'old compose' "$deployment_root/compose.yaml"
+    grep -Fxq 'name: cdn-platform' "$deployment_root/compose.yaml"
     grep -Fxq 'CDN_SOURCE_DIR=./app' "$deployment_root/.env"
     grep -Fxq 'old support files' "$deployment_root/app/marker"
     grep -Fq "pull $image_ref" "$log_file"
-    if [[ $(grep -Fc 'compose up -d --no-build --no-deps control ' "$log_file") -lt 2 ]]; then
+    if [[ $(grep -Fc 'up -d --no-build control ' "$log_file") -lt 2 ]]; then
       echo "failure case did not exercise both cutover and rollback" >&2
       return 1
     fi

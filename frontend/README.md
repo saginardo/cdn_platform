@@ -1,4 +1,4 @@
-# CDN Platform UI
+# simple_cdn UI
 
 React 19, TypeScript, Vite, Tailwind CSS v4, and shadcn/ui source components for the control-plane console.
 

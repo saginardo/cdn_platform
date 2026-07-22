@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestNodeUpgradeTaskLifecycleAndRetryGuard(t *testing.T) {

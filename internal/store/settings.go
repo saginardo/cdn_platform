@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 const (

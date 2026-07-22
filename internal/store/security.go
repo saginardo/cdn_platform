@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
 	"github.com/google/uuid"
+	"simple_cdn/internal/domain"
 )
 
 const securityPolicyColumns = `id, name, enabled, pattern, action, ban_duration_seconds,

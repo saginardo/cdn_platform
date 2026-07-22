@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 type schemaMigration struct {
@@ -199,7 +199,7 @@ func migrateBrandingSettings(tx *sql.Tx) error {
 		name       string
 		definition string
 	}{
-		{"brand_name", "brand_name TEXT NOT NULL DEFAULT 'CDN Platform'"},
+		{"brand_name", "brand_name TEXT NOT NULL DEFAULT 'simple_cdn'"},
 		{"brand_subtitle", "brand_subtitle TEXT NOT NULL DEFAULT '控制面板'"},
 	} {
 		if err := addColumnIfMissing(tx, "control_settings", column.name, column.definition); err != nil {

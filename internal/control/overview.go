@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/logstore"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/logstore"
 )
 
 const overviewWindow = 24 * time.Hour

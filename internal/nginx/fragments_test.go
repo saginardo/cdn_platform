@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestSplitHTTPConfigSeparatesBaseAndSiteServers(t *testing.T) {

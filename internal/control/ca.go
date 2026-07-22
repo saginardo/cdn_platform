@@ -49,7 +49,7 @@ func LoadOrCreateInternalCA(directory string) (*InternalCA, error) {
 	now := time.Now().UTC()
 	template := &x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: "cdn-platform edge internal CA"},
+		Subject:      pkix.Name{CommonName: "simple_cdn edge internal CA"},
 		NotBefore:    now.Add(-5 * time.Minute), NotAfter: now.AddDate(10, 0, 0),
 		IsCA: true, BasicConstraintsValid: true,
 		KeyUsage: x509.KeyUsageCertSign | x509.KeyUsageCRLSign | x509.KeyUsageDigitalSignature,

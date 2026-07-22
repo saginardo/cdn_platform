@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func defaultSecurityPoliciesForTest() []domain.SecurityPolicy {
@@ -361,8 +361,8 @@ server {
     }
     location @origin {
         internal;
-        access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
-        header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+        access_by_lua_block { package.loaded.simple_cdn_rate_limit.access() }
+        header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
         proxy_pass ` + origin.URL + `;
     }
 }

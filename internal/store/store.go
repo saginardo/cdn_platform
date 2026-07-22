@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
+	"simple_cdn/internal/domain"
 )
 
 var (
@@ -243,7 +243,7 @@ CREATE TABLE IF NOT EXISTS control_settings (
   backup_time TEXT NOT NULL DEFAULT '03:25',
   backup_random_delay_seconds INTEGER NOT NULL DEFAULT 1200,
 	cache_default_size_gb INTEGER NOT NULL DEFAULT 1,
-  brand_name TEXT NOT NULL DEFAULT 'CDN Platform',
+  brand_name TEXT NOT NULL DEFAULT 'simple_cdn',
   brand_subtitle TEXT NOT NULL DEFAULT '控制面板',
   brand_logo_data_url TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL

@@ -138,7 +138,7 @@ if ((nginx_config_present == 1 || nginx_stream_present == 1)); then
     if [[ -n "$nginx_stream_backup" ]]; then rm -f "$nginx_stream_backup"; fi
     if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
-    callback fail --header 'Content-Type: text/plain' --data-binary 'Nginx validation failed after removing CDN Platform configuration' >/dev/null 2>&1 || true
+    callback fail --header 'Content-Type: text/plain' --data-binary 'Nginx validation failed after removing simple_cdn configuration' >/dev/null 2>&1 || true
     echo "Nginx validation failed; platform configuration was restored" >&2
     exit 1
   fi
@@ -151,7 +151,7 @@ if ((nginx_config_present == 1 || nginx_stream_present == 1)); then
     nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
     if ((was_enabled == 1)); then systemctl enable cdn-edge-agent.service >/dev/null 2>&1 || true; fi
     if ((was_active == 1)); then systemctl start cdn-edge-agent.service >/dev/null 2>&1 || true; fi
-    callback fail --header 'Content-Type: text/plain' --data-binary 'Nginx reload failed after removing CDN Platform configuration' >/dev/null 2>&1 || true
+    callback fail --header 'Content-Type: text/plain' --data-binary 'Nginx reload failed after removing simple_cdn configuration' >/dev/null 2>&1 || true
     echo "Nginx reload failed; platform configuration was restored" >&2
     exit 1
   fi
@@ -176,4 +176,4 @@ if ! callback complete >/dev/null; then
   exit 1
 fi
 trap - ERR
-echo "CDN Platform edge components were removed; Nginx remains installed."
+echo "simple_cdn edge components were removed; Nginx remains installed."

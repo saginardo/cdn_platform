@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestMessageCenterReconcilesTaskTransitionsAndReadState(t *testing.T) {

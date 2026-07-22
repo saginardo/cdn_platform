@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/integrations"
-	"cdn-platform/internal/nginx"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/integrations"
+	"simple_cdn/internal/nginx"
+	"simple_cdn/internal/store"
 )
 
 type healthRoundTripFunc func(*http.Request) (*http.Response, error)

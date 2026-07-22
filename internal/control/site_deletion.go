@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/integrations"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/integrations"
+	"simple_cdn/internal/store"
 )
 
 type SiteDeletionManager struct {

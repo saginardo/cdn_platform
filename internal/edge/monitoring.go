@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 const (

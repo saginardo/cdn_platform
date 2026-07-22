@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"cdn-platform/internal/domain"
 	"github.com/google/uuid"
+	"simple_cdn/internal/domain"
 )
 
 type MessagePage struct {

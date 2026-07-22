@@ -356,7 +356,7 @@ const accessLogs = [
 
 async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
   let branding = {
-    name: "CDN Platform",
+    name: "simple_cdn",
     subtitle: "控制面板",
     logo_data_url: "",
   };
@@ -1021,7 +1021,7 @@ test("SMTP test shows progress and keeps timeout feedback visible", async ({
   await mockAPI(page, {
     "/api/settings": {
       branding: {
-        name: "CDN Platform",
+        name: "simple_cdn",
         subtitle: "控制面板",
         logo_data_url: "",
       },
@@ -1152,7 +1152,7 @@ test("branding settings update the sidebar immediately", async ({
 
   await expect(page.getByRole("tab", { name: "通用" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "品牌" })).toHaveCount(0);
-  await expect(page.getByLabel("品牌标识")).toHaveValue("CDN Platform");
+  await expect(page.getByLabel("品牌标识")).toHaveValue("simple_cdn");
   await expect(page.getByLabel("副标题")).toHaveValue("控制面板");
   await page.getByLabel("品牌标识").fill("DustK Edge");
   await page.getByLabel("副标题").fill("边缘控制台");
@@ -1191,18 +1191,18 @@ test("branding settings update the sidebar immediately", async ({
   await expect(
     bootScreen.getByText("DustK Edge", { exact: true }),
   ).toBeVisible();
-  await expect(
-    bootScreen.getByText("CDN Platform", { exact: true }),
-  ).toHaveCount(0);
+  await expect(bootScreen.getByText("simple_cdn", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
   await expect(page).toHaveTitle("DustK Edge · 边缘控制台");
 
   await page.evaluate(() => window.localStorage.clear());
   await page.reload();
   await expect(bootScreen.getByText("正在验证登录状态")).toBeVisible();
-  await expect(
-    bootScreen.getByText("CDN Platform", { exact: true }),
-  ).toHaveCount(0);
+  await expect(bootScreen.getByText("simple_cdn", { exact: true })).toHaveCount(
+    0,
+  );
   await expect(sidebar.getByText("DustK Edge", { exact: true })).toBeVisible();
   await expect(page).toHaveTitle("DustK Edge · 边缘控制台");
   await page.screenshot({

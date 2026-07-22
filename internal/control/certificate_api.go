@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/store"
 )
 
 type certificateOverviewResponse struct {

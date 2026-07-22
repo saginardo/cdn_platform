@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestControlSettingsDefaultsAndOverrides(t *testing.T) {

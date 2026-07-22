@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/auth"
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/auth"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/store"
 )
 
 const (

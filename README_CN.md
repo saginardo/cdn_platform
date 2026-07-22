@@ -1,8 +1,10 @@
-# CDN Platform
+# simple_cdn
 
 [English](README.md) | 简体中文
 
 一个面向单管理员的轻量自托管 CDN：使用一台 Debian 12 VPS 运行控制面，并由 3-10 台 Debian 12 VPS 作为边缘节点。Cloudflare 仅提供权威 DNS，终端用户直接连接边缘节点。
+
+当前版本：`0.1.0`（以 [`VERSION`](VERSION) 为准）。
 
 ## 已实现功能
 
@@ -53,9 +55,9 @@ scripts/              Compose 控制面辅助脚本和发布构建脚本
 npm --prefix frontend ci
 npm --prefix frontend run check
 
-GOCACHE=/private/tmp/cdn_platform_go_cache \
-GOMODCACHE=/private/tmp/cdn_platform_gomodcache \
-GOPATH=/private/tmp/cdn_platform_gopath \
+GOCACHE=/private/tmp/simple_cdn_go_cache \
+GOMODCACHE=/private/tmp/simple_cdn_gomodcache \
+GOPATH=/private/tmp/simple_cdn_gopath \
 go test ./...
 
 ./scripts/build-release.sh dist
@@ -67,7 +69,7 @@ go test ./...
 
 `dist/SHA256SUMS` 包含 `EDGE_BINARY_SHA256` 所需的准确摘要。配置 `EDGE_BINARY_PATH` 后，控制器也可以直接提供已签名边缘二进制文件；此时可将 `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` 用作 `EDGE_BINARY_URL`。
 
-GitHub Actions 会为每个拉取请求执行相同的编译与校验、浏览器冒烟测试和完整 Docker 镜像构建。`main` 构建成功后发布 `ghcr.io/saginardo/cdn_platform`，工作流不会连接生产环境。私有部署自动化消费不可变 digest；控制主机只拉取镜像，不再编译源码或执行 `docker compose build`。详见 [Compose 部署文档](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery)。
+GitHub Actions 会为每个拉取请求执行相同的编译与校验、浏览器冒烟测试和完整 Docker 镜像构建。`main` 构建成功后发布 `ghcr.io/saginardo/simple_cdn`，工作流不会连接生产环境。私有部署自动化消费不可变 digest；控制主机只拉取镜像，不再编译源码或执行 `docker compose build`。详见 [Compose 部署文档](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery)。
 
 ## 控制面安装
 
@@ -131,7 +133,7 @@ sudo docker compose ps
 1. 暂停节点调度或撤销其授权。
 2. 将节点从所有站点移除，分配替代的活跃节点，并发布每个变更站点。已禁用站点不要求替代节点。
 3. 开始准备卸载。控制器只删除托管备注精确标识该节点的 Cloudflare A 记录，然后强制等待 75 秒 DNS 安全窗口。
-4. 生成有效期 30 分钟的流程命令，并在边缘主机上以 `root` 执行。脚本会停止代理，删除 `/opt/cdn-edge`、对应 systemd/Nginx 集成链接和所有旧版 CDN Platform 路径。脚本会校验并重新加载 Nginx，但保留 Nginx 软件包、服务、系统日志及无关配置。
+4. 生成有效期 30 分钟的流程命令，并在边缘主机上以 `root` 执行。脚本会停止代理，删除 `/opt/cdn-edge`、对应 systemd/Nginx 集成链接和所有旧版项目路径。脚本会校验并重新加载 Nginx，但保留 Nginx 软件包、服务、系统日志及无关配置。
 5. 回调成功后，节点以“已卸载”状态保留用于审计。删除控制面节点记录是另一个带确认保护的操作。
 
 如果清理提交前 Nginx 校验或重新加载失败，脚本会恢复平台配置和之前的边缘代理服务状态。“强制完成”只在主机永久不可达时修改控制面状态，不会校验或执行远程清理。

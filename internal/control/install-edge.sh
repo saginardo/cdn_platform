@@ -338,7 +338,7 @@ EOF
 fi
 
 cat >"$nginx_stream_entry" <<'EOF'
-# Managed by CDN Platform. Do not edit.
+# Managed by simple_cdn. Do not edit.
 stream {
     include /opt/cdn-edge/config/nginx/cdn-platform-stream.conf;
 }

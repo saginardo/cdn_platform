@@ -1,5 +1,5 @@
 [Unit]
-Description=CDN Platform edge online upgrade %i
+Description=simple_cdn edge online upgrade %i
 After=network-online.target
 Wants=network-online.target
 

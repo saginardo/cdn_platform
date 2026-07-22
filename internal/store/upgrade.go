@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
 	"github.com/google/uuid"
+	"simple_cdn/internal/domain"
 )
 
 const nodeUpgradeTaskColumns = `id, node_id, status, source_sha256, target_sha256, error_code, detail,

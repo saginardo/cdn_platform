@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/store"
 )
 
 func TestSecurityPoliciesRenderOnlyForCapableNodes(t *testing.T) {

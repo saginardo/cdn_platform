@@ -6,7 +6,7 @@ import (
 	"slices"
 	"testing"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 func TestRateLimitPolicyLifecycle(t *testing.T) {

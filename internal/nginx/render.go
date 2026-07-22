@@ -11,7 +11,7 @@ import (
 	"strings"
 	"text/template"
 
-	"cdn-platform/internal/domain"
+	"simple_cdn/internal/domain"
 )
 
 type SiteConfig struct {
@@ -67,8 +67,8 @@ log_format cdn_json escape=json '{"request_id":"$request_id","timestamp":"$time_
 {{end}}
     location = /__cdn_health { access_log off; add_header Content-Type text/plain; return 200 "ok\n"; }
 {{if .RateLimitEnabled}}    location / {
-        access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
-        header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+        access_by_lua_block { package.loaded.simple_cdn_rate_limit.access() }
+        header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
         content_by_lua_block { return ngx.exit(404) }
     }
 {{else}}
@@ -114,8 +114,8 @@ server {
     access_log /opt/cdn-edge/logs/security.json cdn_rate_limit_ban_json if=$cdn_rate_limit_ban_policy_id;
     {{end}}
     {{if $.RateLimitEnabled}}location / {
-        access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
-        header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+        access_by_lua_block { package.loaded.simple_cdn_rate_limit.access() }
+        header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
         content_by_lua_block { return ngx.redirect("https://" .. ngx.var.host .. ngx.var.request_uri, 301) }
     }
     {{else}}
@@ -154,8 +154,8 @@ server {
 
     {{if .GRPC}}
     location / {
-        {{if $.RateLimitEnabled}}access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
-        header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+        {{if $.RateLimitEnabled}}access_by_lua_block { package.loaded.simple_cdn_rate_limit.access() }
+        header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
         {{end}}
         grpc_pass {{.PrimaryScheme}}://origin_{{.ID}}{{if .BackupHostPort}}_primary{{end}};
         grpc_set_header Host {{.HostHeader}};
@@ -184,7 +184,7 @@ server {
     {{if .BackupHostPort}}
     location @cdn_grpc_backup_{{.ID}} {
         internal;
-        {{if $.RateLimitEnabled}}header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+        {{if $.RateLimitEnabled}}header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
         {{end}}
         grpc_pass {{.PrimaryScheme}}://origin_{{.ID}}_backup;
         grpc_set_header Host {{.BackupHostHeader}};
@@ -236,8 +236,8 @@ server {
 
 	location @cdn_http_{{.ID}} {
 		internal;
-		{{if $.RateLimitEnabled}}access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
-		header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+		{{if $.RateLimitEnabled}}access_by_lua_block { package.loaded.simple_cdn_rate_limit.access() }
+		header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
 		{{end}}
 		proxy_pass {{.PrimaryScheme}}://origin_{{.ID}}{{if .BackupHostPort}}_primary{{end}};
 		proxy_set_header Host {{.HostHeader}};
@@ -275,8 +275,8 @@ server {
 
 	location @cdn_stream_{{.ID}} {
 		internal;
-		{{if $.RateLimitEnabled}}access_by_lua_block { package.loaded.cdn_platform_rate_limit.access() }
-		header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+		{{if $.RateLimitEnabled}}access_by_lua_block { package.loaded.simple_cdn_rate_limit.access() }
+		header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
 		{{end}}
 		proxy_pass {{.PrimaryScheme}}://origin_{{.ID}}{{if .BackupHostPort}}_primary{{end}};
 		proxy_set_header Host {{.HostHeader}};
@@ -313,7 +313,7 @@ server {
 	{{if .BackupHostPort}}
 	location @cdn_backup_{{.ID}} {
 		internal;
-		{{if $.RateLimitEnabled}}header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+		{{if $.RateLimitEnabled}}header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
 		{{end}}
 		proxy_pass {{.PrimaryScheme}}://origin_{{.ID}}_backup;
 		proxy_set_header Host {{.BackupHostHeader}};
@@ -347,7 +347,7 @@ server {
 
 	location @cdn_stream_backup_{{.ID}} {
 		internal;
-		{{if $.RateLimitEnabled}}header_filter_by_lua_block { package.loaded.cdn_platform_rate_limit.response() }
+		{{if $.RateLimitEnabled}}header_filter_by_lua_block { package.loaded.simple_cdn_rate_limit.response() }
 		{{end}}
 		proxy_pass {{.PrimaryScheme}}://origin_{{.ID}}_backup;
 		proxy_set_header Host {{.BackupHostHeader}};
@@ -853,7 +853,7 @@ log_format cdn_rate_limit_ban_json escape=json '{"timestamp":"$time_iso8601","po
         end
     end
 
-    package.loaded.cdn_platform_rate_limit = { access = access, response = response }
+    package.loaded.simple_cdn_rate_limit = { access = access, response = response }
 }
 `)
 	return result.String()

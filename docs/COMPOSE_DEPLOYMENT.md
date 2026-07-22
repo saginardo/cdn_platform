@@ -2,6 +2,10 @@
 
 Docker Compose is the supported control-plane deployment. Edge nodes use the host Nginx package and a systemd agent, with CDN-owned files consolidated below `/opt/cdn-edge`; see [EDGE_DEPLOYMENT.md](EDGE_DEPLOYMENT.md).
 
+[`deploy/docker-compose.yaml`](../deploy/docker-compose.yaml) is the only tracked Compose definition. The installer copies it byte-for-byte to the deployment root as `compose.yaml`; production `.env`, `config/`, `data/`, `logs/`, and `backup/` content remain host-local and must never be committed.
+
+The software, repository, and Compose project are named `simple_cdn`. The deployment script recognizes the legacy `cdn-platform` Compose project and performs a one-time container-only migration without deleting bind-mounted data. Other established operational identifiers remain stable: the ClickHouse database is `cdn_platform`, and container/edge paths retain their existing names. These identifiers address backups, DNS ownership records, recovery codes, and persistent data; changing them as part of a repository rename would break rollback or orphan state.
+
 ## Persistent layout
 
 The installer creates one operational and backup boundary:
@@ -33,7 +37,7 @@ The shared host-network Caddy installation stays outside this directory. It prox
 
 ## GitHub Actions delivery
 
-`.github/workflows/ci-cd.yml` owns compilation, tests, and image construction. Pull requests run frontend checks, Go tests/vet, browser smoke tests, Compose validation, and an unpushed Linux AMD64 image build. A successful `main` build publishes both `main` and `sha-<commit>` tags to `ghcr.io/saginardo/cdn_platform`, with provenance and SBOM attestations, and records the immutable digest in the job summary. The workflow deliberately contains no production host, credential, SSH, or rollout configuration and never connects to a production environment.
+`.github/workflows/ci-cd.yml` owns compilation, tests, and image construction. Pull requests run frontend checks, Go tests/vet, browser smoke tests, Compose validation, and an unpushed Linux AMD64 image build. A successful `main` build publishes both `main` and `sha-<commit>` tags to `ghcr.io/saginardo/simple_cdn`, with provenance and SBOM attestations, and records the immutable digest in the job summary. The workflow deliberately contains no production host, credential, SSH, or rollout configuration and never connects to a production environment.
 
 Keep production deployment wiring in private infrastructure configuration outside this repository. That automation should pass the published `@sha256:<digest>` reference to `scripts/deploy-control-compose.sh`. The host then pulls the exact image, updates only `compose.yaml`, `.env`, and `app/`, recreates the running control/certificate/backup containers without building, checks the control health endpoint and running image ID, and restores the previous definition and image if validation fails. After a successful cutover it removes unused images belonging to this project, while leaving every other Docker repository untouched. Persistent `config/`, `data/`, `logs/`, and `backup/` content is outside this replacement boundary.
 
@@ -60,7 +64,7 @@ sudo docker compose ps
 curl -fsS https://control.example.com/healthz
 ```
 
-The default image is `ghcr.io/saginardo/cdn_platform:main`. For a repeatable installation, pass a `sha-<commit>` tag or `@sha256:<digest>` as the installer's second argument. The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 at startup; a configured `EDGE_BINARY_SHA256` must match or startup fails.
+The default image is `ghcr.io/saginardo/simple_cdn:main`. For a repeatable installation, pass a `sha-<commit>` tag or `@sha256:<digest>` as the installer's second argument. The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 at startup; a configured `EDGE_BINARY_SHA256` must match or startup fails.
 
 The authenticated **Settings** view stores runtime overrides in SQLite. Cloudflare Token, SMTP password, S3 secret access key, and Restic repository password values are encrypted with `CONTROL_ENCRYPTION_KEY`; API responses never return them. Database overrides take precedence over their environment fallbacks, while reset actions restore those fallbacks. Retain the environment Cloudflare token because a fresh installation needs it before the UI and database exist. Control-certificate bootstrap and renewal containers mount the control database read-only and refresh their temporary Certbot credentials before each certificate operation.
 

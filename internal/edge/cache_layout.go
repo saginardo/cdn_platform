@@ -8,7 +8,7 @@ import (
 	"strings"
 	"syscall"
 
-	"cdn-platform/internal/nginx"
+	"simple_cdn/internal/nginx"
 )
 
 func prepareManagedCacheLayout(root, configuration string) error {

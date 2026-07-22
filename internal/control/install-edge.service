@@ -1,5 +1,5 @@
 [Unit]
-Description=CDN Platform edge agent
+Description=simple_cdn edge agent
 After=network-online.target nginx.service
 Wants=network-online.target
 

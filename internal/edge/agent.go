@@ -23,9 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/nginx"
 	"github.com/google/uuid"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/nginx"
 )
 
 type Config struct {

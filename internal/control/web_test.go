@@ -18,7 +18,7 @@ func TestEmbeddedWebContainsViteApplication(t *testing.T) {
 		`<html lang="zh-CN">`,
 		`<div id="root"></div>`,
 		`<script type="module"`,
-		`CDN Platform · 控制面板`,
+		`simple_cdn · 控制面板`,
 	} {
 		if !strings.Contains(index, expected) {
 			t.Fatalf("embedded Vite index is missing %q", expected)

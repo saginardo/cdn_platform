@@ -5,12 +5,12 @@ import type { Settings } from "@/lib/types";
 export type Branding = Settings["branding"];
 
 export const DEFAULT_BRANDING: Branding = {
-  name: "CDN Platform",
+  name: "simple_cdn",
   subtitle: "控制面板",
   logo_data_url: "",
 };
 
-const STORAGE_KEY = "cdn-platform:branding:v1";
+const STORAGE_KEY = "simple_cdn:branding:v1";
 const CHANGE_EVENT = "cdn:branding-changed";
 const MAX_CACHED_LOGO_LENGTH = 180_000;
 

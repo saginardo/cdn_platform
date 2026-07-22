@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"cdn-platform/internal/nginx"
+	"simple_cdn/internal/nginx"
 )
 
 func TestReconcileCacheLayoutRemovesOnlyRetiredManagedDirectories(t *testing.T) {

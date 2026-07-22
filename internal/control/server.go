@@ -23,12 +23,12 @@ import (
 	"sync"
 	"time"
 
-	"cdn-platform/internal/auth"
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/integrations"
-	"cdn-platform/internal/logstore"
-	"cdn-platform/internal/store"
 	"github.com/google/uuid"
+	"simple_cdn/internal/auth"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/integrations"
+	"simple_cdn/internal/logstore"
+	"simple_cdn/internal/store"
 )
 
 //go:embed web/dist

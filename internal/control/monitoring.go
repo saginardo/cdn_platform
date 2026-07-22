@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"cdn-platform/internal/domain"
-	"cdn-platform/internal/integrations"
-	"cdn-platform/internal/logstore"
-	"cdn-platform/internal/store"
+	"simple_cdn/internal/domain"
+	"simple_cdn/internal/integrations"
+	"simple_cdn/internal/logstore"
+	"simple_cdn/internal/store"
 )
 
 const monitoringStaleAfter = 75 * time.Second

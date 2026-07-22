@@ -345,6 +345,85 @@ func TestComposeBackupCommandsResolveRuntimeSettings(t *testing.T) {
 	}
 }
 
+func TestComposeDeploymentPullsPublishedImageWithoutHostBuild(t *testing.T) {
+	repositoryRoot := filepath.Join("..", "..")
+	composeContents, err := os.ReadFile(filepath.Join(repositoryRoot, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(composeContents)
+	if !strings.Contains(compose, "image: ${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/cdn_platform:main}") {
+		t.Fatal("Compose does not default to the GitHub Actions image")
+	}
+	if strings.Contains(compose, "build:") || strings.Contains(compose, "CDN_SOURCE_DIR") {
+		t.Fatal("Compose still permits a control-plane source build")
+	}
+	if !strings.Contains(compose, "./.env:/deployment/.env:ro") || strings.Contains(compose, "/deployment/Dockerfile") {
+		t.Fatal("Compose backup inputs do not record the deployed image reference")
+	}
+
+	installerContents, err := os.ReadFile(filepath.Join(repositoryRoot, "scripts", "install-control-compose.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer := string(installerContents)
+	if !strings.Contains(installer, "CDN_CONTROL_IMAGE=%s") || !strings.Contains(installer, "docker compose pull") || strings.Contains(installer, "docker compose build") {
+		t.Fatal("Compose installer does not enforce pull-only delivery")
+	}
+
+	backupContents, err := os.ReadFile(filepath.Join(repositoryRoot, "scripts", "compose-backup.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := string(backupContents)
+	if !strings.Contains(backup, "/deployment/.env") || strings.Contains(backup, "/deployment/Dockerfile") {
+		t.Fatal("backup snapshot does not preserve the immutable image reference")
+	}
+}
+
+func TestGitHubActionsBuildPublishesImmutableImageWithoutProductionConfig(t *testing.T) {
+	repositoryRoot := filepath.Join("..", "..")
+	workflowContents, err := os.ReadFile(filepath.Join(repositoryRoot, ".github", "workflows", "ci-cd.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(workflowContents)
+	for _, expected := range []string{
+		"pull_request:",
+		"go test ./...",
+		"npm --prefix frontend run check",
+		"docker/build-push-action@",
+		"packages: write",
+		"provenance: mode=max",
+		"sbom: true",
+		"type=raw,value=sha-${{ github.sha }}",
+		"Published \\`${IMAGE_NAME}@${IMAGE_DIGEST}\\`",
+	} {
+		if !strings.Contains(workflow, expected) {
+			t.Fatalf("CI/CD workflow is missing %q", expected)
+		}
+	}
+	for _, forbidden := range []string{"environment:", "known_hosts", "StrictHostKeyChecking", " scp ", " ssh "} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("public CI/CD workflow contains private deployment configuration %q", forbidden)
+		}
+	}
+
+	deployContents, err := os.ReadFile(filepath.Join(repositoryRoot, "scripts", "deploy-control-compose.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deploy := string(deployContents)
+	for _, expected := range []string{"docker pull \"$image_ref\"", "--no-build", "wait_for_control", "rollback_deployment", "running_image", "prune_obsolete_control_images", "docker image rm"} {
+		if !strings.Contains(deploy, expected) {
+			t.Fatalf("deployment script is missing %q", expected)
+		}
+	}
+	if strings.Contains(deploy, "docker compose build") || strings.Contains(deploy, "docker image prune") {
+		t.Fatal("deployment script can still build on the control host or prune unrelated images")
+	}
+}
+
 func TestComposeRestoreStagesAndValidatesBeforeBoundedCutover(t *testing.T) {
 	contents, err := os.ReadFile(filepath.Join("..", "..", "scripts", "restore-control-compose.sh"))
 	if err != nil {

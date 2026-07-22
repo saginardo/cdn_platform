@@ -111,7 +111,10 @@ func TestMonitorSkipsReportWhenNoTargetsAreConfigured(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader("[]")), Header: make(http.Header)}, nil
 	})}
-	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: t.TempDir(), AgentSHA256: strings.Repeat("b", 64), HTTPClient: client, Runner: &fakeRunner{}})
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: t.TempDir(), CertificateDir: filepath.Join(t.TempDir(), "certs"),
+		AgentSHA256: strings.Repeat("b", 64), HTTPClient: client, Runner: &fakeRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

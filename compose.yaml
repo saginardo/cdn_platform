@@ -1,10 +1,7 @@
 name: cdn-platform
 
 x-control-image: &control-image
-  image: cdn-platform-control:local
-  build:
-    context: ${CDN_SOURCE_DIR:-.}
-    dockerfile: Dockerfile
+  image: ${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/cdn_platform:main}
 
 x-control-environment: &control-environment
   env_file:
@@ -25,8 +22,8 @@ services:
       - ./logs/clickhouse:/var/log/clickhouse-server
       - ./backup/staging/clickhouse:/var/lib/clickhouse/backups
       - ./backup/online-restore:/var/lib/clickhouse/backups/online-restore:ro
-      - ${CDN_SOURCE_DIR:-.}/deploy/compose/clickhouse.xml:/etc/clickhouse-server/config.d/cdn-platform.xml:ro
-      - ${CDN_SOURCE_DIR:-.}/deploy/clickhouse/cdn-platform-users.xml:/etc/clickhouse-server/users.d/cdn-platform.xml:ro
+      - ${CDN_DEPLOY_DIR:-./app}/deploy/compose/clickhouse.xml:/etc/clickhouse-server/config.d/cdn-platform.xml:ro
+      - ${CDN_DEPLOY_DIR:-./app}/deploy/clickhouse/cdn-platform-users.xml:/etc/clickhouse-server/users.d/cdn-platform.xml:ro
     healthcheck:
       test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
       interval: 5s
@@ -143,7 +140,7 @@ services:
       - ./backup/online-restore:/var/lib/cdn-platform-restore
       - ./config:/deployment/config:ro
       - ./compose.yaml:/deployment/compose.yaml:ro
-      - ${CDN_SOURCE_DIR:-.}/Dockerfile:/deployment/Dockerfile:ro
+      - ./.env:/deployment/.env:ro
     restart: unless-stopped
     depends_on:
       clickhouse:

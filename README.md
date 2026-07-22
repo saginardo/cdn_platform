@@ -67,6 +67,8 @@ For UI development, run the TLS control plane on `127.0.0.1:8443`, then start `n
 
 `dist/SHA256SUMS` contains the exact digest required by `EDGE_BINARY_SHA256`. The controller can also serve the signed edge binary itself when `EDGE_BINARY_PATH` is configured; use `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` as `EDGE_BINARY_URL`.
 
+GitHub Actions runs the same compilation and validation checks, browser smoke tests, and a complete Docker build for every pull request. Successful `main` builds publish `ghcr.io/saginardo/cdn_platform`; the workflow never connects to production. Private deployment automation consumes the immutable digest, and the control host only pulls that image instead of compiling source or running `docker compose build`. See [the Compose deployment guide](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery).
+
 ## Control-plane installation
 
 Docker Compose is the supported deployment for the control plane and ClickHouse. It keeps configuration, SQLite, the internal CA, certificate state, ClickHouse data, logs, and backup staging below `/opt/cdn-platform`. The existing public reverse proxy can remain separate; the controller still terminates TLS on its direct port for edge mTLS. See [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md) for installation, backup, and restore instructions.
@@ -78,7 +80,7 @@ sudo ./scripts/install-control-compose.sh /opt/cdn-platform
 sudoedit /opt/cdn-platform/config/control.env
 cd /opt/cdn-platform
 sudo docker compose config --quiet
-sudo docker compose build control
+sudo docker compose pull
 sudo docker compose run --rm --no-deps control keygen
 ```
 

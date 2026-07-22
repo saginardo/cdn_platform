@@ -165,13 +165,14 @@ func TestRenderedSecurityConfigurationPassesNginxSyntaxCheck(t *testing.T) {
 	}
 	directory := t.TempDir()
 	configuration = strings.ReplaceAll(configuration, "/opt/cdn-edge/logs/security.json", filepath.Join(directory, "security.json"))
+	configuration = strings.Replace(configuration, "listen 80 default_server;", "listen unix:"+filepath.Join(directory, "nginx.sock")+" default_server;", 1)
 	nginxConfiguration := "pid " + filepath.Join(directory, "nginx.pid") + ";\nerror_log stderr;\nevents {}\nhttp {\n" + configuration + "\n}\n"
 	path := filepath.Join(directory, "nginx.conf")
 	if err := os.WriteFile(path, []byte(nginxConfiguration), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	command := exec.Command(binary, "-t", "-c", path, "-p", directory)
-	if output, err := command.CombinedOutput(); err != nil && !(strings.Contains(string(output), "syntax is ok") && strings.Contains(string(output), "Operation not permitted")) {
+	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("nginx -t: %v\n%s\n%s", err, output, nginxConfiguration)
 	}
 }

@@ -67,6 +67,8 @@ go test ./...
 
 `dist/SHA256SUMS` 包含 `EDGE_BINARY_SHA256` 所需的准确摘要。配置 `EDGE_BINARY_PATH` 后，控制器也可以直接提供已签名边缘二进制文件；此时可将 `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` 用作 `EDGE_BINARY_URL`。
 
+GitHub Actions 会为每个拉取请求执行相同的编译与校验、浏览器冒烟测试和完整 Docker 镜像构建。`main` 构建成功后发布 `ghcr.io/saginardo/cdn_platform`，工作流不会连接生产环境。私有部署自动化消费不可变 digest；控制主机只拉取镜像，不再编译源码或执行 `docker compose build`。详见 [Compose 部署文档](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery)。
+
 ## 控制面安装
 
 Docker Compose 是控制面和 ClickHouse 的受支持部署方式。配置、SQLite、内部 CA、证书状态、ClickHouse 数据、日志和备份暂存都保存在 `/opt/cdn-platform` 下。现有公网反向代理可以独立保留；控制器仍在直连端口终止 TLS，以支持边缘 mTLS。安装、备份和恢复说明见 [docs/COMPOSE_DEPLOYMENT.md](docs/COMPOSE_DEPLOYMENT.md)。
@@ -78,7 +80,7 @@ sudo ./scripts/install-control-compose.sh /opt/cdn-platform
 sudoedit /opt/cdn-platform/config/control.env
 cd /opt/cdn-platform
 sudo docker compose config --quiet
-sudo docker compose build control
+sudo docker compose pull
 sudo docker compose run --rm --no-deps control keygen
 ```
 

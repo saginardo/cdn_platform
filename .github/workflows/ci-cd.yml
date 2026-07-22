@@ -1,0 +1,172 @@
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  verify:
+    name: Compile and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Validate frontend
+        run: npm --prefix frontend run check
+
+      - name: Test Go packages
+        shell: bash
+        run: |
+          log_file=$(mktemp)
+          if go test ./... 2>&1 | tee "$log_file"; then
+            exit 0
+          fi
+          details=$(awk '/^--- FAIL:|^FAIL([[:space:]]|$)|^[[:space:]]+[^[:space:]]+_test\.go:[0-9]+:/{print}' "$log_file")
+          if [[ -z "$details" ]]; then
+            details=$(tail -c 3500 "$log_file")
+          fi
+          details=${details:0:3500}
+          details=${details//'%'/'%25'}
+          details=${details//$'\r'/'%0D'}
+          details=${details//$'\n'/'%0A'}
+          printf '::error title=Go tests failed::%s\n' "$details"
+          exit 1
+
+      - name: Vet Go packages
+        run: go vet ./...
+
+      - name: Validate GitHub Actions workflow
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+      - name: Validate deployment scripts
+        run: bash -n scripts/*.sh test/*.sh test/fake-docker
+
+      - name: Exercise deployment rollback
+        run: sudo ./test/deploy-control-compose.sh
+
+      - name: Validate Compose configuration
+        run: |
+          install -d config
+          cp deploy/examples/compose-control.env.example config/control.env
+          cp deploy/examples/compose-backup.env.example config/backup.env
+          : >config/restic-password
+          printf '%s\n' \
+            'CDN_CONTROL_IMAGE=ghcr.io/saginardo/cdn_platform:main' \
+            'CDN_DEPLOY_DIR=.' >.env
+          docker compose --profile backup config --quiet
+
+  browser:
+    name: Browser smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm --prefix frontend ci
+
+      - name: Install Chromium
+        run: npm --prefix frontend exec -- playwright install --with-deps chromium
+
+      - name: Run browser tests
+        run: npm --prefix frontend run test:e2e
+
+  image:
+    name: Build and publish image
+    needs: [verify, browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=sha-${{ github.sha }},enable=${{ github.event_name != 'pull_request' }}
+            type=ref,event=tag
+            type=ref,event=pr
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and optionally publish image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=control-image
+          cache-to: type=gha,mode=max,scope=control-image
+          provenance: mode=max
+          sbom: true
+
+      - name: Record immutable image reference
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: echo "Published \`${IMAGE_NAME}@${IMAGE_DIGEST}\`" >>"$GITHUB_STEP_SUMMARY"

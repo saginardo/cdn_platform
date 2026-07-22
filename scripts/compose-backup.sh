@@ -81,7 +81,7 @@ if [[ "$phase" == "all" ]]; then
     /deployment/config/control.env \
     /deployment/config/backup.env \
     /deployment/compose.yaml \
-    /deployment/Dockerfile \
+    /deployment/.env \
     --tag cdn-control-compose
 fi
 

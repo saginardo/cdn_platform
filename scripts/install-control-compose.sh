@@ -1,18 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+if (($# > 2)); then
+  echo "usage: install-control-compose.sh [root] [control-image]" >&2
+  exit 2
+fi
 if [[ $EUID -ne 0 ]]; then
   echo "install-control-compose.sh must run as root" >&2
   exit 2
 fi
-if [[ ! -f compose.yaml || ! -f Dockerfile || ! -f go.mod ]]; then
+if [[ ! -f compose.yaml || ! -d deploy || ! -d scripts ]]; then
   echo "run this script from the repository root" >&2
   exit 2
 fi
 
 root="${1:-/opt/cdn-platform}"
-source_dir="$root/app"
-install -d -m 0750 "$root" "$source_dir" "$root/config" "$root/backup/staging/clickhouse"
+control_image="${2:-${CDN_CONTROL_IMAGE:-ghcr.io/saginardo/cdn_platform:main}}"
+image_pattern='^ghcr\.io/saginardo/cdn_platform(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$'
+if [[ "$root" != /* || "$root" == "/" ]]; then
+  echo "root must be an absolute path below /" >&2
+  exit 2
+fi
+root=$(realpath -m -- "$root")
+if [[ "$root" == "/" ]]; then
+  echo "root must resolve below /" >&2
+  exit 2
+fi
+if [[ ! "$control_image" =~ $image_pattern ]]; then
+  echo "control image must be a ghcr.io/saginardo/cdn_platform tag or digest" >&2
+  exit 2
+fi
+
+deploy_dir="$root/app"
+if [[ -L "$deploy_dir" ]]; then
+  echo "deployment support directory must not be a symlink: $deploy_dir" >&2
+  exit 2
+fi
+install -d -m 0750 "$root" "$root/config" "$root/backup/staging/clickhouse"
 install -d -o 10001 -g 10001 -m 0750 "$root/backup/status"
 install -d -o 10001 -g 101 -m 2750 "$root/backup/online-restore"
 touch "$root/backup/online-restore/operations.lock"
@@ -27,15 +51,11 @@ install -d -o 10001 -g 10001 -m 0750 \
 install -d -o 101 -g 101 -m 0750 "$root/data/clickhouse" "$root/logs/clickhouse"
 chown -R 101:101 "$root/backup/staging/clickhouse"
 
-rm -rf "$source_dir/cmd" "$source_dir/internal" "$source_dir/deploy" "$source_dir/docs" "$source_dir/scripts" "$source_dir/frontend"
-cp -a cmd internal deploy docs scripts go.mod go.sum Dockerfile .dockerignore AGENTS.md LICENSE README.md "$source_dir/"
-install -d -m 0750 "$source_dir/frontend"
-cp -a frontend/.oxlintrc.json frontend/.prettierignore frontend/README.md frontend/components.json frontend/index.html \
-  frontend/package.json frontend/package-lock.json frontend/playwright.config.ts \
-  frontend/tsconfig.json frontend/tsconfig.app.json frontend/tsconfig.node.json frontend/vite.config.ts \
-  frontend/e2e frontend/src "$source_dir/frontend/"
+rm -rf "$deploy_dir"
+install -d -m 0750 "$deploy_dir"
+cp -a deploy scripts "$deploy_dir/"
 install -m 0644 compose.yaml "$root/compose.yaml"
-printf 'CDN_SOURCE_DIR=./app\n' >"$root/.env"
+printf 'CDN_CONTROL_IMAGE=%s\nCDN_DEPLOY_DIR=./app\n' "$control_image" >"$root/.env"
 chmod 0644 "$root/.env"
 
 if [[ ! -e "$root/config/control.env" ]]; then
@@ -51,4 +71,4 @@ chown root:10001 "$root/config/restic-password"
 chmod 0640 "$root/config/restic-password"
 
 echo "Installed Compose deployment at $root"
-echo "Configure $root/config/control.env, then run: cd $root && docker compose build control"
+echo "Configure $root/config/control.env, then run: cd $root && docker compose pull"

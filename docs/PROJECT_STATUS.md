@@ -203,13 +203,13 @@ GOMODCACHE=/tmp/cdn_platform_go_modcache \
 go test ./...
 ```
 
-前端源码在 `frontend/`，`npm run build` 将路由分块和静态资源输出到 `internal/control/web/dist/`，再由 `internal/control/server.go` 使用 `//go:embed web/dist` 编入 `cdn-control`。因此修改 UI 后必须重新构建前端、重新编译并重启控制面，单独上传静态文件不会生效。Dockerfile 与 `scripts/build-release.sh` 已串联这两段构建。
+前端源码在 `frontend/`，`npm run build` 将路由分块和静态资源输出到 `internal/control/web/dist/`，再由 `internal/control/server.go` 使用 `//go:embed web/dist` 编入 `cdn-control`。因此修改 UI 后必须重新构建前端、重新编译并重启控制面，单独上传静态文件不会生效。Dockerfile、`scripts/build-release.sh` 与 GitHub Actions 已串联这两段构建。
 
 ### 发布控制面
 
-1. 将受信任的源码同步到 `control-host:/opt/cdn-platform/app`，并保持 `/opt/cdn-platform/compose.yaml` 使用同一版本。
-2. 在 `/opt/cdn-platform` 执行 `docker compose build control` 和 `docker compose up -d`。
-3. 检查 `docker compose ps`、控制容器日志和 `https://control.example.com/healthz`。
+1. 合并到 `main` 后等待 GitHub Actions 的编译、测试、浏览器检查和镜像构建全部通过。
+2. Actions 只将镜像推送到 GHCR 并记录精确 digest；仓库外的私有部署配置把 digest 写入控制主机 `.env`，控制主机只执行 pull 和 Compose recreate，不执行构建。
+3. 部署脚本检查运行镜像 ID、`docker compose ps` 和控制面健康；失败时自动恢复上一镜像和 Compose 文件。
 4. 需要更新已发布站点的 Nginx 渲染逻辑时，执行 `docker compose run --rm --no-deps control publish-all`，使 edge agent 拉取新的 desired state。
 
 ### 发布边缘与站点

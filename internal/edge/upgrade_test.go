@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -252,7 +253,10 @@ func TestAgentRejectsUpgradeArtifactWithWrongDigest(t *testing.T) {
 		return upgradeHTTPResponse(http.StatusNotFound, nil), nil
 	})}
 	runner := &fakeUpgradeRunner{}
-	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: t.TempDir(), AgentSHA256: strings.Repeat("1", 64), HTTPClient: client, UpgradeRunner: runner, Runner: &fakeRunner{}})
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: t.TempDir(), CertificateDir: filepath.Join(t.TempDir(), "certs"),
+		AgentSHA256: strings.Repeat("1", 64), HTTPClient: client, UpgradeRunner: runner, Runner: &fakeRunner{},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

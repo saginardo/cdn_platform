@@ -74,7 +74,7 @@ func TestRenderedStaticAssetsCacheAcrossCookies(t *testing.T) {
 	if os.Geteuid() == 0 {
 		userDirective = "user root;\n"
 	}
-	nginxConfiguration := userDirective + "pid " + filepath.Join(directory, "nginx.pid") + ";\nerror_log " + filepath.Join(directory, "error.log") + " notice;\nevents {}\nhttp {\n" + configuration + "\n}\n"
+	nginxConfiguration := userDirective + "pid " + filepath.Join(directory, "nginx.pid") + ";\nerror_log " + filepath.Join(directory, "error.log") + " notice;\nevents {}\nhttp {\naccess_log off;\n" + configuration + "\n}\n"
 	if err := os.WriteFile(path, []byte(nginxConfiguration), 0o600); err != nil {
 		t.Fatal(err)
 	}

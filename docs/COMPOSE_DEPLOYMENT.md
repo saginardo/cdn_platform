@@ -8,9 +8,9 @@ The installer creates one operational and backup boundary:
 
 ```text
 /opt/cdn-platform/
-  app/                         pinned source used for local image builds
+  app/                         Compose support scripts and ClickHouse config
   compose.yaml
-  .env
+  .env                         pinned GHCR control image and support path
   config/
     control.env                bootstrap secrets and runtime fallbacks
     backup.env                 restic and backup schedule settings
@@ -31,6 +31,14 @@ The installer creates one operational and backup boundary:
 
 The shared host-network Caddy installation stays outside this directory. It proxies `control.example.com` from public port 443 to `https://127.0.0.1:${CONTROL_MTLS_PORT}`. The control container terminates TLS itself so edge mTLS remains end-to-end.
 
+## GitHub Actions delivery
+
+`.github/workflows/ci-cd.yml` owns compilation, tests, and image construction. Pull requests run frontend checks, Go tests/vet, browser smoke tests, Compose validation, and an unpushed Linux AMD64 image build. A successful `main` build publishes both `main` and `sha-<commit>` tags to `ghcr.io/saginardo/cdn_platform`, with provenance and SBOM attestations, and records the immutable digest in the job summary. The workflow deliberately contains no production host, credential, SSH, or rollout configuration and never connects to a production environment.
+
+Keep production deployment wiring in private infrastructure configuration outside this repository. That automation should pass the published `@sha256:<digest>` reference to `scripts/deploy-control-compose.sh`. The host then pulls the exact image, updates only `compose.yaml`, `.env`, and `app/`, recreates the running control/certificate/backup containers without building, checks the control health endpoint and running image ID, and restores the previous definition and image if validation fails. After a successful cutover it removes unused images belonging to this project, while leaving every other Docker repository untouched. Persistent `config/`, `data/`, `logs/`, and `backup/` content is outside this replacement boundary.
+
+The repository is public, so [standard GitHub-hosted runners do not consume paid Actions minutes](https://docs.github.com/en/billing/concepts/product-billing/github-actions). [GHCR container-image storage and bandwidth are currently free](https://docs.github.com/en/billing/concepts/product-billing/github-packages) under GitHub's published billing policy. A [newly created personal-account package is private by default](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility); Actions can publish it with `GITHUB_TOKEN`, while private deployment automation must authenticate pulls separately. Change the package to Public in GitHub package settings only if administrators also need anonymous manual pulls. Otherwise authenticate manual pulls with a classic PAT scoped to `read:packages`.
+
 ## Fresh installation
 
 Run from a trusted repository checkout on a Debian 12 host with Docker Engine and Docker Compose:
@@ -40,7 +48,7 @@ sudo ./scripts/install-control-compose.sh /opt/cdn-platform
 sudoedit /opt/cdn-platform/config/control.env
 cd /opt/cdn-platform
 sudo docker compose config --quiet
-sudo docker compose build control
+sudo docker compose pull
 sudo docker compose run --rm --no-deps control keygen
 ```
 
@@ -52,7 +60,7 @@ sudo docker compose ps
 curl -fsS https://control.example.com/healthz
 ```
 
-The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 at startup; a configured `EDGE_BINARY_SHA256` must match or startup fails.
+The default image is `ghcr.io/saginardo/cdn_platform:main`. For a repeatable installation, pass a `sha-<commit>` tag or `@sha256:<digest>` as the installer's second argument. The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 at startup; a configured `EDGE_BINARY_SHA256` must match or startup fails.
 
 The authenticated **Settings** view stores runtime overrides in SQLite. Cloudflare Token, SMTP password, S3 secret access key, and Restic repository password values are encrypted with `CONTROL_ENCRYPTION_KEY`; API responses never return them. Database overrides take precedence over their environment fallbacks, while reset actions restore those fallbacks. Retain the environment Cloudflare token because a fresh installation needs it before the UI and database exist. Control-certificate bootstrap and renewal containers mount the control database read-only and refresh their temporary Certbot credentials before each certificate operation.
 
@@ -93,11 +101,11 @@ sudo docker compose --profile backup run --rm --entrypoint \
 
 The default schedule is 03:25 Asia/Shanghai with up to 20 minutes of random delay. A scheduled or manual wrapper run takes a backup-only lock, then makes up to `BACKUP_MAX_ATTEMPTS` attempts (default 3), using `BACKUP_RETRY_DELAYS_SECONDS` (default `30,120`) between failures. It atomically updates `backup/status/backup.json`; the Settings view and message center expose running, retrying, successful, skipped-during-restore, and final-failure states. A final failure also sends an SMTP alert through the effective database-or-environment SMTP profile. A restore-maintenance skip is not retried or alerted. If snapshot creation succeeds but `forget --prune` fails, retries run only the retention phase so one scheduled run cannot create duplicate snapshots. Repository validation and online-restore snapshot listing use lock-free reads, and cancelled Restic subprocesses receive an interrupt grace period to remove any lock held by a stateful operation. The scheduler remains alive after a failed or skipped run and evaluates the next scheduled time.
 
-Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `cdn_platform` ClickHouse database, not recreatable `system` diagnostic tables. Backup and certificate containers take a shared operation lock, while a restore cutover takes the exclusive lock and publishes a maintenance marker so no new writer operation starts during the swap. After an upgrade that changes the backup scripts or image, rebuild the image and recreate the optional scheduler with `docker compose --profile backup up -d --build backup`.
+Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `cdn_platform` ClickHouse database, not recreatable `system` diagnostic tables, plus `compose.yaml` and `.env` so the exact GHCR image reference is recorded. Backup and certificate containers take a shared operation lock, while a restore cutover takes the exclusive lock and publishes a maintenance marker so no new writer operation starts during the swap. After an image upgrade, recreate the optional scheduler with `docker compose --profile backup up -d --no-build backup`; the GitHub Actions deployment does this automatically when the scheduler is running.
 
 ## Restore
 
-On a replacement host, install the same source revision and populate `config/backup.env`, `config/restic-password`, and `CONTROL_ENCRYPTION_KEY` from the offline recovery record. Disaster recovery intentionally uses these environment credentials because the web override is inside the snapshot being restored. Do not initialize the control plane first. Then run:
+On a replacement host, install the deployment support files and the same immutable GHCR image reference recorded in the snapshot or offline recovery record. Populate `config/backup.env`, `config/restic-password`, and `CONTROL_ENCRYPTION_KEY` from the offline recovery record. Disaster recovery intentionally uses these environment credentials because the web override is inside the snapshot being restored. Do not initialize the control plane first. Then run:
 
 ```bash
 sudo CDN_PLATFORM_ROOT=/opt/cdn-platform \

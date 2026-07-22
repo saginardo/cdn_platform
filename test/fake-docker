@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%q ' "$@" >>"$FAKE_DOCKER_LOG"
+printf '\n' >>"$FAKE_DOCKER_LOG"
+
+if [[ ${1:-} == compose ]]; then
+  arguments=" $* "
+  if [[ "$arguments" == *' ps --status running --services '* ]]; then
+    printf '%s\n' control clickhouse control-cert-renew backup
+  elif [[ "$arguments" == *' ps -q control '* ]]; then
+    printf '%s\n' fake-control-container
+  elif [[ "$arguments" == *' exec -T control '* ]]; then
+    if [[ "$FAKE_MODE" == failure ]] && grep -Fq 'CDN_CONTROL_IMAGE=' "$FAKE_DEPLOY_ROOT/.env"; then
+      exit 1
+    fi
+  fi
+elif [[ ${1:-} == image && ${2:-} == inspect ]]; then
+  printf '%s\n' sha256:requested-image
+elif [[ ${1:-} == image && ${2:-} == ls ]]; then
+  printf '%s\n' \
+    'ghcr.io/saginardo/cdn_platform|main|sha256:current-digest|sha256:requested-image' \
+    'ghcr.io/saginardo/cdn_platform|sha-old|sha256:old-digest|sha256:old-ghcr' \
+    'cdn-platform-control|local|<none>|sha256:old-local' \
+    'unrelated/service|latest|sha256:unrelated|sha256:unrelated-image'
+elif [[ ${1:-} == inspect ]]; then
+  printf '%s\n' sha256:requested-image
+fi

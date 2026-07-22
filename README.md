@@ -1,5 +1,7 @@
 # CDN Platform
 
+English | [简体中文](readme_cn.md)
+
 A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-10 Debian 12 edge VPSs. Cloudflare is authoritative DNS only: end users connect directly to the edge nodes.
 
 ## What is implemented
@@ -134,7 +136,7 @@ If Nginx validation or reload fails before cleanup is committed, the script rest
 
 ## First site
 
-1. Add the site with its Cloudflare Zone ID, hostname(s), assigned node IDs, primary origin, and optional backup origin. Sites inherit the global DNS TTL unless their draft selects a 60-300 second override; that override becomes live only when the site is published. Generated HTTPS sites default to a 128 MiB request-body limit; the site form can raise it to the fixed 256, 512, or 1024 MiB presets. HTTP/HTTPS/WebSocket proxying defaults to a 360-second upstream read/write idle timeout, selectable as 6, 15, 30, or 60 minutes. WebSocket and SSE need no path declaration: WebSocket uses `Upgrade`, browser SSE uses `Accept: text/event-stream`, [OpenAI-style streaming](https://developers.openai.com/api/docs/guides/streaming-responses) is passed through for every POST, and nonstandard clients may send `X-CDN-Stream: 1`. Use HTTP(S) origins for normal sites, passthrough mode for an entire hostname that must not use disk cache, `ws://` or `wss://` for an all-WebSocket site, and `grpc://` or `grpcs://` for an all-gRPC hostname.
+1. Add the site with its hostname(s), assigned node IDs, primary origin, and optional backup origin. The controller identifies the Cloudflare zone from the hostname automatically. Sites inherit the global DNS TTL unless their draft selects a 60-300 second override; that override becomes live only when the site is published. Generated HTTPS sites default to a 128 MiB request-body limit; the site form can raise it to the fixed 256, 512, or 1024 MiB presets. HTTP/HTTPS/WebSocket proxying defaults to a 360-second upstream read/write idle timeout, selectable as 6, 15, 30, or 60 minutes. WebSocket and SSE need no path declaration: WebSocket uses `Upgrade`, browser SSE uses `Accept: text/event-stream`, [OpenAI-style streaming](https://developers.openai.com/api/docs/guides/streaming-responses) is passed through for every POST, and nonstandard clients may send `X-CDN-Stream: 1`. Use HTTP(S) origins for normal sites, passthrough mode for an entire hostname that must not use disk cache, `ws://` or `wss://` for an all-WebSocket site, and `grpc://` or `grpcs://` for an all-gRPC hostname.
 2. In Cloudflare, keep these hostname records as DNS-only. The control plane only manages records tagged with `cdn-platform:site=<site-id>;...`; it refuses a hostname already occupied by an untagged or another site's A record.
 3. Run **Issue TLS**. The control VPS queues an asynchronous DNS-01 job via the scoped Cloudflare token and stores the resulting certificate encrypted. The Sites view polls its status; reloading the page does not cancel it. Only one active certificate job may exist per site, so repeated clicks reuse that job.
 4. Run **Publish**. The controller builds each affected node's desired state and waits up to 90 seconds for assigned active nodes to validate and apply it. The Sites view shows per-node conflicts or timeout details; after resolving a conflict, click **Republish**.
@@ -147,9 +149,9 @@ HTTP edge nodes expose `http://EDGE_IPV4/__cdn_health`. Published HTTP configura
 
 For an HTTPS/WSS/GRPCS origin reached by IP while its certificate covers only a DNS hostname, configure the origin URL, Host header, and TLS SNI independently. See [docs/ORIGIN_TLS_SNI.md](docs/ORIGIN_TLS_SNI.md) for the IP connection example, certificate requirements, and edge-side verification commands.
 
-### Range 流量与透传模式
+### Range traffic and passthrough mode
 
-对于不需要视频缓存、只需要稳定转发 HTTP(S) Range 流量的整站代理，启用“透传模式（仅 HTTP(S)，禁用 Nginx 缓存）”并重新发布。不要在保留 `proxy_cache` 的前提下只补充 `Range` / `If-Range`；这不能保证正确回源范围语义。完整的启用条件、限制、故障根因和 `206` 验证命令见 [docs/PASSTHROUGH_MODE.md](docs/PASSTHROUGH_MODE.md)。
+For a whole-site proxy that does not need video caching and only needs reliable HTTP(S) Range forwarding, enable passthrough mode and republish the site. Passthrough mode is limited to HTTP(S) and disables the Nginx cache. Do not keep `proxy_cache` enabled and merely add `Range` / `If-Range`; that does not guarantee correct origin range semantics. See [docs/PASSTHROUGH_MODE.md](docs/PASSTHROUGH_MODE.md) for the activation conditions, limitations, failure analysis, and `206` verification commands.
 
 Certificate jobs use `CERTIFICATE_ISSUE_TIMEOUT` (default `10m`) and wait 30 seconds for Cloudflare DNS-01 TXT propagation. When Certbot specifically reports `No TXT record found`, the issuer waits another 30 seconds and retries once. Other failures are returned immediately. A control-plane stop or restart marks an in-flight job as failed rather than retrying it automatically, to avoid duplicate ACME requests; click **Issue TLS** again after the controller is healthy. The authenticated APIs `GET /api/sites/{site-id}/certificate-task` and `GET /api/tasks/{task-id}` expose the persisted task state and failure detail.
 

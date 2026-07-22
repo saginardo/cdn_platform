@@ -57,16 +57,23 @@ export function AppSidebar({
   brandSubtitle,
   brandLogoDataURL,
   brandPending,
+  productName,
+  productVersion,
   onLogout,
 }: {
   brandName: string;
   brandSubtitle: string;
   brandLogoDataURL: string;
   brandPending?: boolean;
+  productName: string;
+  productVersion: string;
   onLogout: () => void;
 }) {
   const location = useLocation();
   const { isMobile, setOpenMobile } = useSidebar();
+  const versionLabel = productVersion.startsWith("v")
+    ? productVersion
+    : `v${productVersion}`;
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="px-2 py-3">
@@ -153,6 +160,17 @@ export function AppSidebar({
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>
+        {productVersion ? (
+          <div
+            aria-label={`${productName} 版本 ${versionLabel}`}
+            className="flex h-6 min-w-0 items-center justify-between gap-2 px-2 text-[11px] leading-none text-sidebar-foreground/50 group-data-[collapsible=icon]:hidden"
+          >
+            <span className="truncate">{productName}</span>
+            <span className="shrink-0 font-mono tabular-nums">
+              {versionLabel}
+            </span>
+          </div>
+        ) : null}
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

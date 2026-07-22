@@ -6,6 +6,11 @@ export type NodeStatus =
   | "uninstalling"
   | "uninstalled";
 
+export interface SystemInfo {
+  name: string;
+  version: string;
+}
+
 export interface NodeUpgradeTask {
   id: string;
   node_id: string;

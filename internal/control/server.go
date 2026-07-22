@@ -87,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/login", s.login)
 	mux.HandleFunc("POST /api/logout", s.requireAdmin(s.logout))
 	mux.HandleFunc("GET /api/session", s.requireAdmin(s.session))
+	mux.HandleFunc("GET /api/system/info", s.requireAdmin(s.systemInfo))
 	mux.HandleFunc("GET /api/overview", s.requireAdmin(s.overview))
 	mux.HandleFunc("GET /api/health/reconciliation", s.requireAdmin(s.healthReconciliationStatus))
 	mux.HandleFunc("GET /api/messages", s.requireAdmin(s.listMessages))

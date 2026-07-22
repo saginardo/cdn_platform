@@ -22,7 +22,7 @@ import {
 import { useAuth } from "@/features/auth/auth-provider";
 import { cacheBranding, useCachedBranding } from "@/hooks/use-branding";
 import { api } from "@/lib/api";
-import type { Settings } from "@/lib/types";
+import type { Settings, SystemInfo } from "@/lib/types";
 
 const pageNames: Record<string, string> = {
   overview: "概览",
@@ -41,6 +41,11 @@ export function AppShell() {
   const settingsQuery = useQuery({
     queryKey: ["settings"],
     queryFn: () => api<Settings>("/api/settings"),
+  });
+  const systemInfoQuery = useQuery({
+    queryKey: ["system-info"],
+    queryFn: () => api<SystemInfo>("/api/system/info"),
+    staleTime: Infinity,
   });
   const cachedBranding = useCachedBranding();
   const branding = settingsQuery.data?.branding ?? cachedBranding;
@@ -63,6 +68,8 @@ export function AppShell() {
         brandSubtitle={branding?.subtitle ?? ""}
         brandLogoDataURL={branding?.logo_data_url ?? ""}
         brandPending={!branding}
+        productName={systemInfoQuery.data?.name ?? "simple_cdn"}
+        productVersion={systemInfoQuery.data?.version ?? ""}
         onLogout={() => void logout()}
       />
       <SidebarInset className="min-w-0">

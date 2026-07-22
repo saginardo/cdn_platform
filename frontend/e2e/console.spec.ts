@@ -522,6 +522,7 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
     }
     const responses: Record<string, unknown> = {
       "/api/session": { user: "admin", csrf_token: "e2e-csrf" },
+      "/api/system/info": { name: "simple_cdn", version: "0.1.1" },
       "/api/branding": branding,
       "/api/messages": { messages: [], unread_count: 0 },
       "/api/overview": overview,
@@ -661,6 +662,7 @@ test("desktop overview renders shadcn chart and aligned navigation", async ({
   ).toBeVisible();
   await expect(page.getByText("38,241", { exact: true })).toBeVisible();
   await expect(page.getByText("静态资源主站")).toBeVisible();
+  await expect(page.getByLabel("simple_cdn 版本 v0.1.1")).toBeVisible();
   const chart = page.locator('[data-slot="chart"] svg').first();
   await expect(chart).toBeVisible();
   expect((await chart.boundingBox())?.height).toBeGreaterThan(200);
@@ -1264,6 +1266,7 @@ test("mobile sidebar closes after hash navigation without horizontal overflow", 
 
   await page.getByRole("button", { name: "切换侧边栏" }).click();
   await expect(page.getByText("工作区", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("simple_cdn 版本 v0.1.1")).toBeVisible();
   const logLink = page.getByRole("link", { name: "日志" });
   expect(
     await logLink.evaluate((element) => getComputedStyle(element).textAlign),

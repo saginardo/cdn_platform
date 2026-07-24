@@ -453,7 +453,9 @@ function CacheQuotaSettings({
               onChange={(event) => setSize(Number(event.target.value))}
             />
           </div>
-          <p className="text-xs text-muted-foreground">保存后立即下发到该节点。</p>
+          <p className="text-xs text-muted-foreground">
+            保存后立即下发到该节点。
+          </p>
           <Button type="submit" disabled={mutation.isPending}>
             {mutation.isPending ? (
               <LoaderCircle className="animate-spin" />

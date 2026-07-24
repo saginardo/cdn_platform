@@ -588,7 +588,9 @@ function TrafficSettings({
                   onChange={(event) =>
                     setDraft({
                       ...draft,
-                      client_keepalive_timeout_seconds: Number(event.target.value),
+                      client_keepalive_timeout_seconds: Number(
+                        event.target.value,
+                      ),
                     })
                   }
                 />

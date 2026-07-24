@@ -3,7 +3,6 @@ package control
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -13,6 +12,10 @@ type startOnlineRestoreRequest struct {
 }
 
 type commitOnlineRestoreRequest struct {
+	Confirmation string `json:"confirmation"`
+}
+
+type deleteBackupSnapshotRequest struct {
 	Confirmation string `json:"confirmation"`
 }
 
@@ -27,6 +30,33 @@ func (s *Server) listBackupSnapshots(response http.ResponseWriter, request *http
 		return
 	}
 	writeJSON(response, http.StatusOK, snapshots)
+}
+
+func (s *Server) deleteBackupSnapshot(response http.ResponseWriter, request *http.Request) {
+	if s.OnlineRestore == nil {
+		writeError(response, http.StatusServiceUnavailable, errors.New("online restore is unavailable"))
+		return
+	}
+	var input deleteBackupSnapshotRequest
+	if !readJSON(response, request, &input) {
+		return
+	}
+	snapshot, err := s.OnlineRestore.DeleteSnapshot(request.Context(), request.PathValue("id"), input.Confirmation)
+	if err != nil {
+		status := http.StatusBadGateway
+		switch {
+		case errors.Is(err, errResticSnapshotID), errors.Is(err, errResticSnapshotConfirmation):
+			status = http.StatusBadRequest
+		case errors.Is(err, errOnlineRestoreActive):
+			status = http.StatusConflict
+		case errors.Is(err, errOnlineRestoreSnapshotMissing):
+			status = http.StatusNotFound
+		}
+		writeError(response, status, err)
+		return
+	}
+	s.audit(request, adminID(request.Context()), "delete_backup_snapshot", "backup_snapshot", snapshot.ID, "short_id="+snapshot.ShortID)
+	writeJSON(response, http.StatusOK, map[string]string{"deleted_snapshot_id": snapshot.ID})
 }
 
 func (s *Server) currentOnlineRestore(response http.ResponseWriter, _ *http.Request) {
@@ -49,7 +79,7 @@ func (s *Server) startOnlineRestore(response http.ResponseWriter, request *http.
 	job, err := s.OnlineRestore.Start(input.SnapshotID, input.Confirmation)
 	if err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "already active") {
+		if errors.Is(err, errOnlineRestoreActive) {
 			status = http.StatusConflict
 		}
 		writeError(response, status, err)

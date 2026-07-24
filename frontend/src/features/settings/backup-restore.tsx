@@ -5,6 +5,7 @@ import {
   RefreshCw,
   RotateCcw,
   ShieldCheck,
+  Trash2,
   X,
 } from "lucide-react";
 import { useState } from "react";
@@ -31,6 +32,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api, errorMessage } from "@/lib/api";
 import { formatDateTime } from "@/lib/format";
 import type { BackupRunStatus, RestoreJob, RestoreSnapshot } from "@/lib/types";
@@ -39,6 +45,7 @@ import { useListPagination } from "@/hooks/use-list-pagination";
 export function BackupRestore() {
   const queryClient = useQueryClient();
   const [selected, setSelected] = useState<RestoreSnapshot | null>(null);
+  const [deleting, setDeleting] = useState<RestoreSnapshot | null>(null);
   const [commitOpen, setCommitOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
   const status = useQuery({
@@ -108,8 +115,34 @@ export function BackupRestore() {
     },
     onError: (error) => toast.error(errorMessage(error)),
   });
+  const deleteSnapshot = useMutation({
+    mutationFn: (snapshot: RestoreSnapshot) =>
+      api<{ deleted_snapshot_id: string }>(
+        `/api/backups/snapshots/${encodeURIComponent(snapshot.id)}`,
+        {
+          method: "DELETE",
+          body: JSON.stringify({ confirmation: snapshot.short_id }),
+        },
+      ),
+    onSuccess: (_response, snapshot) => {
+      queryClient.setQueryData<RestoreSnapshot[]>(
+        ["backup-snapshots"],
+        (currentSnapshots) =>
+          currentSnapshots?.filter((item) => item.id !== snapshot.id),
+      );
+      void queryClient.invalidateQueries({ queryKey: ["backup-snapshots"] });
+      setDeleting(null);
+      if (selected?.id === snapshot.id) setSelected(null);
+      toast.success(`备份快照 ${snapshot.short_id} 已永久删除`);
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
   const current = job.data;
-  const busy = start.isPending || commit.isPending || cancel.isPending;
+  const busy =
+    start.isPending ||
+    commit.isPending ||
+    cancel.isPending ||
+    deleteSnapshot.isPending;
 
   return (
     <>
@@ -205,15 +238,33 @@ export function BackupRestore() {
                         </TableCell>
                         <TableCell>{snapshot.hostname || "--"}</TableCell>
                         <TableCell className="text-right">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={busy || activeRestore(current?.state)}
-                            onClick={() => setSelected(snapshot)}
-                          >
-                            <ShieldCheck />
-                            准备恢复
-                          </Button>
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={busy || activeRestore(current?.state)}
+                              onClick={() => setSelected(snapshot)}
+                            >
+                              <ShieldCheck />
+                              准备恢复
+                            </Button>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="destructive"
+                                  size="icon-sm"
+                                  aria-label={`删除快照 ${snapshot.short_id}`}
+                                  disabled={
+                                    busy || activeRestore(current?.state)
+                                  }
+                                  onClick={() => setDeleting(snapshot)}
+                                >
+                                  <Trash2 />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>删除备份快照</TooltipContent>
+                            </Tooltip>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -245,6 +296,21 @@ export function BackupRestore() {
         busy={start.isPending}
         onConfirm={async () => {
           if (selected) await start.mutateAsync(selected);
+        }}
+      />
+      <ConfirmDialog
+        open={Boolean(deleting)}
+        onOpenChange={(open) => {
+          if (!open) setDeleting(null);
+        }}
+        title="删除备份快照"
+        description={`将从 S3 备份仓库永久删除快照 ${deleting?.short_id ?? ""}，并清理无引用数据。此操作不可撤销。`}
+        confirmation={deleting?.short_id}
+        confirmLabel="永久删除"
+        destructive
+        busy={deleteSnapshot.isPending}
+        onConfirm={async () => {
+          if (deleting) await deleteSnapshot.mutateAsync(deleting);
         }}
       />
       <ConfirmDialog

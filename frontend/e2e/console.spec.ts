@@ -363,8 +363,58 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
   };
   let cacheDefaultSizeGB = 1;
   let nodeCacheOverrideGB: number | null = null;
+  let backupSnapshots = Array.isArray(overrides["/api/backups/snapshots"])
+    ? [...overrides["/api/backups/snapshots"]]
+    : [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    const snapshotDeleteMatch = url.pathname.match(
+      /^\/api\/backups\/snapshots\/([^/]+)$/,
+    );
+    if (snapshotDeleteMatch && route.request().method() === "DELETE") {
+      const snapshotID = decodeURIComponent(snapshotDeleteMatch[1]);
+      const snapshot = backupSnapshots.find(
+        (item) =>
+          typeof item === "object" &&
+          item !== null &&
+          "id" in item &&
+          item.id === snapshotID,
+      ) as { id: string; short_id?: string } | undefined;
+      const input = route.request().postDataJSON() as {
+        confirmation?: string;
+      };
+      if (!snapshot) {
+        await route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "backup snapshot was not found" }),
+        });
+        return;
+      }
+      if (input.confirmation !== snapshot.short_id) {
+        await route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: "confirmation must match the snapshot short ID",
+          }),
+        });
+        return;
+      }
+      backupSnapshots = backupSnapshots.filter(
+        (item) =>
+          typeof item !== "object" ||
+          item === null ||
+          !("id" in item) ||
+          item.id !== snapshotID,
+      );
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ deleted_snapshot_id: snapshotID }),
+      });
+      return;
+    }
     if (
       route.request().method() === "POST" &&
       (url.pathname.match(/^\/api\/certificates\/[^/]+\/renew$/) ||
@@ -619,7 +669,10 @@ async function mockAPI(page: Page, overrides: Record<string, unknown> = {}) {
       "/api/backups/restores/current": null,
       ...overrides,
     };
-    let data = responses[url.pathname];
+    let data =
+      url.pathname === "/api/backups/snapshots"
+        ? backupSnapshots
+        : responses[url.pathname];
     if (
       url.pathname === "/api/nodes/node-1" &&
       data &&
@@ -1636,6 +1689,70 @@ test("all primary workspaces and the new-site editor mount without runtime error
   }
   await page.getByRole("tab", { name: "备份与恢复" }).click();
   await expect(page.getByText("S3 在线恢复")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("backup restore permanently deletes a confirmed S3 snapshot", async ({
+  page,
+}, testInfo) => {
+  const errors = trackPageErrors(page);
+  const snapshotID = "d".repeat(64);
+  const snapshot = {
+    id: snapshotID,
+    short_id: snapshotID.slice(0, 8),
+    time: "2026-07-18T01:02:03Z",
+    hostname: "control-primary",
+    paths: ["/backup/staging/control"],
+    tags: ["cdn-control-compose"],
+  };
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockAPI(page, { "/api/backups/snapshots": [snapshot] });
+  await page.goto("/#/settings");
+  await page.getByRole("tab", { name: "备份与恢复" }).click();
+
+  let snapshotRow = page
+    .getByRole("row")
+    .filter({ hasText: snapshot.short_id });
+  await expect(snapshotRow).toBeVisible();
+  await expect(
+    snapshotRow.getByRole("button", {
+      name: `删除快照 ${snapshot.short_id}`,
+    }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: testInfo.outputPath("backup-snapshot-delete-desktop.png"),
+    fullPage: true,
+  });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await page.getByRole("tab", { name: "备份与恢复" }).click();
+  snapshotRow = page.getByRole("row").filter({ hasText: snapshot.short_id });
+  await snapshotRow
+    .getByRole("button", { name: `删除快照 ${snapshot.short_id}` })
+    .click();
+  const dialog = page.getByRole("alertdialog", { name: "删除备份快照" });
+  await expect(dialog).toContainText("此操作不可撤销");
+  await expect(dialog.getByRole("button", { name: "永久删除" })).toBeDisabled();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: testInfo.outputPath("backup-snapshot-delete-mobile.png"),
+    fullPage: true,
+  });
+
+  await dialog.getByRole("textbox").fill(snapshot.short_id);
+  await dialog.getByRole("button", { name: "永久删除" }).click();
+  await expect(
+    page.getByText(`备份快照 ${snapshot.short_id} 已永久删除`),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("row").filter({ hasText: snapshot.short_id }),
+  ).toHaveCount(0);
+  await expect(page.getByText("没有可用快照")).toBeVisible();
   expect(errors).toEqual([]);
 });
 

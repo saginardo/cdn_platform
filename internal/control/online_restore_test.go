@@ -2,10 +2,14 @@ package control
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +296,123 @@ esac
 	}
 	if completed.State != OnlineRestoreCompleted {
 		t.Fatalf("completed job = %#v", completed)
+	}
+}
+
+func TestBackupSnapshotDeleteAPIValidatesConflictsAndPrunes(t *testing.T) {
+	temporary := t.TempDir()
+	snapshotID := strings.Repeat("b", 64)
+	resticPath := filepath.Join(temporary, "restic")
+	resticScript := `#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >>"$RESTIC_CALLS"
+case "$1" in
+  snapshots)
+    printf '[{"id":"%s","short_id":"bbbbbbbb","time":"2026-07-18T01:02:03Z","tags":["cdn-control-compose"]}]' "$SNAPSHOT_ID"
+    ;;
+  forget)
+    [[ "$2" == "$SNAPSHOT_ID" && "$3" == "--prune" ]]
+    ;;
+  *) exit 2 ;;
+esac
+`
+	if err := os.WriteFile(resticPath, []byte(resticScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resticCalls := filepath.Join(temporary, "restic-calls")
+	t.Setenv("RESTIC_CALLS", resticCalls)
+	t.Setenv("SNAPSHOT_ID", snapshotID)
+
+	database, err := store.Open(filepath.Join(temporary, "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "totp"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := NewSettingsManager(database, cipher, EnvironmentSettings{
+		Backup: domain.BackupSettings{
+			Repository:  "s3:https://s3.example.test/backups",
+			AccessKeyID: "access-key",
+			Region:      "us-east-1",
+			BackupTime:  "03:25",
+		},
+		BackupAccessKey: "secret-key",
+		BackupPassword:  "repository-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := NewOnlineRestoreManager(OnlineRestoreManagerConfig{
+		Root:                  filepath.Join(temporary, "online-restore"),
+		Settings:              settings,
+		Cipher:                cipher,
+		ClickHouse:            &fakeRestoreClickHouse{databases: map[string]bool{"cdn_platform": true}},
+		ResticBinary:          resticPath,
+		ClickHouseGroupID:     -1,
+		SnapshotDeleteTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Stop()
+	server := &Server{Store: database, OnlineRestore: manager}
+	deleteSnapshot := func(id, confirmation string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(deleteBackupSnapshotRequest{Confirmation: confirmation})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodDelete, "/api/backups/snapshots/"+id, bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-CSRF-Token", "csrf-token")
+		request.AddCookie(&http.Cookie{Name: "cdn_session", Value: "session-token"})
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		return response
+	}
+
+	response := deleteSnapshot(snapshotID, "wrong")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("invalid confirmation = %d %s", response.Code, response.Body.String())
+	}
+	missingID := strings.Repeat("c", 64)
+	response = deleteSnapshot(missingID, missingID[:8])
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing snapshot = %d %s", response.Code, response.Body.String())
+	}
+	manager.mu.Lock()
+	manager.job = &OnlineRestoreJob{State: OnlineRestoreReady}
+	manager.mu.Unlock()
+	response = deleteSnapshot(snapshotID, snapshotID[:8])
+	if response.Code != http.StatusConflict {
+		t.Fatalf("active restore conflict = %d %s", response.Code, response.Body.String())
+	}
+	manager.mu.Lock()
+	manager.job = nil
+	manager.mu.Unlock()
+	response = deleteSnapshot(snapshotID, snapshotID[:8])
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), snapshotID) {
+		t.Fatalf("delete snapshot = %d %s", response.Code, response.Body.String())
+	}
+	calls, err := os.ReadFile(resticCalls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(calls), "forget ") != 1 || !strings.Contains(string(calls), "forget "+snapshotID+" --prune") {
+		t.Fatalf("snapshot was not forgotten and pruned exactly once: %s", calls)
 	}
 }
 

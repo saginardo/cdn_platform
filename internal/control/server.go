@@ -111,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/settings/backup/test", s.requireAdmin(s.testBackupSettings))
 	mux.HandleFunc("GET /api/backups/status", s.requireAdmin(s.backupRunStatus))
 	mux.HandleFunc("GET /api/backups/snapshots", s.requireAdmin(s.listBackupSnapshots))
+	mux.HandleFunc("DELETE /api/backups/snapshots/{id}", s.requireAdmin(s.deleteBackupSnapshot))
 	mux.HandleFunc("GET /api/backups/restores/current", s.requireAdmin(s.currentOnlineRestore))
 	mux.HandleFunc("POST /api/backups/restores", s.requireAdmin(s.startOnlineRestore))
 	mux.HandleFunc("POST /api/backups/restores/{id}/commit", s.requireAdmin(s.commitOnlineRestore))

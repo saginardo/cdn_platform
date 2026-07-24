@@ -30,6 +30,13 @@ const (
 	OnlineRestoreCancelled   = "cancelled"
 )
 
+var (
+	errOnlineRestoreActive          = errors.New("an online restore is already active")
+	errResticSnapshotID             = errors.New("a full 64-character Restic snapshot ID is required")
+	errResticSnapshotConfirmation   = errors.New("confirmation must match the snapshot short ID")
+	errOnlineRestoreSnapshotMissing = errors.New("backup snapshot was not found")
+)
+
 type OnlineRestoreSnapshot struct {
 	ID       string    `json:"id"`
 	ShortID  string    `json:"short_id"`
@@ -62,23 +69,25 @@ type OnlineRestoreJob struct {
 }
 
 type OnlineRestoreManagerConfig struct {
-	Root                string
-	Settings            *SettingsManager
-	Cipher              *Cipher
-	ClickHouse          ClickHouseRestoreAdmin
-	ResticBinary        string
-	ControlTLSDomain    string
-	ClickHouseGroupID   int
-	RestoreTimeout      time.Duration
-	SnapshotListTimeout time.Duration
-	QuiesceTimeout      time.Duration
-	Now                 func() time.Time
+	Root                  string
+	Settings              *SettingsManager
+	Cipher                *Cipher
+	ClickHouse            ClickHouseRestoreAdmin
+	ResticBinary          string
+	ControlTLSDomain      string
+	ClickHouseGroupID     int
+	RestoreTimeout        time.Duration
+	SnapshotListTimeout   time.Duration
+	SnapshotDeleteTimeout time.Duration
+	QuiesceTimeout        time.Duration
+	Now                   func() time.Time
 }
 
 type OnlineRestoreManager struct {
 	config OnlineRestoreManagerConfig
 
 	mu            sync.Mutex
+	snapshotMu    sync.Mutex
 	job           *OnlineRestoreJob
 	jobCancel     context.CancelFunc
 	operationLock *os.File
@@ -103,6 +112,9 @@ func NewOnlineRestoreManager(config OnlineRestoreManagerConfig) (*OnlineRestoreM
 	}
 	if config.SnapshotListTimeout <= 0 {
 		config.SnapshotListTimeout = time.Minute
+	}
+	if config.SnapshotDeleteTimeout <= 0 {
+		config.SnapshotDeleteTimeout = 30 * time.Minute
 	}
 	if config.QuiesceTimeout <= 0 {
 		config.QuiesceTimeout = 2 * time.Minute
@@ -214,19 +226,80 @@ func (m *OnlineRestoreManager) ListSnapshots(ctx context.Context) ([]OnlineResto
 	return snapshots, nil
 }
 
+func (m *OnlineRestoreManager) DeleteSnapshot(ctx context.Context, snapshotID, confirmation string) (OnlineRestoreSnapshot, error) {
+	snapshotID = strings.ToLower(strings.TrimSpace(snapshotID))
+	confirmation = strings.ToLower(strings.TrimSpace(confirmation))
+	if !validResticSnapshotID(snapshotID) {
+		return OnlineRestoreSnapshot{}, errResticSnapshotID
+	}
+	if confirmation != snapshotID[:8] {
+		return OnlineRestoreSnapshot{}, errResticSnapshotConfirmation
+	}
+
+	m.snapshotMu.Lock()
+	defer m.snapshotMu.Unlock()
+	m.mu.Lock()
+	active := m.job != nil && onlineRestoreActive(m.job.State)
+	m.mu.Unlock()
+	if active {
+		return OnlineRestoreSnapshot{}, errOnlineRestoreActive
+	}
+
+	runtime := m.config.Settings.BackupRuntime()
+	if err := domain.ValidateBackupSettings(runtime.Settings, runtime.SecretAccessKey, runtime.ResticPassword); err != nil {
+		return OnlineRestoreSnapshot{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, m.config.SnapshotDeleteTimeout)
+	defer cancel()
+	operationLock, err := acquireOnlineRestoreOperationLock(ctx, m.config.Root)
+	if err != nil {
+		return OnlineRestoreSnapshot{}, fmt.Errorf("wait for backup and certificate operations to finish: %w", err)
+	}
+	defer operationLock.Close()
+
+	snapshots, err := m.listSnapshotsWithRuntime(ctx, runtime)
+	if err != nil {
+		return OnlineRestoreSnapshot{}, err
+	}
+	var selected OnlineRestoreSnapshot
+	for _, snapshot := range snapshots {
+		if strings.EqualFold(snapshot.ID, snapshotID) {
+			selected = snapshot
+			break
+		}
+	}
+	if selected.ID == "" {
+		return OnlineRestoreSnapshot{}, errOnlineRestoreSnapshotMissing
+	}
+	if selected.ShortID == "" {
+		selected.ShortID = snapshotID[:8]
+	}
+	runtimeDir, cleanup, err := m.resticRuntime(runtime)
+	if err != nil {
+		return OnlineRestoreSnapshot{}, err
+	}
+	defer cleanup()
+	if _, err := m.runRestic(ctx, runtime, runtimeDir, "forget", snapshotID, "--prune"); err != nil {
+		return OnlineRestoreSnapshot{}, err
+	}
+	return selected, nil
+}
+
 func (m *OnlineRestoreManager) Start(snapshotID, confirmation string) (OnlineRestoreJob, error) {
 	snapshotID = strings.ToLower(strings.TrimSpace(snapshotID))
 	confirmation = strings.ToLower(strings.TrimSpace(confirmation))
 	if !validResticSnapshotID(snapshotID) {
-		return OnlineRestoreJob{}, errors.New("a full 64-character Restic snapshot ID is required")
+		return OnlineRestoreJob{}, errResticSnapshotID
 	}
 	if confirmation != snapshotID[:8] {
-		return OnlineRestoreJob{}, errors.New("confirmation must match the snapshot short ID")
+		return OnlineRestoreJob{}, errResticSnapshotConfirmation
 	}
+	m.snapshotMu.Lock()
+	defer m.snapshotMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.job != nil && onlineRestoreActive(m.job.State) {
-		return OnlineRestoreJob{}, errors.New("an online restore is already active")
+		return OnlineRestoreJob{}, errOnlineRestoreActive
 	}
 	if m.job != nil {
 		_ = os.RemoveAll(m.jobRoot(m.job.ID))

@@ -362,7 +362,7 @@ for table in cdn_access_logs cdn_site_minute cdn_access_to_minute; do
   fi
 done
 for table in cdn_access_logs cdn_site_minute; do
-  check_result=$(clickhouse_query "CHECK TABLE $temporary_database.$table FORMAT TSVRaw")
+  check_result=$(clickhouse_query "CHECK TABLE $temporary_database.$table SETTINGS check_query_single_value_result=1 FORMAT TSVRaw")
   if [[ "$check_result" != 1$'\t'* && "$check_result" != "1" ]]; then
     echo "ClickHouse CHECK TABLE failed for $table: $check_result" >&2
     exit 1

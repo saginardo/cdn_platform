@@ -435,6 +435,7 @@ func TestComposeRestoreStagesAndValidatesBeforeBoundedCutover(t *testing.T) {
 		"PRAGMA quick_check;",
 		"RESTORE DATABASE $restored_source_database AS $temporary_database",
 		"CHECK TABLE $temporary_database.$table",
+		"check_query_single_value_result=1",
 		"RESTORE_CLICKHOUSE_READY_TIMEOUT_SECONDS",
 		"RENAME DATABASE $previous_clickhouse_database TO $rollback_database",
 		"RENAME DATABASE $temporary_database TO $clickhouse_database",

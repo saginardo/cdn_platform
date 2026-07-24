@@ -105,7 +105,7 @@ func (a HTTPClickHouseRestoreAdmin) ValidateDatabase(ctx context.Context, databa
 		}
 	}
 	for _, table := range []string{"cdn_access_logs", "cdn_site_minute"} {
-		result, err := a.query(ctx, "CHECK TABLE "+database+"."+table+" FORMAT TSVRaw")
+		result, err := a.query(ctx, "CHECK TABLE "+database+"."+table+" SETTINGS check_query_single_value_result=1 FORMAT TSVRaw")
 		if err != nil {
 			return err
 		}

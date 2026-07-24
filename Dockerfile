@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG VERSION=0.1.3
+ARG VERSION=0.1.4
 FROM node:24.18.0-bookworm-slim AS web-build
 
 WORKDIR /src/frontend

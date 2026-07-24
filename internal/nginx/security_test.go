@@ -166,7 +166,7 @@ func TestRenderedSecurityConfigurationPassesNginxSyntaxCheck(t *testing.T) {
 	directory := t.TempDir()
 	configuration = strings.ReplaceAll(configuration, "/opt/cdn-edge/logs/security.json", filepath.Join(directory, "security.json"))
 	configuration = strings.Replace(configuration, "listen 80 default_server;", "listen unix:"+filepath.Join(directory, "nginx.sock")+" default_server;", 1)
-	nginxConfiguration := "pid " + filepath.Join(directory, "nginx.pid") + ";\nerror_log stderr;\nevents {}\nhttp {\n" + configuration + "\n}\n"
+	nginxConfiguration := buildIsolatedNginxConfiguration(t, directory, "", "stderr", configuration)
 	path := filepath.Join(directory, "nginx.conf")
 	if err := os.WriteFile(path, []byte(nginxConfiguration), 0o600); err != nil {
 		t.Fatal(err)
@@ -191,8 +191,9 @@ func TestRenderedSecurityConfigurationRuntime(t *testing.T) {
 	securityLogPath := filepath.Join(directory, "security.json")
 	configuration = strings.ReplaceAll(configuration, "/opt/cdn-edge/logs/security.json", securityLogPath)
 	configuration = strings.Replace(configuration, "listen 80 default_server;", "listen unix:"+socketPath+" default_server;", 1)
-	nginxConfiguration := fmt.Sprintf("pid %s;\nerror_log %s notice;\nevents {}\nhttp {\n%s\n}\n",
-		filepath.Join(directory, "nginx.pid"), filepath.Join(directory, "error.log"), configuration)
+	nginxConfiguration := buildIsolatedNginxConfiguration(
+		t, directory, "", filepath.Join(directory, "error.log"), configuration,
+	)
 	path := filepath.Join(directory, "nginx.conf")
 	if err := os.WriteFile(path, []byte(nginxConfiguration), 0o600); err != nil {
 		t.Fatal(err)
@@ -476,15 +477,10 @@ func runRateLimitNginxConfiguration(t *testing.T, luaModule, ndkModule, configur
 	if packagePath != "" {
 		luaPathDirective = "lua_package_path '" + strings.ReplaceAll(packagePath, "'", "\\'") + "';\n"
 	}
-	nginxConfiguration := fmt.Sprintf(`load_module %s;
-load_module %s;
-pid %s;
-error_log %s notice;
-events {}
-http {
-%s%s
-}
-`, ndkModule, luaModule, filepath.Join(directory, "nginx.pid"), filepath.Join(directory, "error.log"), luaPathDirective, configuration)
+	preamble := fmt.Sprintf("load_module %s;\nload_module %s;\n", strconv.Quote(ndkModule), strconv.Quote(luaModule))
+	nginxConfiguration := buildIsolatedNginxConfiguration(
+		t, directory, preamble, filepath.Join(directory, "error.log"), luaPathDirective+configuration,
+	)
 	path := filepath.Join(directory, "nginx.conf")
 	if err := os.WriteFile(path, []byte(nginxConfiguration), 0o600); err != nil {
 		t.Fatal(err)

@@ -98,6 +98,57 @@ func TestInstallEdgeScriptRequiresTokenForFreshHost(t *testing.T) {
 	harness.requireAbsent(t, "opt/cdn-edge")
 }
 
+func TestInstallEdgeScriptRepairsNginxTempDirectories(t *testing.T) {
+	harness := newInstallHarness(t)
+	for _, name := range []string{"body", "fastcgi", "proxy", "scgi", "uwsgi"} {
+		path := filepath.Join(harness.root, "var/lib/nginx", name)
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	output, err := harness.run(t, "first-token", "edge-binary-v1", "")
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, output)
+	}
+	log := harness.read(t, "mock.log")
+	for _, name := range []string{"body", "fastcgi", "proxy", "scgi", "uwsgi"} {
+		path := filepath.Join(harness.root, "var/lib/nginx", name)
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			t.Fatalf("stat %s: %v", path, statErr)
+		}
+		if mode := info.Mode().Perm(); mode != 0o700 {
+			t.Errorf("%s mode = %04o, want 0700", path, mode)
+		}
+		if expected := "chown www-data:root " + path; !strings.Contains(log, expected) {
+			t.Errorf("installer did not set ownership for %s:\n%s", path, log)
+		}
+	}
+}
+
+func TestInstallEdgeScriptRejectsSymlinkedNginxTempDirectory(t *testing.T) {
+	harness := newInstallHarness(t)
+	target := filepath.Join(harness.root, "outside-nginx-temp")
+	if err := os.MkdirAll(filepath.Join(harness.root, "var/lib/nginx"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(harness.root, "var/lib/nginx/body")); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := harness.run(t, "first-token", "edge-binary-v1", "")
+	if err == nil || !strings.Contains(output, "Nginx temp path is not a safe directory") {
+		t.Fatalf("install with symlinked Nginx temp path was not rejected: %v\n%s", err, output)
+	}
+}
+
 func TestInstallEdgeScriptMigratesLegacyStateWithoutCache(t *testing.T) {
 	harness := newInstallHarness(t)
 	harness.seedLegacy(t)
@@ -321,6 +372,10 @@ esac
 	harness.writeMock(t, "nginx", `#!/usr/bin/env bash
 printf 'nginx %s\n' "$*" >>"$MOCK_LOG"
 if [[ "${MOCK_FAILURE:-}" == "nginx" && "${1:-}" == "-t" ]]; then exit 1; fi
+exit 0
+`)
+	harness.writeMock(t, "chown", `#!/usr/bin/env bash
+printf 'chown %s\n' "$*" >>"$MOCK_LOG"
 exit 0
 `)
 	harness.writeMock(t, "sha256sum", `#!/usr/bin/env bash

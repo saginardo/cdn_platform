@@ -91,6 +91,39 @@ read_environment_value() {
   return 1
 }
 
+ensure_nginx_temp_directories() {
+  local nginx_temp_root directory name expected_uid expected_gid actual
+  nginx_temp_root=$(root_path /var/lib/nginx)
+  if path_exists "$nginx_temp_root" && [[ ! -d "$nginx_temp_root" || -L "$nginx_temp_root" ]]; then
+    echo "Nginx temp root is not a safe directory: $nginx_temp_root" >&2
+    return 1
+  fi
+  install -d -m 0755 "$nginx_temp_root"
+  for name in body fastcgi proxy scgi uwsgi; do
+    directory="$nginx_temp_root/$name"
+    if path_exists "$directory" && [[ ! -d "$directory" || -L "$directory" ]]; then
+      echo "Nginx temp path is not a safe directory: $directory" >&2
+      return 1
+    fi
+    install -d -m 0700 "$directory"
+    chown www-data:root "$directory"
+    chmod 0700 "$directory"
+  done
+
+  if [[ -z "$ROOT_PREFIX" ]]; then
+    expected_uid=$(id -u www-data)
+    expected_gid=$(id -g root)
+    for name in body fastcgi proxy scgi uwsgi; do
+      directory="$nginx_temp_root/$name"
+      actual=$(stat -c '%u:%g:%a' "$directory")
+      if [[ "$actual" != "$expected_uid:$expected_gid:700" ]]; then
+        echo "could not repair Nginx temp path $directory: got $actual, want $expected_uid:$expected_gid:700" >&2
+        return 1
+      fi
+    done
+  fi
+}
+
 configure_nginx_capacity_includes() {
   local source="$1" temporary
   if [[ ! -f "$source" ]]; then
@@ -240,6 +273,7 @@ if [[ -z "$ROOT_PREFIX" ]]; then
   apt-get update
   apt-get install -y --no-install-recommends nginx libnginx-mod-stream libnginx-mod-http-lua ca-certificates curl iproute2 nftables logrotate lz4
 fi
+ensure_nginx_temp_directories
 
 transaction_dir=$(mktemp -d "$(root_path /tmp/cdn-edge-install.XXXXXX)")
 trap 'rm -rf "$transaction_dir"' EXIT

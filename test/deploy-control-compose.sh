@@ -16,11 +16,25 @@ run_case() (
   deployment_root="$case_root/deployment"
   fake_bin="$case_root/bin"
   log_file="$case_root/docker.log"
-  trap 'rm -rf "$case_root"' EXIT
+  cleanup_case() {
+    local exit_code=$?
+    if ((exit_code != 0)) && [[ -r "$log_file" ]]; then
+      echo "fake Docker log for failed $mode deployment:" >&2
+      sed 's/^/  /' "$log_file" >&2
+    fi
+    rm -rf "$case_root"
+    exit "$exit_code"
+  }
+  trap cleanup_case EXIT
 
-  install -d "$deployment_root/app" "$fake_bin"
+  install -d "$deployment_root/app" "$deployment_root/config" "$fake_bin"
   printf 'name: cdn-platform\n' >"$deployment_root/compose.yaml"
   printf 'CDN_SOURCE_DIR=./app\n' >"$deployment_root/.env"
+  printf '%s\n' \
+    'EDGE_BINARY_PATH=/usr/local/lib/cdn-platform/cdn-edge-agent-linux-amd64' \
+    'EDGE_BINARY_SHA256=legacy-digest' \
+    'CLICKHOUSE_DATABASE=cdn_platform' >"$deployment_root/config/control.env"
+  printf 'CLICKHOUSE_DATABASE=cdn_platform\n' >"$deployment_root/config/backup.env"
   printf 'old support files\n' >"$deployment_root/app/marker"
 
   apply_fake_docker "$fake_bin/docker"
@@ -33,6 +47,10 @@ run_case() (
     grep -Fxq "CDN_CONTROL_IMAGE=$image_ref" "$deployment_root/.env"
     cmp "$repository_root/deploy/docker-compose.yaml" "$deployment_root/compose.yaml"
     [[ -d "$deployment_root/app/deploy" && ! -e "$deployment_root/app/marker" ]]
+    ! grep -q '^EDGE_BINARY_SHA256=' "$deployment_root/config/control.env"
+    grep -Fxq 'CLICKHOUSE_DATABASE=simple_cdn' "$deployment_root/config/control.env"
+    grep -Fxq 'CLICKHOUSE_DATABASE=simple_cdn' "$deployment_root/config/backup.env"
+    grep -Fxq 'simple_cdn' "$deployment_root/fake-clickhouse-database"
     grep -Fq -- '--no-build' "$log_file"
     grep -Fq 'compose -p cdn-platform -f' "$log_file"
     grep -Fq 'compose -p simple_cdn up -d --no-build control' "$log_file"
@@ -63,6 +81,10 @@ run_case() (
     grep -Fxq 'name: cdn-platform' "$deployment_root/compose.yaml"
     grep -Fxq 'CDN_SOURCE_DIR=./app' "$deployment_root/.env"
     grep -Fxq 'old support files' "$deployment_root/app/marker"
+    grep -Fxq 'EDGE_BINARY_SHA256=legacy-digest' "$deployment_root/config/control.env"
+    grep -Fxq 'CLICKHOUSE_DATABASE=cdn_platform' "$deployment_root/config/control.env"
+    grep -Fxq 'CLICKHOUSE_DATABASE=cdn_platform' "$deployment_root/config/backup.env"
+    grep -Fxq 'cdn_platform' "$deployment_root/fake-clickhouse-database"
     grep -Fq "pull $image_ref" "$log_file"
     if [[ $(grep -Fc 'up -d --no-build control ' "$log_file") -lt 2 ]]; then
       echo "failure case did not exercise both cutover and rollback" >&2

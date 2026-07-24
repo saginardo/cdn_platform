@@ -602,6 +602,16 @@ function NodeSummary({ detail }: { detail: NodeDetail }) {
           label="应用配置"
           value={`v${formatNumber(node.applied_version)}`}
         />
+        <Datum
+          label="代理版本"
+          value={node.agent_version ? `v${node.agent_version}` : "--"}
+        />
+        <Datum
+          label="目标版本"
+          value={
+            node.target_agent_version ? `v${node.target_agent_version}` : "--"
+          }
+        />
         <Datum label="代理摘要" value={shortHash(node.agent_sha256)} mono />
         <Datum label="关联站点" value={`${detail.sites.length} 个`} />
         {node.last_error ? (

@@ -433,10 +433,11 @@ func TestComposeRestoreStagesAndValidatesBeforeBoundedCutover(t *testing.T) {
 	for _, expected := range []string{
 		"--verify-only",
 		"PRAGMA quick_check;",
-		"RESTORE DATABASE cdn_platform AS $temporary_database",
+		"RESTORE DATABASE $restored_source_database AS $temporary_database",
 		"CHECK TABLE $temporary_database.$table",
 		"RESTORE_CLICKHOUSE_READY_TIMEOUT_SECONDS",
-		"RENAME DATABASE cdn_platform TO $rollback_database",
+		"RENAME DATABASE $previous_clickhouse_database TO $rollback_database",
+		"RENAME DATABASE $temporary_database TO $clickhouse_database",
 		"rollback_cutover",
 		"live data was not changed",
 	} {

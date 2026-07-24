@@ -204,26 +204,16 @@ func (s *Server) TLSConfig() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS13, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
 }
 
-func ResolveEdgeBinarySHA256(path, configured string) (string, error) {
-	configured = strings.ToLower(strings.TrimSpace(configured))
+func ResolveEdgeBinarySHA256(path string) (string, error) {
+	path = strings.TrimSpace(path)
 	if path == "" {
-		if configured == "" {
-			return "", nil
-		}
-		if !validSHA256Digest(configured) {
-			return "", errors.New("EDGE_BINARY_SHA256 must be a 64-character hexadecimal digest")
-		}
-		return configured, nil
+		return "", nil
 	}
 	contents, err := os.ReadFile(filepath.Clean(path))
 	if err != nil {
 		return "", fmt.Errorf("read EDGE_BINARY_PATH: %w", err)
 	}
-	digest := fmt.Sprintf("%x", sha256.Sum256(contents))
-	if configured != "" && configured != digest {
-		return "", fmt.Errorf("EDGE_BINARY_SHA256 does not match EDGE_BINARY_PATH: got %s, want %s", configured, digest)
-	}
-	return digest, nil
+	return fmt.Sprintf("%x", sha256.Sum256(contents)), nil
 }
 
 func (s *Server) health(response http.ResponseWriter, request *http.Request) {
@@ -460,7 +450,7 @@ func (s *Server) createEnrollmentToken(response http.ResponseWriter, request *ht
 	digest := strings.TrimSpace(s.EdgeBinarySHA256)
 	edgeControlURL := s.edgeControlURL()
 	if !validHTTPSURL(s.ControlURL) || !validHTTPSURL(edgeControlURL) || !validHTTPSURL(s.EdgeBinaryURL) || !validSHA256Digest(digest) {
-		writeError(response, http.StatusConflict, errors.New("CONTROL_PUBLIC_URL, EDGE_CONTROL_URL, and EDGE_BINARY_URL must be HTTPS URLs, and EDGE_BINARY_SHA256 must be a 64-character digest before generating an enrollment command"))
+		writeError(response, http.StatusConflict, errors.New("CONTROL_PUBLIC_URL, EDGE_CONTROL_URL, and EDGE_BINARY_URL must be HTTPS URLs, and EDGE_BINARY_PATH must identify the edge binary before generating an enrollment command"))
 		return
 	}
 	enrollmentRequired, err := s.Store.NodeRequiresEnrollment(nodeID)
@@ -1351,6 +1341,7 @@ type heartbeatRequest struct {
 	AppliedVersion  int64                     `json:"applied_version"`
 	ApplyReport     *domain.ApplyReport       `json:"apply_report,omitempty"`
 	Capabilities    []string                  `json:"capabilities,omitempty"`
+	AgentVersion    string                    `json:"agent_version,omitempty"`
 	AgentSHA256     string                    `json:"agent_sha256,omitempty"`
 	ActiveUpgradeID string                    `json:"active_upgrade_task_id,omitempty"`
 	CacheStorage    *domain.CacheStorageUsage `json:"cache_storage,omitempty"`
@@ -1365,8 +1356,13 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 		return
 	}
 	nodeID := edgeNodeID(request.Context())
+	input.AgentVersion = strings.TrimSpace(input.AgentVersion)
 	input.AgentSHA256 = strings.ToLower(strings.TrimSpace(input.AgentSHA256))
 	input.ActiveUpgradeID = strings.TrimSpace(input.ActiveUpgradeID)
+	if len(input.AgentVersion) > 64 || strings.ContainsAny(input.AgentVersion, "\x00\r\n") {
+		writeError(response, http.StatusBadRequest, errors.New("agent_version is invalid"))
+		return
+	}
 	if input.AgentSHA256 != "" && !validSHA256Digest(input.AgentSHA256) {
 		writeError(response, http.StatusBadRequest, errors.New("agent_sha256 must be a 64-character hexadecimal digest"))
 		return
@@ -1399,7 +1395,7 @@ func (s *Server) heartbeat(response http.ResponseWriter, request *http.Request) 
 		writeStoreError(response, err)
 		return
 	}
-	if err := s.Store.HeartbeatWithAgent(nodeID, input.AppliedVersion, input.LastError, input.ApplyReport, input.AgentSHA256, input.ActiveUpgradeID); err != nil {
+	if err := s.Store.HeartbeatWithAgentVersion(nodeID, input.AppliedVersion, input.LastError, input.ApplyReport, input.AgentVersion, input.AgentSHA256, input.ActiveUpgradeID); err != nil {
 		writeStoreError(response, err)
 		return
 	}

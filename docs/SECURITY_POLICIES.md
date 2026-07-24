@@ -39,10 +39,10 @@ The installer adds Debian's `libnginx-mod-http-lua` package. Only nodes advertis
 The installer adds Debian's `nftables` package but does not replace `/etc/nftables.conf` or enable an operator firewall policy. The Agent owns only this runtime object:
 
 ```text
-table inet cdn_platform
+table inet simple_cdn
 ```
 
-Its base chain has an accept policy and adds one restriction: source IPv4 addresses in the managed timeout set are dropped only for TCP ports 80 and 443. SSH, control traffic, custom TCP forwarding ports, outbound traffic, and every other nftables table remain untouched. Uninstall removes only `table inet cdn_platform`.
+Its base chain has an accept policy and adds one restriction: source IPv4 addresses in the managed timeout set are dropped only for TCP ports 80 and 443. SSH, control traffic, custom TCP forwarding ports, outbound traffic, and every other nftables table remain untouched. On first apply after an upgrade, the Agent removes its legacy `table inet cdn_platform` before creating the current table. Uninstall removes either project-owned table and leaves all unrelated tables untouched.
 
 Only public IPv4 addresses are accepted as ban targets. Private, loopback, link-local, multicast, malformed, and IPv6 addresses are ignored. This matches the platform's current A-record and `public_ipv4` deployment model.
 
@@ -54,7 +54,7 @@ Use these checks on an upgraded edge:
 
 ```bash
 sudo systemctl is-active cdn-edge-agent nginx
-sudo nft list table inet cdn_platform
+sudo nft list table inet simple_cdn
 sudo nginx -T 2>/dev/null | grep -F cdn_security_policy_id
 sudo nginx -T 2>/dev/null | grep -F cdn_rate_limit
 sudo tail -n 20 /opt/cdn-edge/logs/security.json

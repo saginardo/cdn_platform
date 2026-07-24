@@ -40,7 +40,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api, errorMessage } from "@/lib/api";
-import { formatDateTime, formatNumber, shortHash } from "@/lib/format";
+import { formatDateTime, formatNumber } from "@/lib/format";
 import type { Node, NodeUpgradeTask } from "@/lib/types";
 import { useListPagination } from "@/hooks/use-list-pagination";
 
@@ -152,8 +152,10 @@ export function NodesPage() {
                             : "尚未注册"}
                         </TableCell>
                         <TableCell>
-                          <div className="font-mono text-xs">
-                            {shortHash(node.agent_sha256)}
+                          <div className="text-sm font-medium">
+                            {node.agent_version
+                              ? `v${node.agent_version}`
+                              : "版本未知"}
                           </div>
                           <div className="text-xs text-muted-foreground">
                             配置 v{formatNumber(node.applied_version)}

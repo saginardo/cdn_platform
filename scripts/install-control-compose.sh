@@ -61,9 +61,31 @@ chmod 0644 "$root/.env"
 if [[ ! -e "$root/config/control.env" ]]; then
   install -m 0600 deploy/examples/compose-control.env.example "$root/config/control.env"
 fi
+
+# Retire duplicated artifact metadata and move the legacy default database name
+# without changing any unrelated deployment settings or secrets.
+control_env="$root/config/control.env"
+control_env_migration=$(mktemp "$root/config/.control.env.XXXXXX")
+sed \
+  -e '/^[[:space:]]*EDGE_BINARY_SHA256[[:space:]]*=/d' \
+  -e 's/^\([[:space:]]*CLICKHOUSE_DATABASE[[:space:]]*=[[:space:]]*\)cdn_platform[[:space:]]*$/\1simple_cdn/' \
+  "$control_env" >"$control_env_migration"
+chown --reference="$control_env" "$control_env_migration"
+chmod --reference="$control_env" "$control_env_migration"
+mv "$control_env_migration" "$control_env"
+
 if [[ ! -e "$root/config/backup.env" ]]; then
   install -m 0600 deploy/examples/compose-backup.env.example "$root/config/backup.env"
 fi
+backup_env="$root/config/backup.env"
+backup_env_migration=$(mktemp "$root/config/.backup.env.XXXXXX")
+sed \
+  -e 's/^\([[:space:]]*CLICKHOUSE_DATABASE[[:space:]]*=[[:space:]]*\)cdn_platform[[:space:]]*$/\1simple_cdn/' \
+  "$backup_env" >"$backup_env_migration"
+chown --reference="$backup_env" "$backup_env_migration"
+chmod --reference="$backup_env" "$backup_env_migration"
+mv "$backup_env_migration" "$backup_env"
+
 if [[ ! -e "$root/config/restic-password" ]]; then
   install -m 0600 /dev/null "$root/config/restic-password"
 fi

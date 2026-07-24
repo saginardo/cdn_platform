@@ -35,6 +35,7 @@ export interface Node {
   status: NodeStatus;
   monitor_auto_paused: boolean;
   capabilities: string[];
+  agent_version?: string;
   agent_sha256?: string;
   active_upgrade_task_id?: string;
   last_heartbeat_at?: string;
@@ -43,6 +44,7 @@ export interface Node {
   created_at: string;
   updated_at: string;
   target_agent_sha256?: string;
+  target_agent_version?: string;
   upgrade_capable: boolean;
   upgrade_up_to_date: boolean;
   can_upgrade: boolean;

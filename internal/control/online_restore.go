@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"simple_cdn/internal/domain"
+	"simple_cdn/internal/project"
 )
 
 const (
@@ -62,6 +63,8 @@ type OnlineRestoreJob struct {
 	SecretsSHA256     string     `json:"secrets_sha256,omitempty"`
 	TLSSHA256         string     `json:"tls_sha256,omitempty"`
 	CAFingerprint     string     `json:"ca_fingerprint,omitempty"`
+	Database          string     `json:"database,omitempty"`
+	SourceDatabase    string     `json:"source_database,omitempty"`
 	CreatedAt         time.Time  `json:"created_at"`
 	UpdatedAt         time.Time  `json:"updated_at"`
 	ReadyAt           *time.Time `json:"ready_at,omitempty"`
@@ -73,6 +76,7 @@ type OnlineRestoreManagerConfig struct {
 	Settings              *SettingsManager
 	Cipher                *Cipher
 	ClickHouse            ClickHouseRestoreAdmin
+	Database              string
 	ResticBinary          string
 	ControlTLSDomain      string
 	ClickHouseGroupID     int
@@ -106,6 +110,9 @@ func NewOnlineRestoreManager(config OnlineRestoreManagerConfig) (*OnlineRestoreM
 	config.Root = filepath.Clean(config.Root)
 	if config.ResticBinary == "" {
 		config.ResticBinary = "restic"
+	}
+	if strings.TrimSpace(config.Database) == "" {
+		config.Database = project.ClickHouseDatabase
 	}
 	if config.RestoreTimeout <= 0 {
 		config.RestoreTimeout = 2 * time.Hour
@@ -316,8 +323,9 @@ func (m *OnlineRestoreManager) Start(snapshotID, confirmation string) (OnlineRes
 		SnapshotShortID:   snapshotID[:8],
 		State:             OnlineRestoreQueued,
 		Detail:            "Waiting to download and validate the selected snapshot.",
-		TemporaryDatabase: "cdn_platform_restore_" + id,
-		RollbackDatabase:  "cdn_platform_before_restore_" + id,
+		Database:          m.config.Database,
+		TemporaryDatabase: m.config.Database + "_restore_" + id,
+		RollbackDatabase:  m.config.Database + "_before_restore_" + id,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -491,12 +499,17 @@ func (m *OnlineRestoreManager) stage(ctx context.Context, jobID string) {
 		m.failJob(jobID, err)
 		return
 	}
-	diskPath := filepath.ToSlash(filepath.Join("online-restore", "jobs", jobID, "snapshot", "backup", "staging", "clickhouse", "cdn-platform-current"))
+	backupRelativePath, err := filepath.Rel(artifacts.SnapshotRoot, artifacts.ClickHouseBackup)
+	if err != nil {
+		m.failJob(jobID, err)
+		return
+	}
+	diskPath := filepath.ToSlash(filepath.Join("online-restore", "jobs", jobID, "snapshot", backupRelativePath))
 	if err := m.config.ClickHouse.DropDatabase(ctx, job.TemporaryDatabase); err != nil {
 		m.failJob(jobID, err)
 		return
 	}
-	if err := m.config.ClickHouse.RestoreDatabase(ctx, "cdn_platform", job.TemporaryDatabase, diskPath); err != nil {
+	if err := m.config.ClickHouse.RestoreDatabase(ctx, artifacts.ClickHouseDatabase, job.TemporaryDatabase, diskPath); err != nil {
 		m.failJob(jobID, fmt.Errorf("restore temporary ClickHouse database: %w", err))
 		return
 	}
@@ -510,6 +523,7 @@ func (m *OnlineRestoreManager) stage(ctx context.Context, jobID string) {
 		job.State = OnlineRestoreReady
 		job.Detail = "Snapshot is verified and restored to a temporary ClickHouse database. Live data is unchanged."
 		job.SchemaVersion = artifacts.SchemaVersion
+		job.SourceDatabase = artifacts.ClickHouseDatabase
 		job.DatabaseSHA256 = artifacts.DatabaseSHA256
 		job.SecretsSHA256 = artifacts.SecretsSHA256
 		job.TLSSHA256 = artifacts.TLSSHA256
@@ -700,7 +714,16 @@ func readOnlineRestoreJob(root string) (*OnlineRestoreJob, error) {
 	if err := json.Unmarshal(contents, &job); err != nil {
 		return nil, fmt.Errorf("decode online restore job: %w", err)
 	}
-	if job.Version != OnlineRestoreJobVersion || !validRestoreIdentifier(job.TemporaryDatabase) || !validRestoreIdentifier(job.RollbackDatabase) {
+	if job.Database == "" {
+		job.Database = project.ClickHouseDatabase
+		if job.State == OnlineRestoreCommitting {
+			job.Database = project.LegacyClickHouseDatabase
+		}
+	}
+	if job.SourceDatabase == "" {
+		job.SourceDatabase = project.LegacyClickHouseDatabase
+	}
+	if job.Version != OnlineRestoreJobVersion || !validRestoreIdentifier(job.Database) || !validRestoreIdentifier(job.SourceDatabase) || !validRestoreIdentifier(job.TemporaryDatabase) || !validRestoreIdentifier(job.RollbackDatabase) {
 		return nil, errors.New("online restore job is invalid")
 	}
 	return &job, nil

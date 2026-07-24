@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"simple_cdn/internal/domain"
 	"simple_cdn/internal/store"
+	"simple_cdn/internal/version"
 )
 
 const (
@@ -20,12 +21,13 @@ const (
 
 type nodeUpgradeStatusResponse struct {
 	domain.Node
-	TargetAgentSHA256 string                  `json:"target_agent_sha256,omitempty"`
-	UpgradeCapable    bool                    `json:"upgrade_capable"`
-	UpgradeUpToDate   bool                    `json:"upgrade_up_to_date"`
-	CanUpgrade        bool                    `json:"can_upgrade"`
-	UpgradeBlocker    string                  `json:"upgrade_blocker,omitempty"`
-	UpgradeTask       *domain.NodeUpgradeTask `json:"upgrade_task,omitempty"`
+	TargetAgentSHA256  string                  `json:"target_agent_sha256,omitempty"`
+	TargetAgentVersion string                  `json:"target_agent_version,omitempty"`
+	UpgradeCapable     bool                    `json:"upgrade_capable"`
+	UpgradeUpToDate    bool                    `json:"upgrade_up_to_date"`
+	CanUpgrade         bool                    `json:"can_upgrade"`
+	UpgradeBlocker     string                  `json:"upgrade_blocker,omitempty"`
+	UpgradeTask        *domain.NodeUpgradeTask `json:"upgrade_task,omitempty"`
 }
 
 type nodeUpgradeAllResult struct {
@@ -45,7 +47,7 @@ type nodeUpgradeAllResponse struct {
 }
 
 func (s *Server) buildNodeUpgradeStatus(node domain.Node) (nodeUpgradeStatusResponse, error) {
-	result := nodeUpgradeStatusResponse{Node: node, TargetAgentSHA256: strings.ToLower(strings.TrimSpace(s.EdgeBinarySHA256))}
+	result := nodeUpgradeStatusResponse{Node: node, TargetAgentSHA256: strings.ToLower(strings.TrimSpace(s.EdgeBinarySHA256)), TargetAgentVersion: version.Version}
 	for _, capability := range node.Capabilities {
 		if capability == domain.EdgeCapabilityOnlineUpgrade {
 			result.UpgradeCapable = true

@@ -4,7 +4,7 @@
 
 一个面向单管理员的轻量自托管 CDN：使用一台 Debian 12 VPS 运行控制面，并由 3-10 台 Debian 12 VPS 作为边缘节点。Cloudflare 仅提供权威 DNS，终端用户直接连接边缘节点。
 
-当前版本：`0.1.2`（以 [`VERSION`](VERSION) 为准）。
+当前版本：`0.1.3`（以 [`VERSION`](VERSION) 为准）。
 
 ## 已实现功能
 
@@ -67,7 +67,7 @@ go test ./...
 
 开发管理界面时，先在 `127.0.0.1:8443` 启动 TLS 控制面，再运行 `npm --prefix frontend run dev`。Vite 会将经过身份验证的 API 请求代理到本地 TLS 端点，支持其开发证书，并保留现有哈希路由。
 
-`dist/SHA256SUMS` 包含 `EDGE_BINARY_SHA256` 所需的准确摘要。配置 `EDGE_BINARY_PATH` 后，控制器也可以直接提供已签名边缘二进制文件；此时可将 `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` 用作 `EDGE_BINARY_URL`。
+`dist/SHA256SUMS` 用于运维人员独立校验发布制品。控制器启动时会计算 `EDGE_BINARY_PATH` 的摘要，并将其写入每条注册与升级指令，因此不再需要单独维护校验和配置。由控制器提供内置边缘二进制文件时，可将 `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` 用作 `EDGE_BINARY_URL`。
 
 GitHub Actions 会为每个拉取请求执行相同的编译与校验、浏览器冒烟测试和完整 Docker 镜像构建。`main` 构建成功后发布 `ghcr.io/saginardo/simple_cdn`，工作流不会连接生产环境。私有部署自动化消费不可变 digest；控制主机只拉取镜像，不再编译源码或执行 `docker compose build`。详见 [Compose 部署文档](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery)。
 
@@ -112,7 +112,7 @@ sudo docker compose ps
 ## 边缘节点注册
 
 1. 在“节点”页面使用固定公网 IPv4 添加节点。
-2. 将 `EDGE_BINARY_URL` 和 `EDGE_BINARY_SHA256` 设置为 `cdn-edge-agent-linux-amd64` 发布文件的 HTTPS 地址及 SHA-256 摘要。
+2. 将 `EDGE_BINARY_URL` 设置为 `cdn-edge-agent-linux-amd64` 发布文件的 HTTPS 地址；控制器会根据 `EDGE_BINARY_PATH` 自动计算 SHA-256 摘要。
 3. 点击“注册”，在对应 Debian 12 VPS 上以 `root` 执行生成的命令。
 4. 代理在本地创建私钥，使用有效期 15 分钟的一次性令牌提交 CSR，接收内部 mTLS 证书，并开始每 30 秒发送一次心跳。
 
@@ -124,7 +124,7 @@ sudo docker compose ps
 
 控制面不可用、新配置校验失败，或运行中的 Nginx 主进程异步拒绝重新加载时，代理会保留最后可用的 Nginx HTTP 和 `stream` 配置。应用状态前会检查每个目标公网 TCP 端口；若端口被非 Nginx 进程占用，发布任务会收到端口、PID 和进程名，代理不会停止该进程。释放端口后点击“重新发布”，代理会清除 Nginx 失败状态并自动启动它。不要删除活跃边缘节点上的 `/opt/cdn-edge/data`，其中包含节点私钥、mTLS 证书、已应用版本和待发送访问日志队列。`reload` / `restart` 边界及准确的 worker 进程和站点校验命令见 [docs/NGINX_APPLY_SAFETY.md](docs/NGINX_APPLY_SAFETY.md)。
 
-“安全”工作区将有序的全局路径策略应用到具备对应能力的 HTTP 边缘节点。匹配请求会在回源前被关闭；封禁操作由代理拥有的 `inet cdn_platform` nftables 表在 80/443 端口执行，并在整个节点集同步。部署策略前需要升级旧代理。防火墙归属、发布过程、诊断和代理边界限制见 [docs/SECURITY_POLICIES.md](docs/SECURITY_POLICIES.md)。
+“安全”工作区将有序的全局路径策略应用到具备对应能力的 HTTP 边缘节点。匹配请求会在回源前被关闭；封禁操作由代理拥有的 `inet simple_cdn` nftables 表在 80/443 端口执行，并在整个节点集同步。升级后的代理会在应用新表前清理旧表。部署策略前需要升级旧代理。防火墙归属、发布过程、诊断和代理边界限制见 [docs/SECURITY_POLICIES.md](docs/SECURITY_POLICIES.md)。
 
 ## 边缘节点卸载
 

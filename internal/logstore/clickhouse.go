@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"simple_cdn/internal/domain"
+	"simple_cdn/internal/project"
 )
 
 type Store interface {
@@ -424,12 +425,12 @@ func (c ClickHouse) database() string {
 	if c.Database != "" {
 		return c.Database
 	}
-	return "cdn_platform"
+	return project.ClickHouseDatabase
 }
 
 func identifier(value string) string {
 	if value == "" {
-		return "`cdn_platform`"
+		return "`" + project.ClickHouseDatabase + "`"
 	}
 	for _, character := range value {
 		if !(character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '_') {

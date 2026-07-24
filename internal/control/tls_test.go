@@ -99,12 +99,12 @@ func TestResolveEdgeBinarySHA256(t *testing.T) {
 	if err := os.WriteFile(path, []byte("edge-binary"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	digest, err := ResolveEdgeBinarySHA256(path, "")
+	digest, err := ResolveEdgeBinarySHA256(path)
 	if err != nil || digest != "3eccac6342055b879ba92ce0045aa27c7b2a87d8ef64bea4b82d2b9736c1a764" {
 		t.Fatalf("digest = %q, err = %v", digest, err)
 	}
-	if _, err := ResolveEdgeBinarySHA256(path, "0000000000000000000000000000000000000000000000000000000000000000"); err == nil {
-		t.Fatal("expected mismatched digest to fail")
+	if digest, err := ResolveEdgeBinarySHA256(""); err != nil || digest != "" {
+		t.Fatalf("empty path digest = %q, err = %v", digest, err)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"simple_cdn/internal/domain"
+	"simple_cdn/internal/project"
 	"simple_cdn/internal/store"
 )
 
@@ -46,7 +47,7 @@ func (f *fakeRestoreClickHouse) DatabaseExists(_ context.Context, name string) (
 func (f *fakeRestoreClickHouse) RestoreDatabase(_ context.Context, source, target, diskPath string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if source != "cdn_platform" || !f.databases[source] || !strings.Contains(diskPath, "online-restore/jobs/") {
+	if (source != project.ClickHouseDatabase && source != project.LegacyClickHouseDatabase) || !strings.Contains(diskPath, "online-restore/jobs/") {
 		return errors.New("invalid fake restore request")
 	}
 	f.databases[target] = true
@@ -201,7 +202,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	clickHouse := &fakeRestoreClickHouse{databases: map[string]bool{"cdn_platform": true}}
+	clickHouse := &fakeRestoreClickHouse{databases: map[string]bool{project.ClickHouseDatabase: true}}
 	restoreRoot := filepath.Join(temporary, "online-restore")
 	manager, err := NewOnlineRestoreManager(OnlineRestoreManagerConfig{
 		Root:              restoreRoot,
@@ -249,7 +250,7 @@ esac
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if job.DatabaseSHA256 == "" || job.CAFingerprint == "" || job.SchemaVersion != store.LatestSchemaVersion() {
+	if job.DatabaseSHA256 == "" || job.CAFingerprint == "" || job.SchemaVersion != store.LatestSchemaVersion() || job.Database != project.ClickHouseDatabase || job.SourceDatabase != project.LegacyClickHouseDatabase {
 		t.Fatalf("verified job = %#v", job)
 	}
 	job, err = manager.Commit(job.ID, "RESTORE")
@@ -359,7 +360,7 @@ esac
 		Root:                  filepath.Join(temporary, "online-restore"),
 		Settings:              settings,
 		Cipher:                cipher,
-		ClickHouse:            &fakeRestoreClickHouse{databases: map[string]bool{"cdn_platform": true}},
+		ClickHouse:            &fakeRestoreClickHouse{databases: map[string]bool{project.ClickHouseDatabase: true}},
 		ResticBinary:          resticPath,
 		ClickHouseGroupID:     -1,
 		SnapshotDeleteTimeout: 5 * time.Second,
@@ -555,10 +556,10 @@ func TestRestoreTLSCutoverRetainsAmbiguousPartialState(t *testing.T) {
 
 func TestPromoteRestoreClickHouseObservesRenameAfterLostResponse(t *testing.T) {
 	clickHouse := &responseLostRestoreClickHouse{fakeRestoreClickHouse: &fakeRestoreClickHouse{databases: map[string]bool{
-		"cdn_platform": true,
-		"restore_temp": true,
+		project.ClickHouseDatabase: true,
+		"restore_temp":             true,
 	}}}
-	job := &OnlineRestoreJob{TemporaryDatabase: "restore_temp", RollbackDatabase: "restore_old"}
+	job := &OnlineRestoreJob{Database: project.ClickHouseDatabase, TemporaryDatabase: "restore_temp", RollbackDatabase: "restore_old"}
 	promoted, oldRenamed, err := promoteRestoreClickHouse(context.Background(), clickHouse, job)
 	if err != nil {
 		t.Fatal(err)
@@ -566,11 +567,35 @@ func TestPromoteRestoreClickHouseObservesRenameAfterLostResponse(t *testing.T) {
 	if !promoted || !oldRenamed {
 		t.Fatalf("promotion state = promoted %v, old renamed %v", promoted, oldRenamed)
 	}
-	if exists, _ := clickHouse.DatabaseExists(context.Background(), "cdn_platform"); !exists {
+	if exists, _ := clickHouse.DatabaseExists(context.Background(), project.ClickHouseDatabase); !exists {
 		t.Fatal("restored database was not promoted")
 	}
 	if exists, _ := clickHouse.DatabaseExists(context.Background(), "restore_old"); !exists {
 		t.Fatal("previous database was not retained")
+	}
+}
+
+func TestMigrateLegacyClickHouseDatabase(t *testing.T) {
+	clickHouse := &fakeRestoreClickHouse{databases: map[string]bool{project.LegacyClickHouseDatabase: true}}
+	migrated, err := MigrateLegacyClickHouseDatabase(context.Background(), clickHouse)
+	if err != nil || !migrated {
+		t.Fatalf("migration = %v, err = %v", migrated, err)
+	}
+	if exists, _ := clickHouse.DatabaseExists(context.Background(), project.ClickHouseDatabase); !exists {
+		t.Fatal("current ClickHouse database does not exist after migration")
+	}
+	if exists, _ := clickHouse.DatabaseExists(context.Background(), project.LegacyClickHouseDatabase); exists {
+		t.Fatal("legacy ClickHouse database still exists after migration")
+	}
+}
+
+func TestMigrateLegacyClickHouseDatabaseRejectsAmbiguousState(t *testing.T) {
+	clickHouse := &fakeRestoreClickHouse{databases: map[string]bool{
+		project.ClickHouseDatabase:       true,
+		project.LegacyClickHouseDatabase: true,
+	}}
+	if migrated, err := MigrateLegacyClickHouseDatabase(context.Background(), clickHouse); err == nil || migrated {
+		t.Fatalf("ambiguous migration = %v, err = %v", migrated, err)
 	}
 }
 

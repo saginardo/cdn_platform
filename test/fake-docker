@@ -6,14 +6,39 @@ printf '\n' >>"$FAKE_DOCKER_LOG"
 
 if [[ ${1:-} == compose ]]; then
   arguments=" $* "
+  clickhouse_state="$FAKE_DEPLOY_ROOT/fake-clickhouse-database"
+  if [[ ! -e "$clickhouse_state" ]]; then
+    printf '%s\n' cdn_platform >"$clickhouse_state"
+  fi
   if [[ "$arguments" == *' ps --status running --services '* ]]; then
     printf '%s\n' control clickhouse control-cert-renew backup
   elif [[ "$arguments" == *' ps -q control '* ]]; then
     printf '%s\n' fake-control-container
+  elif [[ "$arguments" == *' exec -T clickhouse clickhouse-client '* ]]; then
+    database=$(<"$clickhouse_state")
+    if [[ "$arguments" == *"SELECT count() FROM system.databases WHERE name = 'cdn_platform'"* ]]; then
+      [[ "$database" == cdn_platform ]] && printf '1\n' || printf '0\n'
+    elif [[ "$arguments" == *"SELECT count() FROM system.databases WHERE name = 'simple_cdn'"* ]]; then
+      [[ "$database" == simple_cdn ]] && printf '1\n' || printf '0\n'
+    elif [[ "$arguments" == *'RENAME DATABASE cdn_platform TO simple_cdn'* ]]; then
+      if [[ "$database" != cdn_platform ]]; then
+        echo "cannot rename unexpected fake ClickHouse database $database" >&2
+        exit 1
+      fi
+      printf '%s\n' simple_cdn >"$clickhouse_state"
+    elif [[ "$arguments" == *'RENAME DATABASE simple_cdn TO cdn_platform'* ]]; then
+      if [[ "$database" != simple_cdn ]]; then
+        echo "cannot rename unexpected fake ClickHouse database $database" >&2
+        exit 1
+      fi
+      printf '%s\n' cdn_platform >"$clickhouse_state"
+    fi
   elif [[ "$arguments" == *' exec -T control '* ]]; then
     if [[ "$FAKE_MODE" == failure ]] && grep -Fq 'CDN_CONTROL_IMAGE=' "$FAKE_DEPLOY_ROOT/.env"; then
       exit 1
     fi
+  elif [[ "$arguments" == *' -p simple_cdn up -d '* && "$arguments" == *' control '* ]]; then
+    printf '%s\n' simple_cdn >"$clickhouse_state"
   fi
 elif [[ ${1:-} == image && ${2:-} == inspect ]]; then
   printf '%s\n' sha256:requested-image

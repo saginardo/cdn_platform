@@ -36,6 +36,34 @@ func TestMigrationsRecordCurrentVersionAndRemainIdempotent(t *testing.T) {
 	}
 }
 
+func TestEdgeAgentVersionMigrationUpgradesLegacySchema(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.db.Exec(`ALTER TABLE nodes DROP COLUMN agent_version`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.db.Exec(`DELETE FROM schema_migrations WHERE version = 16`); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Migrate(); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("versioned-edge", "203.0.113.90")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.HeartbeatWithAgentVersion(node.ID, 0, "", nil, "9.8.7", strings.Repeat("a", 64), ""); err != nil {
+		t.Fatal(err)
+	}
+	node, err = database.GetNode(node.ID)
+	if err != nil || node.AgentVersion != "9.8.7" {
+		t.Fatalf("migrated Agent version = %q, err=%v", node.AgentVersion, err)
+	}
+}
+
 func TestNotificationPreferencesMigrationUpgradesLegacySchema(t *testing.T) {
 	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

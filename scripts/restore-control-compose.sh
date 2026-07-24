@@ -29,7 +29,7 @@ if [[ $EUID -ne 0 ]]; then
   exit 2
 fi
 
-root="${CDN_PLATFORM_ROOT:-/opt/cdn-platform}"
+root="${SIMPLE_CDN_ROOT:-${CDN_PLATFORM_ROOT:-/opt/cdn-platform}}"
 ready_timeout="${RESTORE_CLICKHOUSE_READY_TIMEOUT_SECONDS:-120}"
 operation_timeout="${RESTORE_CLICKHOUSE_OPERATION_TIMEOUT_SECONDS:-1800}"
 download_timeout="${RESTORE_DOWNLOAD_TIMEOUT_SECONDS:-3600}"
@@ -43,9 +43,10 @@ done
 
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 database_suffix="${run_id//[-T]/_}"
-temporary_database="cdn_platform_restore_${database_suffix}"
-rollback_database="cdn_platform_before_restore_${database_suffix}"
-clickhouse_backup_name="cdn-platform-restore-$run_id"
+temporary_database=""
+rollback_database=""
+previous_clickhouse_database=""
+clickhouse_backup_name="simple-cdn-restore-$run_id"
 restore_dir=$(mktemp -d /tmp/cdn-platform-restore.XXXXXX)
 prepared_root="$root/.restore-$run_id"
 staged_clickhouse="$root/backup/staging/clickhouse/$clickhouse_backup_name"
@@ -77,6 +78,17 @@ set -a
 source config/backup.env
 set +a
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY is required}"
+
+clickhouse_database=$(sed -nE 's/^[[:space:]]*CLICKHOUSE_DATABASE[[:space:]]*=[[:space:]]*([^[:space:]#]+)[[:space:]]*$/\1/p' config/control.env | tail -n 1)
+if [[ -z "$clickhouse_database" || "$clickhouse_database" == cdn_platform ]]; then
+  clickhouse_database=simple_cdn
+fi
+if [[ ! "$clickhouse_database" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]]; then
+  echo "CLICKHOUSE_DATABASE must be a valid ClickHouse identifier" >&2
+  exit 2
+fi
+temporary_database="${clickhouse_database}_restore_${database_suffix}"
+rollback_database="${clickhouse_database}_before_restore_${database_suffix}"
 if [[ ! -s "$root/config/restic-password" ]]; then
   echo "restic password file is empty: $root/config/restic-password" >&2
   exit 2
@@ -170,9 +182,9 @@ rollback_cutover() {
   if ((temporary_database_promoted)); then
     local current_exists=0
     local temporary_exists=0
-    if database_exists cdn_platform; then current_exists=1; fi
+    if database_exists "$clickhouse_database"; then current_exists=1; fi
     if database_exists "$temporary_database"; then temporary_exists=1; fi
-    if ((current_exists && !temporary_exists)) && clickhouse_query "RENAME DATABASE cdn_platform TO $temporary_database" >/dev/null 2>&1; then
+    if ((current_exists && !temporary_exists)) && clickhouse_query "RENAME DATABASE $clickhouse_database TO $temporary_database" >/dev/null 2>&1; then
       temporary_database_created=1
       temporary_database_promoted=0
     elif ((!current_exists && temporary_exists)); then
@@ -186,10 +198,10 @@ rollback_cutover() {
   if ((production_database_renamed)); then
     local current_exists=0
     local rollback_exists=0
-    if database_exists cdn_platform; then current_exists=1; fi
+    if database_exists "$clickhouse_database"; then current_exists=1; fi
     if database_exists "$rollback_database"; then rollback_exists=1; fi
     if ((rollback_exists && !current_exists)); then
-      if ! clickhouse_query "RENAME DATABASE $rollback_database TO cdn_platform" >/dev/null 2>&1; then
+      if ! clickhouse_query "RENAME DATABASE $rollback_database TO $previous_clickhouse_database" >/dev/null 2>&1; then
         echo "failed to restore the previous ClickHouse database" >&2
         rollback_failed=1
       fi
@@ -255,7 +267,6 @@ restored_staging="$restore_dir/backup/staging"
 restored_database="$restored_staging/control/control.db"
 restored_secrets="$restored_staging/control/control-secrets.tar.gz"
 restored_tls="$restored_staging/control/control-tls.tar.gz"
-restored_clickhouse="$restored_staging/clickhouse/cdn-platform-current"
 restored_control_env="$restore_dir/deployment/config/control.env"
 for required in "$restored_database" "$restored_secrets" "$restored_tls" "$restored_control_env"; do
   if [[ ! -r "$required" ]]; then
@@ -263,8 +274,30 @@ for required in "$restored_database" "$restored_secrets" "$restored_tls" "$resto
     exit 1
   fi
 done
-if [[ ! -d "$restored_clickhouse" ]]; then
+restored_clickhouse=""
+restored_source_database=""
+shopt -s nullglob
+restored_clickhouse_candidates=("$restored_staging/clickhouse/"*-current)
+shopt -u nullglob
+for candidate in "${restored_clickhouse_candidates[@]}"; do
+  [[ -d "$candidate" ]] || continue
+  if [[ -n "$restored_clickhouse" ]]; then
+    echo "snapshot contains multiple ClickHouse native backups" >&2
+    exit 1
+  fi
+  restored_clickhouse="$candidate"
+  backup_directory=$(basename "$candidate")
+  restored_source_database="${backup_directory%-current}"
+  if [[ "$restored_source_database" == cdn-platform ]]; then
+    restored_source_database=cdn_platform
+  fi
+done
+if [[ -z "$restored_clickhouse" ]]; then
   echo "snapshot is missing the ClickHouse native backup" >&2
+  exit 1
+fi
+if [[ ! "$restored_source_database" =~ ^[A-Za-z_][A-Za-z0-9_]{0,127}$ ]]; then
+  echo "snapshot ClickHouse database name is invalid" >&2
   exit 1
 fi
 
@@ -315,7 +348,7 @@ done
 
 clickhouse_query "DROP DATABASE IF EXISTS $temporary_database SYNC"
 temporary_database_created=1
-clickhouse_query "RESTORE DATABASE cdn_platform AS $temporary_database FROM Disk('backups', '$clickhouse_backup_name')"
+clickhouse_query "RESTORE DATABASE $restored_source_database AS $temporary_database FROM Disk('backups', '$clickhouse_backup_name')"
 
 database_engine=$(clickhouse_query "SELECT engine FROM system.databases WHERE name = '$temporary_database' FORMAT TSVRaw")
 if [[ "$database_engine" != "Atomic" ]]; then
@@ -350,9 +383,28 @@ tar --extract --gzip --no-same-owner --no-same-permissions --file "$restored_tls
 chown -R 10001:10001 "$prepared_root/control" "$prepared_root/control-tls"
 chmod 0750 "$prepared_root/control" "$prepared_root/control-tls"
 install -m 0600 "$restored_control_env" "$prepared_root/control.env"
+sed -i \
+  -e '/^[[:space:]]*EDGE_BINARY_SHA256[[:space:]]*=/d' \
+  -e '/^[[:space:]]*CLICKHOUSE_DATABASE[[:space:]]*=/d' \
+  "$prepared_root/control.env"
+printf '\nCLICKHOUSE_DATABASE=%s\n' "$clickhouse_database" >>"$prepared_root/control.env"
 
-if database_exists cdn_platform; then
-  current_engine=$(clickhouse_query "SELECT engine FROM system.databases WHERE name = 'cdn_platform' FORMAT TSVRaw")
+previous_clickhouse_database="$clickhouse_database"
+if [[ "$clickhouse_database" == simple_cdn ]]; then
+  current_database_exists=0
+  legacy_database_exists=0
+  if database_exists simple_cdn; then current_database_exists=1; fi
+  if database_exists cdn_platform; then legacy_database_exists=1; fi
+  if ((current_database_exists && legacy_database_exists)); then
+    echo "both ClickHouse databases simple_cdn and cdn_platform exist; refusing an ambiguous restore" >&2
+    exit 1
+  fi
+  if ((!current_database_exists && legacy_database_exists)); then
+    previous_clickhouse_database=cdn_platform
+  fi
+fi
+if database_exists "$previous_clickhouse_database"; then
+  current_engine=$(clickhouse_query "SELECT engine FROM system.databases WHERE name = '$previous_clickhouse_database' FORMAT TSVRaw")
   if [[ "$current_engine" != "Atomic" ]]; then
     echo "current ClickHouse database engine is $current_engine; Atomic is required for controlled cutover" >&2
     exit 1
@@ -386,12 +438,12 @@ if database_exists "$rollback_database"; then
   echo "rollback database already exists: $rollback_database" >&2
   exit 1
 fi
-if database_exists cdn_platform; then
+if database_exists "$previous_clickhouse_database"; then
   production_database_renamed=1
-  clickhouse_query "RENAME DATABASE cdn_platform TO $rollback_database"
+  clickhouse_query "RENAME DATABASE $previous_clickhouse_database TO $rollback_database"
 fi
 temporary_database_promoted=1
-clickhouse_query "RENAME DATABASE $temporary_database TO cdn_platform"
+clickhouse_query "RENAME DATABASE $temporary_database TO $clickhouse_database"
 temporary_database_created=0
 
 if [[ -e data/control ]]; then

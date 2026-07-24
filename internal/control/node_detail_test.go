@@ -161,6 +161,7 @@ func TestEdgeHeartbeatRecordsCacheStorageIndependentlyOfLogStats(t *testing.T) {
 	collectedAt := time.Now().UTC().Add(-20 * time.Minute).Truncate(time.Second)
 	payload, err := json.Marshal(heartbeatRequest{
 		Capabilities: []string{domain.EdgeCapabilityCacheUsage},
+		AgentVersion: "9.8.7",
 		CacheStorage: &domain.CacheStorageUsage{UsedBytes: 3 << 30, TotalBytes: 5 << 30, CollectedAt: collectedAt},
 	})
 	if err != nil {
@@ -173,6 +174,10 @@ func TestEdgeHeartbeatRecordsCacheStorageIndependentlyOfLogStats(t *testing.T) {
 	server.heartbeat(heartbeatResponse, heartbeat)
 	if heartbeatResponse.Code != http.StatusOK {
 		t.Fatalf("heartbeat status = %d, body=%s", heartbeatResponse.Code, heartbeatResponse.Body.String())
+	}
+	storedNode, err := database.GetNode(node.ID)
+	if err != nil || storedNode.AgentVersion != "9.8.7" {
+		t.Fatalf("stored Agent version = %q, err=%v", storedNode.AgentVersion, err)
 	}
 
 	cacheRequest := httptest.NewRequest(http.MethodGet, "/api/nodes/"+node.ID+"/cache-status", nil)

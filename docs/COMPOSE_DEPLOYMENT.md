@@ -4,7 +4,7 @@ Docker Compose is the supported control-plane deployment. Edge nodes use the hos
 
 [`deploy/docker-compose.yaml`](../deploy/docker-compose.yaml) is the only tracked Compose definition. The installer copies it byte-for-byte to the deployment root as `compose.yaml`; production `.env`, `config/`, `data/`, `logs/`, and `backup/` content remain host-local and must never be committed.
 
-The software, repository, and Compose project are named `simple_cdn`. The deployment script recognizes the legacy `cdn-platform` Compose project and performs a one-time container-only migration without deleting bind-mounted data. Other established operational identifiers remain stable: the ClickHouse database is `cdn_platform`, and container/edge paths retain their existing names. These identifiers address backups, DNS ownership records, recovery codes, and persistent data; changing them as part of a repository rename would break rollback or orphan state.
+The software, repository, Compose project, and default ClickHouse database are named `simple_cdn`. The deployment script recognizes the legacy `cdn-platform` Compose project and `cdn_platform` database, then migrates both during a guarded cutover without deleting bind-mounted data. A failed rollout reverses the database rename before restoring the old controller. Established container and edge filesystem paths retain their existing names because changing those persistent locations would break rollback or orphan state.
 
 ## Persistent layout
 
@@ -64,7 +64,7 @@ sudo docker compose ps
 curl -fsS https://control.example.com/healthz
 ```
 
-The default image is `ghcr.io/saginardo/simple_cdn:main`. For a repeatable installation, pass a `sha-<commit>` tag or `@sha256:<digest>` as the installer's second argument. The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 at startup; a configured `EDGE_BINARY_SHA256` must match or startup fails.
+The default image is `ghcr.io/saginardo/simple_cdn:main`. For a repeatable installation, pass a `sha-<commit>` tag or `@sha256:<digest>` as the installer's second argument. The control image contains the exact edge-agent binary it serves. The controller calculates its SHA-256 from `EDGE_BINARY_PATH` at startup and uses that digest for enrollment and online-upgrade verification; no separate checksum setting is required.
 
 The authenticated **Settings** view stores runtime overrides in SQLite. Cloudflare Token, SMTP password, S3 secret access key, and Restic repository password values are encrypted with `CONTROL_ENCRYPTION_KEY`; API responses never return them. Database overrides take precedence over their environment fallbacks, while reset actions restore those fallbacks. Retain the environment Cloudflare token because a fresh installation needs it before the UI and database exist. Control-certificate bootstrap and renewal containers mount the control database read-only and refresh their temporary Certbot credentials before each certificate operation.
 
@@ -105,21 +105,21 @@ sudo docker compose --profile backup run --rm --entrypoint \
 
 The default schedule is 03:25 Asia/Shanghai with up to 20 minutes of random delay. A scheduled or manual wrapper run takes a backup-only lock, then makes up to `BACKUP_MAX_ATTEMPTS` attempts (default 3), using `BACKUP_RETRY_DELAYS_SECONDS` (default `30,120`) between failures. It atomically updates `backup/status/backup.json`; the Settings view and message center expose running, retrying, successful, skipped-during-restore, and final-failure states. A final failure also sends an SMTP alert through the effective database-or-environment SMTP profile. A restore-maintenance skip is not retried or alerted. If snapshot creation succeeds but `forget --prune` fails, retries run only the retention phase so one scheduled run cannot create duplicate snapshots. Repository validation and online-restore snapshot listing use lock-free reads, and cancelled Restic subprocesses receive an interrupt grace period to remove any lock held by a stateful operation. The scheduler remains alive after a failed or skipped run and evaluates the next scheduled time.
 
-Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `cdn_platform` ClickHouse database, not recreatable `system` diagnostic tables, plus `compose.yaml` and `.env` so the exact GHCR image reference is recorded. Backup and certificate containers take a shared operation lock, while a restore cutover takes the exclusive lock and publishes a maintenance marker so no new writer operation starts during the swap. After an image upgrade, recreate the optional scheduler with `docker compose --profile backup up -d --no-build backup`; the GitHub Actions deployment does this automatically when the scheduler is running.
+Retention is 7 daily, 4 weekly, and 6 monthly snapshots. The backup includes the `simple_cdn` ClickHouse database, not recreatable `system` diagnostic tables, plus `compose.yaml` and `.env` so the exact GHCR image reference is recorded. Restore accepts legacy snapshots containing `cdn_platform` and promotes them under the current name. Backup and certificate containers take a shared operation lock, while a restore cutover takes the exclusive lock and publishes a maintenance marker so no new writer operation starts during the swap. After an image upgrade, recreate the optional scheduler with `docker compose --profile backup up -d --no-build backup`; the GitHub Actions deployment does this automatically when the scheduler is running.
 
 ## Restore
 
 On a replacement host, install the deployment support files and the same immutable GHCR image reference recorded in the snapshot or offline recovery record. Populate `config/backup.env`, `config/restic-password`, and `CONTROL_ENCRYPTION_KEY` from the offline recovery record. Disaster recovery intentionally uses these environment credentials because the web override is inside the snapshot being restored. Do not initialize the control plane first. Then run:
 
 ```bash
-sudo CDN_PLATFORM_ROOT=/opt/cdn-platform \
+sudo SIMPLE_CDN_ROOT=/opt/cdn-platform \
   ./app/scripts/restore-control-compose.sh latest
 ```
 
 Before a cutover, run the same recovery as an isolated drill:
 
 ```bash
-sudo CDN_PLATFORM_ROOT=/opt/cdn-platform \
+sudo SIMPLE_CDN_ROOT=/opt/cdn-platform \
   ./app/scripts/restore-control-compose.sh --verify-only latest
 ```
 

@@ -4,7 +4,7 @@ umask 077
 
 CONTROL_URL=""
 TOKEN=""
-ROOT_PREFIX="${CDN_PLATFORM_UNINSTALL_ROOT:-}"
+ROOT_PREFIX="${SIMPLE_CDN_UNINSTALL_ROOT:-${CDN_PLATFORM_UNINSTALL_ROOT:-}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -17,7 +17,7 @@ done
 if [[ -n "$ROOT_PREFIX" ]]; then
   ROOT_PREFIX="${ROOT_PREFIX%/}"
   if [[ "$ROOT_PREFIX" != /* || "$ROOT_PREFIX" == "/" ]]; then
-    echo "CDN_PLATFORM_UNINSTALL_ROOT must be an absolute non-root path" >&2
+    echo "SIMPLE_CDN_UNINSTALL_ROOT must be an absolute non-root path" >&2
     exit 2
   fi
 elif [[ $EUID -ne 0 ]]; then
@@ -115,8 +115,12 @@ fi
 
 # The agent owns only this dedicated table. Leave all distribution and
 # operator-managed firewall tables untouched.
-if command -v nft >/dev/null 2>&1 && nft list table inet cdn_platform >/dev/null 2>&1; then
-  nft delete table inet cdn_platform >/dev/null
+if command -v nft >/dev/null 2>&1; then
+  for table in simple_cdn cdn_platform; do
+    if nft list table inet "$table" >/dev/null 2>&1; then
+      nft delete table inet "$table" >/dev/null
+    fi
+  done
 fi
 
 nginx_config=$(root_path /etc/nginx/conf.d/cdn-platform.conf)

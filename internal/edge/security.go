@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/uuid"
 	"simple_cdn/internal/domain"
+	"simple_cdn/internal/project"
 )
 
 const (
@@ -54,8 +55,9 @@ func (f NftablesFirewall) Replace(bans []domain.SecurityBan) error {
 	if binary == "" {
 		binary = "nft"
 	}
-	exists := exec.Command(binary, "list", "table", "inet", "cdn_platform").Run() == nil
-	script := nftablesRuleset(bans, exists, time.Now().UTC())
+	currentExists := exec.Command(binary, "list", "table", "inet", project.NftablesTable).Run() == nil
+	legacyExists := exec.Command(binary, "list", "table", "inet", project.LegacyNftablesTable).Run() == nil
+	script := nftablesRuleset(bans, currentExists, legacyExists, time.Now().UTC())
 	command := exec.Command(binary, "-f", "-")
 	command.Stdin = strings.NewReader(script)
 	if output, err := command.CombinedOutput(); err != nil {
@@ -64,7 +66,7 @@ func (f NftablesFirewall) Replace(bans []domain.SecurityBan) error {
 	return nil
 }
 
-func nftablesRuleset(bans []domain.SecurityBan, tableExists bool, now time.Time) string {
+func nftablesRuleset(bans []domain.SecurityBan, currentExists, legacyExists bool, now time.Time) string {
 	type element struct {
 		ip      string
 		seconds int64
@@ -80,10 +82,13 @@ func nftablesRuleset(bans []domain.SecurityBan, tableExists bool, now time.Time)
 	}
 	sort.Slice(elements, func(i, j int) bool { return elements[i].ip < elements[j].ip })
 	var script strings.Builder
-	if tableExists {
-		script.WriteString("delete table inet cdn_platform\n")
+	if currentExists {
+		script.WriteString("delete table inet " + project.NftablesTable + "\n")
 	}
-	script.WriteString("table inet cdn_platform {\n  set banned_ipv4 {\n    type ipv4_addr\n    flags timeout\n")
+	if legacyExists {
+		script.WriteString("delete table inet " + project.LegacyNftablesTable + "\n")
+	}
+	script.WriteString("table inet " + project.NftablesTable + " {\n  set banned_ipv4 {\n    type ipv4_addr\n    flags timeout\n")
 	if len(elements) > 0 {
 		script.WriteString("    elements = { ")
 		for index, item := range elements {

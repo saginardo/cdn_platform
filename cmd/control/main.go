@@ -19,6 +19,7 @@ import (
 	"simple_cdn/internal/domain"
 	"simple_cdn/internal/integrations"
 	"simple_cdn/internal/logstore"
+	"simple_cdn/internal/project"
 	"simple_cdn/internal/store"
 	"simple_cdn/internal/version"
 )
@@ -70,6 +71,10 @@ func main() {
 		fatal(err.Error())
 	}
 	restoreRoot := env("ONLINE_RESTORE_ROOT", "/var/lib/cdn-platform-restore")
+	clickHouseDatabase := strings.TrimSpace(os.Getenv("CLICKHOUSE_DATABASE"))
+	if clickHouseDatabase == "" || clickHouseDatabase == project.LegacyClickHouseDatabase {
+		clickHouseDatabase = project.ClickHouseDatabase
+	}
 	clickHouseAdmin := control.HTTPClickHouseRestoreAdmin{
 		Endpoint: env("CLICKHOUSE_URL", "http://127.0.0.1:8123"),
 		Username: os.Getenv("CLICKHOUSE_USER"),
@@ -92,6 +97,15 @@ func main() {
 	}
 	if appliedRestore {
 		logger.Info("online restore cutover completed")
+	}
+	if os.Getenv("CLICKHOUSE_DISABLED") != "1" && clickHouseDatabase == project.ClickHouseDatabase {
+		migrated, err := control.MigrateLegacyClickHouseDatabase(context.Background(), clickHouseAdmin)
+		if err != nil {
+			fatal("migrate legacy ClickHouse database: " + err.Error())
+		}
+		if migrated {
+			logger.Info("migrated legacy ClickHouse database", "from", project.LegacyClickHouseDatabase, "to", project.ClickHouseDatabase)
+		}
 	}
 	database, err := store.Open(filepath.Join(dataDir, "control.db"))
 	if err != nil {
@@ -124,6 +138,7 @@ func main() {
 			Settings:            settings,
 			Cipher:              cipher,
 			ClickHouse:          clickHouseAdmin,
+			Database:            clickHouseDatabase,
 			ControlTLSDomain:    os.Getenv("CONTROL_TLS_DOMAIN"),
 			ClickHouseGroupID:   clickHouseGroupID,
 			RestoreTimeout:      durationEnvironment("ONLINE_RESTORE_PREPARE_TIMEOUT", 2*time.Hour),
@@ -140,7 +155,7 @@ func main() {
 	var logs logstore.Store = logstore.Noop{}
 	var monitoringHistory logstore.MonitoringHistoryStore
 	if os.Getenv("CLICKHOUSE_DISABLED") != "1" {
-		clickhouse := logstore.ClickHouse{Endpoint: env("CLICKHOUSE_URL", "http://127.0.0.1:8123"), Database: env("CLICKHOUSE_DATABASE", "cdn_platform"), Username: os.Getenv("CLICKHOUSE_USER"), Password: os.Getenv("CLICKHOUSE_PASSWORD")}
+		clickhouse := logstore.ClickHouse{Endpoint: env("CLICKHOUSE_URL", "http://127.0.0.1:8123"), Database: clickHouseDatabase, Username: os.Getenv("CLICKHOUSE_USER"), Password: os.Getenv("CLICKHOUSE_PASSWORD")}
 		if err := clickhouse.EnsureSchema(context.Background()); err != nil {
 			logger.Warn("ClickHouse schema setup failed; log writes will retry", "error", err)
 		}
@@ -168,7 +183,7 @@ func main() {
 	}
 	controlURL := env("CONTROL_PUBLIC_URL", "https://control.example.invalid")
 	edgeBinaryPath := os.Getenv("EDGE_BINARY_PATH")
-	edgeBinarySHA256, err := control.ResolveEdgeBinarySHA256(edgeBinaryPath, os.Getenv("EDGE_BINARY_SHA256"))
+	edgeBinarySHA256, err := control.ResolveEdgeBinarySHA256(edgeBinaryPath)
 	if err != nil {
 		fatal(err.Error())
 	}

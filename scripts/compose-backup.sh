@@ -31,8 +31,11 @@ data_dir="${CONTROL_DATA_DIR:-/var/lib/cdn-platform}"
 tls_dir="${CONTROL_TLS_DIR:-/var/lib/cdn-control-tls}"
 staging_dir="${BACKUP_STAGING_DIR:-/backup/staging}"
 clickhouse_url="${CLICKHOUSE_URL:-http://127.0.0.1:8123}"
-clickhouse_database="${CLICKHOUSE_DATABASE:-cdn_platform}"
-snapshot_name="cdn-platform-current"
+clickhouse_database="${CLICKHOUSE_DATABASE:-simple_cdn}"
+if [[ "$clickhouse_database" == cdn_platform ]]; then
+  clickhouse_database=simple_cdn
+fi
+snapshot_name="${clickhouse_database}-current"
 control_staging="$staging_dir/control"
 clickhouse_staging="$staging_dir/clickhouse/$snapshot_name"
 cleanup() {

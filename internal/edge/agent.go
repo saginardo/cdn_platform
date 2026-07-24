@@ -26,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"simple_cdn/internal/domain"
 	"simple_cdn/internal/nginx"
+	"simple_cdn/internal/version"
 )
 
 type Config struct {
@@ -43,6 +44,7 @@ type Config struct {
 	AccessLogPath         string
 	SecurityLogPath       string
 	Capabilities          []string
+	AgentVersion          string
 	AgentSHA256           string
 	PollInterval          time.Duration
 	ListenerSettleTimeout time.Duration
@@ -128,6 +130,10 @@ func New(config Config) (*Agent, error) {
 			return nil, fmt.Errorf("calculate edge agent digest: %w", err)
 		}
 	}
+	if strings.TrimSpace(config.AgentVersion) == "" {
+		config.AgentVersion = version.Version
+	}
+	config.AgentVersion = strings.TrimSpace(config.AgentVersion)
 	config.AgentSHA256 = strings.ToLower(strings.TrimSpace(config.AgentSHA256))
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityOnlineUpgrade)
 	config.Capabilities = appendCapability(config.Capabilities, domain.EdgeCapabilityCacheUsage)
@@ -340,8 +346,8 @@ func (a *Agent) Heartbeat(ctx context.Context, appliedVersion int64, lastError s
 	}
 	payload, err := json.Marshal(map[string]any{
 		"last_error": lastError, "applied_version": appliedVersion, "apply_report": report,
-		"capabilities": append([]string(nil), a.Config.Capabilities...),
-		"agent_sha256": a.Config.AgentSHA256, "active_upgrade_task_id": a.activeUpgradeID(),
+		"capabilities":  append([]string(nil), a.Config.Capabilities...),
+		"agent_version": a.Config.AgentVersion, "agent_sha256": a.Config.AgentSHA256, "active_upgrade_task_id": a.activeUpgradeID(),
 		"cache_storage":  a.cacheUsage.Snapshot(),
 		"machine_status": machineStatus,
 	})

@@ -66,6 +66,7 @@ func TestHeartbeatIncludesCacheStorageUsageAndCapability(t *testing.T) {
 	}
 	var heartbeat struct {
 		Capabilities []string                  `json:"capabilities"`
+		AgentVersion string                    `json:"agent_version"`
 		Storage      *domain.CacheStorageUsage `json:"cache_storage"`
 	}
 	client := &http.Client{Transport: upgradeRoundTripFunc(func(request *http.Request) (*http.Response, error) {
@@ -80,7 +81,7 @@ func TestHeartbeatIncludesCacheStorageUsageAndCapability(t *testing.T) {
 	agent, err := New(Config{
 		ControlURL: "https://control.example.test", StateDir: t.TempDir(),
 		CertificateDir: t.TempDir(),
-		AgentSHA256:    strings.Repeat("a", 64), HTTPClient: client, Runner: &fakeRunner{},
+		AgentVersion:   "9.8.7", AgentSHA256: strings.Repeat("a", 64), HTTPClient: client, Runner: &fakeRunner{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +95,9 @@ func TestHeartbeatIncludesCacheStorageUsageAndCapability(t *testing.T) {
 	}
 	if heartbeat.Storage == nil || heartbeat.Storage.UsedBytes == 0 || heartbeat.Storage.TotalBytes != 5<<30 {
 		t.Fatalf("heartbeat storage = %#v", heartbeat.Storage)
+	}
+	if heartbeat.AgentVersion != "9.8.7" {
+		t.Fatalf("heartbeat agent version = %q", heartbeat.AgentVersion)
 	}
 	found := false
 	for _, capability := range heartbeat.Capabilities {

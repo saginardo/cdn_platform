@@ -89,7 +89,7 @@ func ApplyPendingOnlineRestore(ctx context.Context, config OnlineRestoreApplyCon
 		return false, fmt.Errorf("acquire online restore operation lock: %w", err)
 	}
 	defer operationLock.Close()
-	if err := waitForRestoreClickHouse(applyContext, config.ClickHouse, config.ReadyTimeout); err != nil {
+	if err := waitForRestoreClickHouse(applyContext, config.ClickHouse, job.Database, config.ReadyTimeout); err != nil {
 		return false, failPendingOnlineRestore(config, job, err, nil)
 	}
 
@@ -234,10 +234,10 @@ func ApplyPendingOnlineRestore(ctx context.Context, config OnlineRestoreApplyCon
 	return true, nil
 }
 
-func waitForRestoreClickHouse(ctx context.Context, clickHouse ClickHouseRestoreAdmin, timeout time.Duration) error {
+func waitForRestoreClickHouse(ctx context.Context, clickHouse ClickHouseRestoreAdmin, database string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		_, err := clickHouse.DatabaseExists(ctx, "cdn_platform")
+		_, err := clickHouse.DatabaseExists(ctx, database)
 		if err == nil {
 			return nil
 		}
@@ -253,11 +253,12 @@ func waitForRestoreClickHouse(ctx context.Context, clickHouse ClickHouseRestoreA
 }
 
 func promoteRestoreClickHouse(ctx context.Context, clickHouse ClickHouseRestoreAdmin, job *OnlineRestoreJob) (promoted, oldRenamed bool, err error) {
+	database := job.Database
 	temporaryExists, err := clickHouse.DatabaseExists(ctx, job.TemporaryDatabase)
 	if err != nil {
 		return false, false, err
 	}
-	currentExists, err := clickHouse.DatabaseExists(ctx, "cdn_platform")
+	currentExists, err := clickHouse.DatabaseExists(ctx, database)
 	if err != nil {
 		return false, false, err
 	}
@@ -267,7 +268,7 @@ func promoteRestoreClickHouse(ctx context.Context, clickHouse ClickHouseRestoreA
 	}
 	if !temporaryExists {
 		if currentExists && rollbackExists {
-			if err := clickHouse.ValidateDatabase(ctx, "cdn_platform"); err != nil {
+			if err := clickHouse.ValidateDatabase(ctx, database); err != nil {
 				return false, true, err
 			}
 			return true, true, nil
@@ -278,20 +279,20 @@ func promoteRestoreClickHouse(ctx context.Context, clickHouse ClickHouseRestoreA
 		return false, false, errors.New("ClickHouse rollback database already exists before cutover")
 	}
 	if currentExists {
-		if err := clickHouse.ValidateDatabase(ctx, "cdn_platform"); err != nil {
+		if err := clickHouse.ValidateDatabase(ctx, database); err != nil {
 			return false, false, fmt.Errorf("current ClickHouse database: %w", err)
 		}
-		renamed, err := renameRestoreDatabaseObserved(ctx, clickHouse, "cdn_platform", job.RollbackDatabase)
+		renamed, err := renameRestoreDatabaseObserved(ctx, clickHouse, database, job.RollbackDatabase)
 		if err != nil {
 			return false, renamed, err
 		}
 		oldRenamed = renamed
 	}
-	promoted, err = renameRestoreDatabaseObserved(ctx, clickHouse, job.TemporaryDatabase, "cdn_platform")
+	promoted, err = renameRestoreDatabaseObserved(ctx, clickHouse, job.TemporaryDatabase, database)
 	if err != nil {
 		return promoted, oldRenamed, err
 	}
-	if err := clickHouse.ValidateDatabase(ctx, "cdn_platform"); err != nil {
+	if err := clickHouse.ValidateDatabase(ctx, database); err != nil {
 		return true, oldRenamed, err
 	}
 	return true, oldRenamed, nil
@@ -321,13 +322,13 @@ func rollbackRestoreClickHouse(ctx context.Context, clickHouse ClickHouseRestore
 	defer cancel()
 	var failures []error
 	if promoted {
-		if err := clickHouse.RenameDatabase(rollbackContext, "cdn_platform", job.TemporaryDatabase); err != nil {
+		if err := clickHouse.RenameDatabase(rollbackContext, job.Database, job.TemporaryDatabase); err != nil {
 			failures = append(failures, fmt.Errorf("demote restored ClickHouse database: %w", err))
 			return errors.Join(failures...)
 		}
 	}
 	if oldRenamed {
-		if err := clickHouse.RenameDatabase(rollbackContext, job.RollbackDatabase, "cdn_platform"); err != nil {
+		if err := clickHouse.RenameDatabase(rollbackContext, job.RollbackDatabase, job.Database); err != nil {
 			failures = append(failures, fmt.Errorf("restore previous ClickHouse database: %w", err))
 		}
 	}

@@ -4,7 +4,7 @@ English | [简体中文](README_CN.md)
 
 A small self-hosted CDN for one administrator, one Debian 12 control VPS, and 3-10 Debian 12 edge VPSs. Cloudflare is authoritative DNS only: end users connect directly to the edge nodes.
 
-Current version: `0.1.2` (defined by [`VERSION`](VERSION)).
+Current version: `0.1.3` (defined by [`VERSION`](VERSION)).
 
 ## What is implemented
 
@@ -67,7 +67,7 @@ Browser smoke tests live in `frontend/e2e` and cover authenticated workspaces, t
 
 For UI development, run the TLS control plane on `127.0.0.1:8443`, then start `npm --prefix frontend run dev`. Vite proxies authenticated API requests to the local TLS endpoint (including its development certificate) and keeps the existing hash routes.
 
-`dist/SHA256SUMS` contains the exact digest required by `EDGE_BINARY_SHA256`. The controller can also serve the signed edge binary itself when `EDGE_BINARY_PATH` is configured; use `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` as `EDGE_BINARY_URL`.
+`dist/SHA256SUMS` lets operators independently verify release artifacts. The controller hashes `EDGE_BINARY_PATH` at startup and embeds that digest in every enrollment and upgrade instruction, so no separately maintained checksum setting is required. When the controller serves the bundled edge binary, use `https://CONTROL_PUBLIC_URL/downloads/cdn-edge-agent-linux-amd64` as `EDGE_BINARY_URL`.
 
 GitHub Actions runs the same compilation and validation checks, browser smoke tests, and a complete Docker build for every pull request. Successful `main` builds publish `ghcr.io/saginardo/simple_cdn`; the workflow never connects to production. Private deployment automation consumes the immutable digest, and the control host only pulls that image instead of compiling source or running `docker compose build`. See [the Compose deployment guide](docs/COMPOSE_DEPLOYMENT.md#github-actions-delivery).
 
@@ -112,7 +112,7 @@ Before first public startup, set `SETUP_ALLOW_CIDRS` to your administrator egres
 ## Edge enrollment
 
 1. Add a node in the **Nodes** view with its fixed public IPv4.
-2. Set `EDGE_BINARY_URL` and `EDGE_BINARY_SHA256` to a HTTPS URL and SHA-256 digest for the `cdn-edge-agent-linux-amd64` release.
+2. Set `EDGE_BINARY_URL` to the HTTPS location of the `cdn-edge-agent-linux-amd64` release. The controller derives its SHA-256 digest from `EDGE_BINARY_PATH`.
 3. Use **Enroll** and run the generated command as root on that Debian 12 VPS.
 4. The agent creates its private key locally, submits a CSR using the 15-minute one-time token, receives an internal mTLS certificate, and begins heartbeats every 30 seconds.
 
@@ -124,7 +124,7 @@ After a node reports the `online_upgrade_v1` capability, the **Nodes** view comp
 
 The agent keeps the last working Nginx HTTP and stream configurations if the control plane is unavailable, a new configuration fails validation, or a signaled reload is rejected asynchronously by the running master. It checks every desired public TCP port before applying state: a non-Nginx listener is reported to the publish task with its port, PID, and process name; the agent never stops that process. Once the port is released, click **Republish** and the agent clears Nginx's failed state and starts it automatically. Do not delete `/opt/cdn-edge/data` on an active edge node; it contains the node private key, mTLS certificate, applied version, and pending access-log queue. See [docs/NGINX_APPLY_SAFETY.md](docs/NGINX_APPLY_SAFETY.md) for the reload/restart boundary and exact worker and site verification commands.
 
-The **Security** workspace applies ordered global path policies to capable HTTP edge nodes. Matching requests are closed before origin proxying; ban actions are enforced in the Agent-owned `inet cdn_platform` nftables table on ports 80/443 and synchronized across the fleet. Existing agents require an upgrade before policy deployment. Firewall ownership, rollout, diagnostics, and proxy-boundary constraints are documented in [docs/SECURITY_POLICIES.md](docs/SECURITY_POLICIES.md).
+The **Security** workspace applies ordered global path policies to capable HTTP edge nodes. Matching requests are closed before origin proxying; ban actions are enforced in the Agent-owned `inet simple_cdn` nftables table on ports 80/443 and synchronized across the fleet. An upgraded Agent removes the legacy table before applying the new one. Existing agents require an upgrade before policy deployment. Firewall ownership, rollout, diagnostics, and proxy-boundary constraints are documented in [docs/SECURITY_POLICIES.md](docs/SECURITY_POLICIES.md).
 
 ## Edge uninstall
 

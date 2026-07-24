@@ -45,7 +45,7 @@ for required in "$source_root/deploy/docker-compose.yaml" "$source_root/scripts/
     exit 2
   fi
 done
-for required in "$root/compose.yaml" "$root/.env" "$root/app"; do
+for required in "$root/compose.yaml" "$root/.env" "$root/app" "$root/config/control.env" "$root/config/backup.env"; do
   if [[ ! -e "$required" ]]; then
     echo "existing Compose deployment is missing $required; run install-control-compose.sh first" >&2
     exit 2
@@ -73,6 +73,26 @@ service_is_running() {
   local project="$1" service="$2" running_services
   running_services=$(docker compose -p "$project" --profile backup ps --status running --services 2>/dev/null) || return 1
   grep -Fxq "$service" <<<"$running_services"
+}
+
+clickhouse_database_count() {
+  local project="$1" database="$2" count
+  if ! count=$(docker compose -p "$project" exec -T clickhouse clickhouse-client \
+    --query "SELECT count() FROM system.databases WHERE name = '$database' FORMAT TSVRaw"); then
+    echo "failed to inspect ClickHouse database $database" >&2
+    return 1
+  fi
+  if [[ "$count" != "0" && "$count" != "1" ]]; then
+    echo "unexpected ClickHouse database count for $database: $count" >&2
+    return 1
+  fi
+  printf '%s\n' "$count"
+}
+
+rename_clickhouse_database() {
+  local project="$1" source="$2" target="$3"
+  docker compose -p "$project" exec -T clickhouse clickhouse-client \
+    --query "RENAME DATABASE $source TO $target"
 }
 
 wait_for_control() {
@@ -121,6 +141,20 @@ backup_was_running=0
 if service_is_running "$active_project" control-cert-renew; then control_renew_was_running=1; fi
 if service_is_running "$active_project" backup; then backup_was_running=1; fi
 
+configured_clickhouse_database=$(sed -nE 's/^[[:space:]]*CLICKHOUSE_DATABASE[[:space:]]*=[[:space:]]*([^[:space:]#]+)[[:space:]]*$/\1/p' "$root/config/control.env" | tail -n 1)
+legacy_database_migration_expected=0
+if [[ -z "$configured_clickhouse_database" || "$configured_clickhouse_database" == cdn_platform ]]; then
+  legacy_database_exists=$(clickhouse_database_count "$active_project" cdn_platform)
+  current_database_exists=$(clickhouse_database_count "$active_project" simple_cdn)
+  if ((legacy_database_exists && current_database_exists)); then
+    echo "both ClickHouse databases simple_cdn and cdn_platform exist; refusing an ambiguous deployment" >&2
+    exit 1
+  fi
+  if ((legacy_database_exists && !current_database_exists)); then
+    legacy_database_migration_expected=1
+  fi
+fi
+
 echo "Pulling verified control image $image_ref"
 docker pull "$image_ref"
 
@@ -135,13 +169,41 @@ restore_deployment_files() {
   cp -a "$rollback_root/app" "$root/app" || return 1
   install -m 0644 "$rollback_root/compose.yaml" "$root/compose.yaml" || return 1
   install -m 0644 "$rollback_root/.env" "$root/.env" || return 1
+  cp -a "$rollback_root/control.env" "$root/config/control.env" || return 1
+  cp -a "$rollback_root/backup.env" "$root/config/backup.env" || return 1
+}
+
+rollback_clickhouse_database() {
+  local project="$1" legacy_exists current_exists
+  ((legacy_database_migration_expected)) || return 0
+  legacy_exists=$(clickhouse_database_count "$project" cdn_platform) || return 1
+  current_exists=$(clickhouse_database_count "$project" simple_cdn) || return 1
+  if ((current_exists && !legacy_exists)); then
+    if ! rename_clickhouse_database "$project" simple_cdn cdn_platform; then
+      echo "failed to restore the legacy ClickHouse database name" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if ((legacy_exists && !current_exists)); then
+    return 0
+  fi
+  echo "cannot determine how to restore the legacy ClickHouse database name" >&2
+  return 1
 }
 
 rollback_deployment() {
+  local database_project
   echo "Deployment failed; restoring the previous Compose definition and image" >&2
   set +e
+  cd "$root" || return 1
+  database_project="$target_project"
+  if ! service_is_running "$database_project" clickhouse; then
+    database_project="$active_project"
+  fi
+  docker compose -p "$target_project" stop control >/dev/null 2>&1 || true
+  rollback_clickhouse_database "$database_project" || return 1
   if ((project_changed)); then
-    cd "$root" || return 1
     docker compose -p "$target_project" down || return 1
   fi
   restore_deployment_files || return 1
@@ -182,7 +244,12 @@ trap cleanup EXIT
 cp -a "$root/compose.yaml" "$rollback_root/compose.yaml"
 cp -a "$root/.env" "$rollback_root/.env"
 cp -a "$root/app" "$rollback_root/app"
+cp -a "$root/config/control.env" "$rollback_root/control.env"
+cp -a "$root/config/backup.env" "$rollback_root/backup.env"
 deployment_changed=1
+if ((backup_was_running)); then
+  docker compose -p "$active_project" --profile backup stop backup
+fi
 (cd "$source_root" && ./scripts/install-control-compose.sh "$root" "$image_ref")
 cd "$root"
 docker compose -p "$target_project" --profile backup config --quiet

@@ -31,6 +31,11 @@ var schemaMigrations = []schemaMigration{
 	{Version: 13, Name: "monitoring-target-names", Apply: migrateMonitoringTargetNames},
 	{Version: 14, Name: "notification-preferences-and-delivery-state", Apply: migrateNotificationPreferences},
 	{Version: 15, Name: "node-nginx-capacity-and-site-timeouts", Apply: migrateNodeNginxCapacityAndSiteTimeouts},
+	{Version: 16, Name: "edge-agent-version", Apply: migrateEdgeAgentVersion},
+}
+
+func migrateEdgeAgentVersion(tx *sql.Tx) error {
+	return addColumnIfMissing(tx, "nodes", "agent_version", "agent_version TEXT NOT NULL DEFAULT ''")
 }
 
 func migrateNodeNginxCapacityAndSiteTimeouts(tx *sql.Tx) error {

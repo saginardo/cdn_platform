@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"simple_cdn/internal/project"
 )
 
 type ClickHouseRestoreAdmin interface {
@@ -22,6 +24,38 @@ type HTTPClickHouseRestoreAdmin struct {
 	Username string
 	Password string
 	Client   *http.Client
+}
+
+func MigrateLegacyClickHouseDatabase(ctx context.Context, admin ClickHouseRestoreAdmin) (bool, error) {
+	currentExists, err := admin.DatabaseExists(ctx, project.ClickHouseDatabase)
+	if err != nil {
+		return false, err
+	}
+	legacyExists, err := admin.DatabaseExists(ctx, project.LegacyClickHouseDatabase)
+	if err != nil {
+		return false, err
+	}
+	if currentExists && legacyExists {
+		return false, fmt.Errorf("both ClickHouse databases %s and %s exist; refusing an ambiguous migration", project.ClickHouseDatabase, project.LegacyClickHouseDatabase)
+	}
+	if currentExists || !legacyExists {
+		return false, nil
+	}
+	if err := admin.ValidateDatabase(ctx, project.LegacyClickHouseDatabase); err != nil {
+		return false, fmt.Errorf("validate legacy ClickHouse database: %w", err)
+	}
+	if err := admin.RenameDatabase(ctx, project.LegacyClickHouseDatabase, project.ClickHouseDatabase); err != nil {
+		legacyStillExists, legacyInspectErr := admin.DatabaseExists(ctx, project.LegacyClickHouseDatabase)
+		currentNowExists, currentInspectErr := admin.DatabaseExists(ctx, project.ClickHouseDatabase)
+		if legacyInspectErr != nil || currentInspectErr != nil || legacyStillExists || !currentNowExists {
+			return false, errors.Join(err, legacyInspectErr, currentInspectErr)
+		}
+	}
+	if err := admin.ValidateDatabase(ctx, project.ClickHouseDatabase); err != nil {
+		rollbackErr := admin.RenameDatabase(context.WithoutCancel(ctx), project.ClickHouseDatabase, project.LegacyClickHouseDatabase)
+		return false, errors.Join(fmt.Errorf("validate migrated ClickHouse database: %w", err), rollbackErr)
+	}
+	return true, nil
 }
 
 func (a HTTPClickHouseRestoreAdmin) DatabaseExists(ctx context.Context, database string) (bool, error) {

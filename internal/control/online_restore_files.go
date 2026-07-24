@@ -14,31 +14,38 @@ import (
 	"path/filepath"
 	"strings"
 
+	"simple_cdn/internal/project"
 	"simple_cdn/internal/store"
 )
 
 type onlineRestoreArtifacts struct {
-	SnapshotRoot     string
-	DatabasePath     string
-	SecretsArchive   string
-	TLSArchive       string
-	ClickHouseBackup string
-	DatabaseSHA256   string
-	SecretsSHA256    string
-	TLSSHA256        string
-	CAFingerprint    string
-	SchemaVersion    int
+	SnapshotRoot       string
+	DatabasePath       string
+	SecretsArchive     string
+	TLSArchive         string
+	ClickHouseBackup   string
+	ClickHouseDatabase string
+	DatabaseSHA256     string
+	SecretsSHA256      string
+	TLSSHA256          string
+	CAFingerprint      string
+	SchemaVersion      int
 }
 
 func validateOnlineRestoreSnapshot(jobRoot string, cipher *Cipher, tlsDomain string) (onlineRestoreArtifacts, error) {
 	snapshotRoot := filepath.Join(jobRoot, "snapshot")
 	artifacts := onlineRestoreArtifacts{
-		SnapshotRoot:     snapshotRoot,
-		DatabasePath:     filepath.Join(snapshotRoot, "backup", "staging", "control", "control.db"),
-		SecretsArchive:   filepath.Join(snapshotRoot, "backup", "staging", "control", "control-secrets.tar.gz"),
-		TLSArchive:       filepath.Join(snapshotRoot, "backup", "staging", "control", "control-tls.tar.gz"),
-		ClickHouseBackup: filepath.Join(snapshotRoot, "backup", "staging", "clickhouse", "cdn-platform-current"),
+		SnapshotRoot:   snapshotRoot,
+		DatabasePath:   filepath.Join(snapshotRoot, "backup", "staging", "control", "control.db"),
+		SecretsArchive: filepath.Join(snapshotRoot, "backup", "staging", "control", "control-secrets.tar.gz"),
+		TLSArchive:     filepath.Join(snapshotRoot, "backup", "staging", "control", "control-tls.tar.gz"),
 	}
+	backupPath, backupDatabase, err := resolveClickHouseBackup(snapshotRoot)
+	if err != nil {
+		return onlineRestoreArtifacts{}, err
+	}
+	artifacts.ClickHouseBackup = backupPath
+	artifacts.ClickHouseDatabase = backupDatabase
 	for _, path := range []string{artifacts.DatabasePath, artifacts.SecretsArchive, artifacts.TLSArchive} {
 		if info, err := os.Stat(path); err != nil {
 			return onlineRestoreArtifacts{}, fmt.Errorf("snapshot artifact %s: %w", filepath.Base(path), err)
@@ -128,11 +135,15 @@ func validateOnlineRestoreSnapshot(jobRoot string, cipher *Cipher, tlsDomain str
 
 func verifyOnlineRestoreArtifactHashes(jobRoot string, job OnlineRestoreJob) (onlineRestoreArtifacts, error) {
 	artifacts := onlineRestoreArtifacts{
-		SnapshotRoot:     filepath.Join(jobRoot, "snapshot"),
-		DatabasePath:     filepath.Join(jobRoot, "snapshot", "backup", "staging", "control", "control.db"),
-		SecretsArchive:   filepath.Join(jobRoot, "snapshot", "backup", "staging", "control", "control-secrets.tar.gz"),
-		TLSArchive:       filepath.Join(jobRoot, "snapshot", "backup", "staging", "control", "control-tls.tar.gz"),
-		ClickHouseBackup: filepath.Join(jobRoot, "snapshot", "backup", "staging", "clickhouse", "cdn-platform-current"),
+		SnapshotRoot:   filepath.Join(jobRoot, "snapshot"),
+		DatabasePath:   filepath.Join(jobRoot, "snapshot", "backup", "staging", "control", "control.db"),
+		SecretsArchive: filepath.Join(jobRoot, "snapshot", "backup", "staging", "control", "control-secrets.tar.gz"),
+		TLSArchive:     filepath.Join(jobRoot, "snapshot", "backup", "staging", "control", "control-tls.tar.gz"),
+	}
+	var err error
+	artifacts.ClickHouseBackup, artifacts.ClickHouseDatabase, err = resolveClickHouseBackup(artifacts.SnapshotRoot)
+	if err != nil {
+		return onlineRestoreArtifacts{}, err
 	}
 	checks := []struct {
 		path string
@@ -152,6 +163,36 @@ func verifyOnlineRestoreArtifactHashes(jobRoot string, job OnlineRestoreJob) (on
 		}
 	}
 	return artifacts, nil
+}
+
+func resolveClickHouseBackup(snapshotRoot string) (string, string, error) {
+	root := filepath.Join(snapshotRoot, "backup", "staging", "clickhouse")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return "", "", fmt.Errorf("snapshot ClickHouse backup: %w", err)
+	}
+	var foundPath, foundDatabase string
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasSuffix(entry.Name(), "-current") {
+			continue
+		}
+		database := strings.TrimSuffix(entry.Name(), "-current")
+		if database == "cdn-platform" {
+			database = project.LegacyClickHouseDatabase
+		}
+		if !validRestoreIdentifier(database) {
+			return "", "", errors.New("snapshot ClickHouse database name is invalid")
+		}
+		if foundPath != "" {
+			return "", "", errors.New("snapshot contains multiple ClickHouse backups")
+		}
+		foundPath = filepath.Join(root, entry.Name())
+		foundDatabase = database
+	}
+	if foundPath == "" {
+		return "", "", errors.New("snapshot ClickHouse backup is missing")
+	}
+	return foundPath, foundDatabase, nil
 }
 
 func prepareClickHouseBackupPermissions(root string, groupID int) error {

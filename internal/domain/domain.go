@@ -34,6 +34,7 @@ type Node struct {
 	Status            NodeStatus    `json:"status"`
 	MonitorAutoPaused bool          `json:"monitor_auto_paused"`
 	Capabilities      []string      `json:"capabilities"`
+	AgentVersion      string        `json:"agent_version,omitempty"`
 	AgentSHA256       string        `json:"agent_sha256,omitempty"`
 	ActiveUpgradeID   string        `json:"active_upgrade_task_id,omitempty"`
 	LastHeartbeatAt   *time.Time    `json:"last_heartbeat_at,omitempty"`

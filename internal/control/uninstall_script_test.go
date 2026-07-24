@@ -41,7 +41,7 @@ func TestUninstallEdgeScriptRemovesOnlyPlatformFiles(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(root, "etc/nginx/nginx.conf")); statErr != nil {
 		t.Fatalf("unrelated Nginx configuration was removed: %v", statErr)
 	}
-	for _, expected := range []string{"uninstall/start", "uninstall/complete", "nginx -t", "systemctl reload nginx", "systemctl daemon-reload", "nft delete table inet cdn_platform"} {
+	for _, expected := range []string{"uninstall/start", "uninstall/complete", "nginx -t", "systemctl reload nginx", "systemctl daemon-reload", "nft delete table inet simple_cdn", "nft delete table inet cdn_platform"} {
 		if !strings.Contains(log, expected) {
 			t.Fatalf("mock log does not contain %q:\n%s", expected, log)
 		}
@@ -301,7 +301,7 @@ exit 0
 		"MOCK_MKTEMP_FAIL=" + boolEnvironment(failureMode == "mktemp"),
 		"MOCK_RELOAD_FAIL=" + boolEnvironment(failureMode == "reload"),
 		"MOCK_STOP_FAIL=" + boolEnvironment(failureMode == "stop"),
-		"CDN_PLATFORM_UNINSTALL_ROOT=" + root,
+		"SIMPLE_CDN_UNINSTALL_ROOT=" + root,
 	}
 	output, err := command.CombinedOutput()
 	logContents, readErr := os.ReadFile(logPath)

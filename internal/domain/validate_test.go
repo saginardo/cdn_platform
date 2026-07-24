@@ -54,16 +54,62 @@ func TestReadWriteTimeoutDefaultsAndPresetValidation(t *testing.T) {
 		t.Fatalf("default read/write timeout = %d", defaultSite.ReadWriteTimeoutSeconds)
 	}
 
-	for _, value := range []int{360, 900, 1800, 3600} {
+	for _, value := range []int{120, 360, 900, 1800, 3600} {
 		site := newSite(value)
 		if err := NormalizeAndValidateSite(&site); err != nil {
 			t.Fatalf("expected %d seconds to be accepted: %v", value, err)
 		}
 	}
-	for _, value := range []int{-1, 1, 359, 361, 7200} {
+	for _, value := range []int{-1, 1, 119, 121, 359, 361, 7200} {
 		site := newSite(value)
 		if err := NormalizeAndValidateSite(&site); err == nil {
 			t.Fatalf("expected %d seconds to be rejected", value)
+		}
+	}
+}
+
+func TestClientKeepaliveTimeoutDefaultsAndValidation(t *testing.T) {
+	newSite := func(value int) Site {
+		return Site{Name: "example", Domains: []string{"example.test"}, Nodes: []string{"node-1"}, PrimaryOrigin: Origin{URL: "https://origin.example.test"}, ClientKeepaliveTimeoutSeconds: value}
+	}
+	defaultSite := newSite(0)
+	if err := NormalizeAndValidateSite(&defaultSite); err != nil {
+		t.Fatal(err)
+	}
+	if defaultSite.ClientKeepaliveTimeoutSeconds != DefaultClientKeepaliveTimeoutSeconds {
+		t.Fatalf("default client keepalive timeout = %d", defaultSite.ClientKeepaliveTimeoutSeconds)
+	}
+	for _, value := range []int{15, 120, 300, 3600} {
+		site := newSite(value)
+		if err := NormalizeAndValidateSite(&site); err != nil {
+			t.Fatalf("expected %d seconds to be accepted: %v", value, err)
+		}
+	}
+	for _, value := range []int{-1, 1, 14, 3601} {
+		site := newSite(value)
+		if err := NormalizeAndValidateSite(&site); err == nil {
+			t.Fatalf("expected %d seconds to be rejected", value)
+		}
+	}
+}
+
+func TestNginxCapacityDefaultsAndValidation(t *testing.T) {
+	capacity, err := NormalizeNginxCapacity(NginxCapacity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capacity != DefaultNginxCapacity() {
+		t.Fatalf("default Nginx capacity = %#v", capacity)
+	}
+	for _, invalid := range []NginxCapacity{
+		{WorkerProcesses: -1},
+		{WorkerProcesses: MaxNginxWorkerProcesses + 1},
+		{WorkerConnections: MinNginxWorkerConnections - 1},
+		{WorkerConnections: 8192, WorkerRlimitNoFile: 4096},
+		{WorkerRlimitNoFile: MaxNginxWorkerRlimitNoFile + 1},
+	} {
+		if _, err := NormalizeNginxCapacity(invalid); err == nil {
+			t.Fatalf("invalid Nginx capacity accepted: %#v", invalid)
 		}
 	}
 }

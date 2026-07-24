@@ -46,6 +46,7 @@ func TestNodeStateNginxFragmentsRoundTrip(t *testing.T) {
 	}
 	state := domain.DesiredState{
 		Version: 3, NginxConfig: "legacy HTTP", NginxStreamConfig: "legacy stream",
+		NginxMainConfig: "worker_processes auto;", NginxEventsConfig: "worker_connections 4096;",
 		NginxFragments: &domain.NginxConfigFragments{
 			HTTPBase: "HTTP base", HTTPSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "HTTP site"}},
 			StreamBase: "stream base", StreamSites: []domain.NginxConfigFragment{{Name: "site-a.conf", Content: "stream site"}},
@@ -59,7 +60,8 @@ func TestNodeStateNginxFragmentsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.NginxFragments == nil || loaded.NginxFragments.HTTPBase != "HTTP base" || loaded.CacheMaxBytes != 9<<30 ||
+	if loaded.NginxFragments == nil || loaded.NginxFragments.HTTPBase != "HTTP base" || loaded.NginxMainConfig != "worker_processes auto;" ||
+		loaded.NginxEventsConfig != "worker_connections 4096;" || loaded.CacheMaxBytes != 9<<30 ||
 		len(loaded.NginxFragments.HTTPSites) != 1 || loaded.NginxFragments.StreamSites[0].Content != "stream site" {
 		t.Fatalf("stored Nginx fragments = %#v", loaded.NginxFragments)
 	}
@@ -103,6 +105,33 @@ func TestNodeCacheLimitInheritsAndRoundTripsOverride(t *testing.T) {
 	}
 	if cleared.CacheMaxSizeGB != nil {
 		t.Fatalf("cleared cache override = %#v", cleared.CacheMaxSizeGB)
+	}
+}
+
+func TestNodeNginxCapacityDefaultsAndRoundTrips(t *testing.T) {
+	database, err := Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("edge-capacity", "203.0.113.63")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.NginxCapacity != domain.DefaultNginxCapacity() {
+		t.Fatalf("default Nginx capacity = %#v", node.NginxCapacity)
+	}
+	updated, err := database.SetNodeNginxCapacity(node.ID, domain.NginxCapacity{
+		WorkerProcesses: 4, WorkerConnections: 8192, WorkerRlimitNoFile: 16384,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.NginxCapacity.WorkerProcesses != 4 || updated.NginxCapacity.WorkerConnections != 8192 || updated.NginxCapacity.WorkerRlimitNoFile != 16384 {
+		t.Fatalf("updated Nginx capacity = %#v", updated.NginxCapacity)
+	}
+	if _, err := database.SetNodeNginxCapacity(node.ID, domain.NginxCapacity{WorkerConnections: 8192, WorkerRlimitNoFile: 4096}); err == nil {
+		t.Fatal("accepted an Nginx file limit below worker connections")
 	}
 }
 
@@ -852,6 +881,27 @@ func TestOpenMigratesSiteColumnsForExistingDatabase(t *testing.T) {
 		_ = legacy.Close()
 		t.Fatal(err)
 	}
+	_, err = legacy.Exec(`CREATE TABLE nodes (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  public_ipv4 TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  cert_fingerprint TEXT,
+  last_heartbeat_at TEXT,
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`)
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`INSERT INTO nodes(id, name, public_ipv4, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"legacy-node", "legacy-node", "203.0.113.79", domain.NodePending, stamp(time.Now()), stamp(time.Now()))
+	if err != nil {
+		_ = legacy.Close()
+		t.Fatal(err)
+	}
 	_, err = legacy.Exec(`INSERT INTO sites(id, name, zone_id, domains_json, node_ids_json, primary_origin_json, cache_generation, config_version, published, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, 1, 0, 1, ?, ?)`,
 		"legacy-site", "legacy", "zone", `["legacy.example.test"]`, `["node-1"]`, `{"url":"https://origin.example.test","host_header":"origin.example.test","enabled":true}`, stamp(time.Now()), stamp(time.Now()))
 	if err != nil {
@@ -880,18 +930,22 @@ func TestOpenMigratesSiteColumnsForExistingDatabase(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
 			t.Fatal(err)
 		}
-		if name == "stream_paths_json" || name == "passthrough" || name == "client_max_body_size_mb" || name == "read_write_timeout_seconds" {
+		if name == "stream_paths_json" || name == "passthrough" || name == "client_max_body_size_mb" || name == "client_keepalive_timeout_seconds" || name == "read_write_timeout_seconds" {
 			found[name] = true
 		}
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if !found["stream_paths_json"] || !found["passthrough"] || !found["client_max_body_size_mb"] || !found["read_write_timeout_seconds"] {
+	if !found["stream_paths_json"] || !found["passthrough"] || !found["client_max_body_size_mb"] || !found["client_keepalive_timeout_seconds"] || !found["read_write_timeout_seconds"] {
 		t.Fatalf("site columns were not added to legacy table: %#v", found)
 	}
 	site, _, err := migrated.GetSite("legacy-site")
-	if err != nil || site.Passthrough || site.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB || site.ReadWriteTimeoutSeconds != domain.DefaultReadWriteTimeoutSeconds || site.PrimaryOrigin.TLSServerName != "" {
-		t.Fatalf("legacy site defaults: passthrough=%t client_max_body_size_mb=%d read_write_timeout_seconds=%d tls_server_name=%q err=%v", site.Passthrough, site.ClientMaxBodySizeMB, site.ReadWriteTimeoutSeconds, site.PrimaryOrigin.TLSServerName, err)
+	if err != nil || site.Passthrough || site.ClientMaxBodySizeMB != domain.DefaultClientMaxBodySizeMB || site.ClientKeepaliveTimeoutSeconds != domain.DefaultClientKeepaliveTimeoutSeconds || site.ReadWriteTimeoutSeconds != domain.DefaultReadWriteTimeoutSeconds || site.PrimaryOrigin.TLSServerName != "" {
+		t.Fatalf("legacy site defaults: passthrough=%t client_max_body_size_mb=%d client_keepalive_timeout_seconds=%d read_write_timeout_seconds=%d tls_server_name=%q err=%v", site.Passthrough, site.ClientMaxBodySizeMB, site.ClientKeepaliveTimeoutSeconds, site.ReadWriteTimeoutSeconds, site.PrimaryOrigin.TLSServerName, err)
+	}
+	node, err := migrated.GetNode("legacy-node")
+	if err != nil || node.NginxCapacity != domain.DefaultNginxCapacity() {
+		t.Fatalf("legacy node capacity = %#v, err=%v", node.NginxCapacity, err)
 	}
 }

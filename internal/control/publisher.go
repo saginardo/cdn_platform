@@ -85,6 +85,28 @@ func (p Publisher) PublishAll() error {
 	return p.Store.SaveNodeStates(updates)
 }
 
+// PublishNode rebuilds just one node's desired state. It is used for
+// node-scoped capacity and cache quota changes that do not alter site drafts.
+func (p Publisher) PublishNode(nodeID string) error {
+	if p.Store == nil || p.Cipher == nil {
+		return fmt.Errorf("node publisher is not configured")
+	}
+	desiredStateMu.Lock()
+	defer desiredStateMu.Unlock()
+	if err := p.Store.CheckPublicationMigrationSafety(""); err != nil {
+		return err
+	}
+	publications, err := p.Store.ListSitePublications()
+	if err != nil {
+		return err
+	}
+	updates, _, err := p.renderNodeStateUpdates(publicationMaterials(publications), map[string]struct{}{nodeID: {}})
+	if err != nil {
+		return err
+	}
+	return p.Store.SaveNodeStates(updates)
+}
+
 type publicationMaterial struct {
 	Site                  domain.Site
 	CertificateCiphertext []byte
@@ -291,14 +313,18 @@ func (p Publisher) renderNodeStateUpdates(materials []publicationMaterial, affec
 			return nil, nil, fmt.Errorf("split Nginx configuration for node %s: %w", node.Name, err)
 		}
 		ports := requiredPublicPorts(nodeSites)
+		mainConfig, eventsConfig, err := nginx.RenderCapacity(node.NginxCapacity)
+		if err != nil {
+			return nil, nil, fmt.Errorf("node %s capacity: %w", node.Name, err)
+		}
 		version := int64(1)
 		if stateErr == nil {
-			if p.nodeStateMatches(previous, previousCertificates, config, streamConfig, fragments, ports, cacheMaxBytes, certificates) {
+			if p.nodeStateMatches(previous, previousCertificates, config, streamConfig, mainConfig, eventsConfig, fragments, ports, cacheMaxBytes, certificates) {
 				continue
 			}
 			version = previous.Version + 1
 		}
-		state := domain.DesiredState{Version: version, NginxConfig: config, NginxStreamConfig: streamConfig, NginxFragments: fragments, PublicPorts: ports, CacheMaxBytes: cacheMaxBytes, Certificates: certificates}
+		state := domain.DesiredState{Version: version, NginxConfig: config, NginxStreamConfig: streamConfig, NginxMainConfig: mainConfig, NginxEventsConfig: eventsConfig, NginxFragments: fragments, PublicPorts: ports, CacheMaxBytes: cacheMaxBytes, Certificates: certificates}
 		serialized, err := json.Marshal(state.Certificates)
 		if err != nil {
 			return nil, nil, err
@@ -367,8 +393,8 @@ func (p Publisher) decryptPublicationMaterials(materials []publicationMaterial, 
 	return rendered, nil
 }
 
-func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCertificates []byte, config, streamConfig string, fragments *domain.NginxConfigFragments, ports []int, cacheMaxBytes int64, certificates map[string]domain.TLSBundle) bool {
-	if previous.NginxConfig != config || previous.NginxStreamConfig != streamConfig ||
+func (p Publisher) nodeStateMatches(previous domain.DesiredState, encryptedCertificates []byte, config, streamConfig, mainConfig, eventsConfig string, fragments *domain.NginxConfigFragments, ports []int, cacheMaxBytes int64, certificates map[string]domain.TLSBundle) bool {
+	if previous.NginxConfig != config || previous.NginxStreamConfig != streamConfig || previous.NginxMainConfig != mainConfig || previous.NginxEventsConfig != eventsConfig ||
 		!nginxConfigFragmentsEqual(previous.NginxFragments, fragments) || !slices.Equal(previous.PublicPorts, ports) || previous.CacheMaxBytes != cacheMaxBytes {
 		return false
 	}

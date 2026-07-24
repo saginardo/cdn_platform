@@ -24,6 +24,7 @@ func TestUninstallEdgeScriptRemovesOnlyPlatformFiles(t *testing.T) {
 	for _, path := range []string{
 		"etc/nginx/conf.d/cdn-platform.conf",
 		"etc/nginx/modules-enabled/99-cdn-platform-stream.conf",
+		"etc/logrotate.d/cdn-edge-platform",
 		"etc/systemd/system/cdn-edge-agent.service",
 		"etc/systemd/system/cdn-edge-updater@.service",
 		"usr/local/bin/cdn-edge-agent",
@@ -47,6 +48,42 @@ func TestUninstallEdgeScriptRemovesOnlyPlatformFiles(t *testing.T) {
 	}
 	if strings.Contains(log, "uninstall/fail") {
 		t.Fatalf("successful uninstall reported failure:\n%s", log)
+	}
+}
+
+func TestUninstallEdgeScriptRestoresManagedNginxRootConfig(t *testing.T) {
+	root, _, output, err := runUninstallEdgeScript(t, "capacity")
+	if err != nil {
+		t.Fatalf("script failed: %v\n%s", err, output)
+	}
+	rootConfig, readErr := os.ReadFile(filepath.Join(root, "etc/nginx/nginx.conf"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	expected := "worker_processes auto;\nevents {\n    worker_connections 768;\n}\nhttp {\n    include /etc/nginx/conf.d/*.conf;\n}\n"
+	if string(rootConfig) != expected {
+		t.Fatalf("Nginx root config was not restored:\n%s", rootConfig)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "etc/logrotate.d/cdn-edge-platform")); !os.IsNotExist(statErr) {
+		t.Fatalf("platform logrotate policy was retained: %v", statErr)
+	}
+}
+
+func TestUninstallEdgeScriptRestoresManagedNginxRootWhenValidationFails(t *testing.T) {
+	root, _, output, err := runUninstallEdgeScript(t, "capacity-nginx")
+	if err == nil {
+		t.Fatalf("script unexpectedly succeeded:\n%s", output)
+	}
+	rootConfig, readErr := os.ReadFile(filepath.Join(root, "etc/nginx/nginx.conf"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(rootConfig), "# simple_cdn nginx capacity main include begin") ||
+		!strings.Contains(string(rootConfig), "# simple_cdn nginx capacity managed worker_connections: worker_connections 768;") {
+		t.Fatalf("managed Nginx root config was not restored after validation failure:\n%s", rootConfig)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "etc/logrotate.d/cdn-edge-platform")); statErr != nil {
+		t.Fatalf("failed uninstall removed logrotate policy: %v", statErr)
 	}
 }
 
@@ -181,7 +218,7 @@ func runUninstallEdgeScript(t *testing.T, failureMode string) (string, string, s
 	t.Helper()
 	root := t.TempDir()
 	for _, directory := range []string{
-		"run", "tmp", "mock-bin", "etc/nginx/conf.d", "etc/nginx/modules-enabled", "etc/systemd/system", "usr/local/bin",
+		"run", "tmp", "mock-bin", "etc/nginx/conf.d", "etc/nginx/modules-enabled", "etc/logrotate.d", "etc/systemd/system", "usr/local/bin",
 		"opt/cdn-edge/bin", "opt/cdn-edge/config", "opt/cdn-edge/data", "opt/cdn-edge/logs", "opt/cdn-edge/cache",
 		"etc/cdn-platform", "var/lib/cdn-platform", "var/log/cdn-platform", "var/cache/cdn-platform",
 	} {
@@ -193,6 +230,7 @@ func runUninstallEdgeScript(t *testing.T, failureMode string) (string, string, s
 		"etc/nginx/conf.d/cdn-platform.conf":                    "platform config\n",
 		"etc/nginx/modules-enabled/99-cdn-platform-stream.conf": "stream config\n",
 		"etc/nginx/nginx.conf":                                  "unrelated config\n",
+		"etc/logrotate.d/cdn-edge-platform":                     "platform logrotate\n",
 		"etc/systemd/system/cdn-edge-agent.service":             "service\n",
 		"etc/systemd/system/cdn-edge-updater@.service":          "updater service\n",
 		"usr/local/bin/cdn-edge-agent":                          "binary\n",
@@ -205,6 +243,12 @@ func runUninstallEdgeScript(t *testing.T, failureMode string) (string, string, s
 		"var/cache/cdn-platform/state":                          "state\n",
 	} {
 		if err := os.WriteFile(filepath.Join(root, path), []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if failureMode == "capacity" || failureMode == "capacity-nginx" {
+		managedRoot := "# simple_cdn nginx capacity managed worker_processes: worker_processes auto;\n# simple_cdn nginx capacity main include begin\ninclude /opt/cdn-edge/config/nginx/cdn-platform-main.conf;\n# simple_cdn nginx capacity main include end\nevents {\n    # simple_cdn nginx capacity events include begin\n    include /opt/cdn-edge/config/nginx/cdn-platform-events.conf;\n    # simple_cdn nginx capacity events include end\n    # simple_cdn nginx capacity managed worker_connections: worker_connections 768;\n}\nhttp {\n    include /etc/nginx/conf.d/*.conf;\n}\n"
+		if err := os.WriteFile(filepath.Join(root, "etc/nginx/nginx.conf"), []byte(managedRoot), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -253,7 +297,7 @@ exit 0
 	command.Env = []string{
 		"PATH=" + filepath.Join(root, "mock-bin") + ":/usr/bin:/bin",
 		"MOCK_LOG=" + logPath,
-		"MOCK_NGINX_FAIL=" + boolEnvironment(failureMode == "nginx"),
+		"MOCK_NGINX_FAIL=" + boolEnvironment(failureMode == "nginx" || failureMode == "capacity-nginx"),
 		"MOCK_MKTEMP_FAIL=" + boolEnvironment(failureMode == "mktemp"),
 		"MOCK_RELOAD_FAIL=" + boolEnvironment(failureMode == "reload"),
 		"MOCK_STOP_FAIL=" + boolEnvironment(failureMode == "stop"),

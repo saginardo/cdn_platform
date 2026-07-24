@@ -30,6 +30,27 @@ var schemaMigrations = []schemaMigration{
 	{Version: 12, Name: "tcp-monitoring", Apply: migrateTCPMonitoring},
 	{Version: 13, Name: "monitoring-target-names", Apply: migrateMonitoringTargetNames},
 	{Version: 14, Name: "notification-preferences-and-delivery-state", Apply: migrateNotificationPreferences},
+	{Version: 15, Name: "node-nginx-capacity-and-site-timeouts", Apply: migrateNodeNginxCapacityAndSiteTimeouts},
+}
+
+func migrateNodeNginxCapacityAndSiteTimeouts(tx *sql.Tx) error {
+	for _, column := range []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"nodes", "nginx_worker_processes", "nginx_worker_processes INTEGER NOT NULL DEFAULT 0"},
+		{"nodes", "nginx_worker_connections", "nginx_worker_connections INTEGER NOT NULL DEFAULT 4096"},
+		{"nodes", "nginx_worker_rlimit_nofile", "nginx_worker_rlimit_nofile INTEGER NOT NULL DEFAULT 65536"},
+		{"sites", "client_keepalive_timeout_seconds", "client_keepalive_timeout_seconds INTEGER NOT NULL DEFAULT 120"},
+		{"node_states", "nginx_main_config", "nginx_main_config TEXT NOT NULL DEFAULT ''"},
+		{"node_states", "nginx_events_config", "nginx_events_config TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := addColumnIfMissing(tx, column.table, column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func migrateNotificationPreferences(tx *sql.Tx) error {
@@ -332,7 +353,8 @@ func migrateCoreSchema(tx *sql.Tx) error {
 		{"sites", "stream_paths_json", "stream_paths_json TEXT NOT NULL DEFAULT '[]'"},
 		{"sites", "passthrough", "passthrough INTEGER NOT NULL DEFAULT 0"},
 		{"sites", "client_max_body_size_mb", "client_max_body_size_mb INTEGER NOT NULL DEFAULT 128"},
-		{"sites", "read_write_timeout_seconds", "read_write_timeout_seconds INTEGER NOT NULL DEFAULT 360"},
+		{"sites", "client_keepalive_timeout_seconds", "client_keepalive_timeout_seconds INTEGER NOT NULL DEFAULT 120"},
+		{"sites", "read_write_timeout_seconds", "read_write_timeout_seconds INTEGER NOT NULL DEFAULT 120"},
 		{"sites", "dns_ttl_seconds", "dns_ttl_seconds INTEGER"},
 		{"sites", "tcp_only", "tcp_only INTEGER NOT NULL DEFAULT 0"},
 		{"sites", "tcp_forwards_json", "tcp_forwards_json TEXT NOT NULL DEFAULT '[]'"},
@@ -400,6 +422,11 @@ func migrateTaskInvariants(tx *sql.Tx) error {
 }
 
 func migratePublishedState(tx *sql.Tx) error {
+	// A partially migrated legacy database may reach this migration before the
+	// later timeout migration. The publication scanner needs this column now.
+	if err := addColumnIfMissing(tx, "sites", "client_keepalive_timeout_seconds", "client_keepalive_timeout_seconds INTEGER NOT NULL DEFAULT 120"); err != nil {
+		return err
+	}
 	if err := seedBuiltinSecurityPoliciesTx(tx); err != nil {
 		return err
 	}

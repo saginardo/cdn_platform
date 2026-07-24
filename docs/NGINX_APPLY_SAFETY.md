@@ -17,7 +17,7 @@ cache "cdn_cache" uses the "/opt/cdn-edge/cache" cache path while previously it 
 ## 修复后的约束
 
 1. 旧布局迁移改变 `cdn_cache` 路径时，安装脚本使用 `systemctl restart nginx.service`。迁移失败并恢复旧配置时同样冷重启，确保恢复后的 master 与磁盘配置一致。
-2. 已经位于 `/opt/cdn-edge` 的普通二进制升级不改 Nginx 配置，仍使用 reload，避免不必要的连接中断。
+2. 已经位于 `/opt/cdn-edge` 的普通升级保持缓存路径不变，仍使用 reload，避免不必要的连接中断。首次接入节点容量管理时，安装器会原子加入带标记的主配置和 `events` include，并在同一事务内验证；失败会恢复原始主配置。
 3. Edge Agent reload 后最多等待 5 秒，必须看到 master 产生至少一个新的 Nginx worker PID。没有新 worker 就把应用标记为失败，恢复上一份配置和证书，并且不写入新的 applied version。
 4. 控制面保留节点级 HTTP 探测，同时对已包含新能力的每个站点配置执行直连 Edge IP:443 的 HTTPS 探测。请求 URL、HTTP Host、TLS SNI 和证书主机名校验都使用站点真实域名，响应体必须精确标识该站点。
 5. 站点与节点的 DNS 资格分别使用 3 次失败摘除、5 次成功恢复的滞回。多节点站点只摘除失败节点；如果所有已分配节点都不合格，系统保留现有 DNS 并发送告警，避免主动发布空记录集。

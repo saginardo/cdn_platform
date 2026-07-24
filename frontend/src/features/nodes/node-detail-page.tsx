@@ -47,9 +47,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -75,6 +75,7 @@ import type {
   NodeCacheSettings,
   NodeCacheStatus,
   NodeDetail,
+  NginxCapacity,
   NodeStatus,
   NodeUninstallStatus,
 } from "@/lib/types";
@@ -234,6 +235,14 @@ export function NodeDetailPage() {
                   key={`${detail.data.cache.default_size_gb}-${detail.data.cache.override_size_gb ?? "global"}`}
                   nodeId={nodeId}
                   settings={detail.data.cache}
+                />
+                <NginxCapacitySettings
+                  key={`${node.nginx_capacity.worker_processes}-${node.nginx_capacity.worker_connections}-${node.nginx_capacity.worker_rlimit_nofile}`}
+                  nodeId={nodeId}
+                  capacity={node.nginx_capacity}
+                  capacitySupported={node.capabilities.includes(
+                    "nginx_capacity_v1",
+                  )}
                 />
                 <Card>
                   <CardHeader>
@@ -444,9 +453,7 @@ function CacheQuotaSettings({
               onChange={(event) => setSize(Number(event.target.value))}
             />
           </div>
-          <p className="text-xs text-muted-foreground">
-            保存后在该节点下一次配置发布时生效。
-          </p>
+          <p className="text-xs text-muted-foreground">保存后立即下发到该节点。</p>
           <Button type="submit" disabled={mutation.isPending}>
             {mutation.isPending ? (
               <LoaderCircle className="animate-spin" />
@@ -454,6 +461,118 @@ function CacheQuotaSettings({
               <Save />
             )}
             保存缓存配置
+          </Button>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
+function NginxCapacitySettings({
+  nodeId,
+  capacity,
+  capacitySupported,
+}: {
+  nodeId: string;
+  capacity: NginxCapacity;
+  capacitySupported: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState(capacity);
+  const mutation = useMutation({
+    mutationFn: () =>
+      api<Node>(`/api/nodes/${encodeURIComponent(nodeId)}/nginx-capacity`, {
+        method: "PUT",
+        body: JSON.stringify(draft),
+      }),
+    onSuccess: () => {
+      toast.success(
+        capacitySupported
+          ? "Nginx 容量配置已下发"
+          : "Nginx 容量配置已保存，重新部署边缘节点后生效",
+      );
+      void queryClient.invalidateQueries({ queryKey: ["node", nodeId] });
+      void queryClient.invalidateQueries({ queryKey: ["nodes"] });
+    },
+    onError: (error) => toast.error(errorMessage(error)),
+  });
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Nginx 容量</CardTitle>
+        <CardDescription>
+          {capacitySupported
+            ? "默认：自动进程、4096 连接、65536 文件句柄"
+            : "当前节点完成容量配置升级后应用此配置"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            mutation.mutate();
+          }}
+        >
+          <div className="grid gap-2">
+            <Label htmlFor="nginx-worker-processes">工作进程（0 为自动）</Label>
+            <Input
+              id="nginx-worker-processes"
+              type="number"
+              min={0}
+              max={128}
+              required
+              value={draft.worker_processes}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  worker_processes: Number(event.target.value),
+                })
+              }
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="nginx-worker-connections">每进程连接数</Label>
+            <Input
+              id="nginx-worker-connections"
+              type="number"
+              min={256}
+              max={65535}
+              required
+              value={draft.worker_connections}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  worker_connections: Number(event.target.value),
+                })
+              }
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="nginx-worker-nofile">每进程文件句柄</Label>
+            <Input
+              id="nginx-worker-nofile"
+              type="number"
+              min={1024}
+              max={65536}
+              required
+              value={draft.worker_rlimit_nofile}
+              onChange={(event) =>
+                setDraft({
+                  ...draft,
+                  worker_rlimit_nofile: Number(event.target.value),
+                })
+              }
+            />
+          </div>
+          <Button type="submit" disabled={mutation.isPending}>
+            {mutation.isPending ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <Save />
+            )}
+            保存容量配置
           </Button>
         </form>
       </CardContent>

@@ -26,20 +26,29 @@ const (
 )
 
 type Node struct {
-	ID                string     `json:"id"`
-	Name              string     `json:"name"`
-	PublicIPv4        string     `json:"public_ipv4"`
-	CacheMaxSizeGB    *int       `json:"cache_max_size_gb,omitempty"`
-	Status            NodeStatus `json:"status"`
-	MonitorAutoPaused bool       `json:"monitor_auto_paused"`
-	Capabilities      []string   `json:"capabilities"`
-	AgentSHA256       string     `json:"agent_sha256,omitempty"`
-	ActiveUpgradeID   string     `json:"active_upgrade_task_id,omitempty"`
-	LastHeartbeatAt   *time.Time `json:"last_heartbeat_at,omitempty"`
-	AppliedVersion    int64      `json:"applied_version"`
-	LastError         string     `json:"last_error,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	ID                string        `json:"id"`
+	Name              string        `json:"name"`
+	PublicIPv4        string        `json:"public_ipv4"`
+	CacheMaxSizeGB    *int          `json:"cache_max_size_gb,omitempty"`
+	NginxCapacity     NginxCapacity `json:"nginx_capacity"`
+	Status            NodeStatus    `json:"status"`
+	MonitorAutoPaused bool          `json:"monitor_auto_paused"`
+	Capabilities      []string      `json:"capabilities"`
+	AgentSHA256       string        `json:"agent_sha256,omitempty"`
+	ActiveUpgradeID   string        `json:"active_upgrade_task_id,omitempty"`
+	LastHeartbeatAt   *time.Time    `json:"last_heartbeat_at,omitempty"`
+	AppliedVersion    int64         `json:"applied_version"`
+	LastError         string        `json:"last_error,omitempty"`
+	CreatedAt         time.Time     `json:"created_at"`
+	UpdatedAt         time.Time     `json:"updated_at"`
+}
+
+// NginxCapacity contains the worker-level limits managed by the control
+// plane. WorkerProcesses=0 uses Nginx's automatic CPU-aware setting.
+type NginxCapacity struct {
+	WorkerProcesses    int `json:"worker_processes"`
+	WorkerConnections  int `json:"worker_connections"`
+	WorkerRlimitNoFile int `json:"worker_rlimit_nofile"`
 }
 
 type CacheStorageUsage struct {
@@ -62,18 +71,27 @@ type Origin struct {
 }
 
 const (
-	DefaultClientMaxBodySizeMB      = 128
-	MaxClientMaxBodySizeMB          = 1024
-	DefaultReadWriteTimeoutSeconds  = 360
-	DefaultTCPConnectTimeoutSeconds = 10
-	DefaultTCPIdleTimeoutSeconds    = 300
-	MaxTCPForwardsPerSite           = 32
-	DefaultDNSTTLSeconds            = 60
-	MinDNSTTLSeconds                = 60
-	MaxDNSTTLSeconds                = 300
-	DefaultCacheMaxSizeGB           = 1
-	MinCacheMaxSizeGB               = 1
-	MaxCacheMaxSizeGB               = 1024
+	DefaultClientMaxBodySizeMB           = 128
+	MaxClientMaxBodySizeMB               = 1024
+	DefaultClientKeepaliveTimeoutSeconds = 120
+	DefaultReadWriteTimeoutSeconds       = 120
+	DefaultTCPConnectTimeoutSeconds      = 10
+	DefaultTCPIdleTimeoutSeconds         = 300
+	MaxTCPForwardsPerSite                = 32
+	DefaultDNSTTLSeconds                 = 60
+	MinDNSTTLSeconds                     = 60
+	MaxDNSTTLSeconds                     = 300
+	DefaultCacheMaxSizeGB                = 1
+	MinCacheMaxSizeGB                    = 1
+	MaxCacheMaxSizeGB                    = 1024
+	DefaultNginxWorkerProcesses          = 0
+	DefaultNginxWorkerConnections        = 4096
+	DefaultNginxWorkerRlimitNoFile       = 65536
+	MinNginxWorkerConnections            = 256
+	MaxNginxWorkerConnections            = 65535
+	MinNginxWorkerRlimitNoFile           = 1024
+	MaxNginxWorkerRlimitNoFile           = DefaultNginxWorkerRlimitNoFile
+	MaxNginxWorkerProcesses              = 128
 )
 
 const (
@@ -82,6 +100,7 @@ const (
 	EdgeCapabilityCacheUsage     = "cache_usage_v1"
 	EdgeCapabilityMachineStatus  = "machine_status_v1"
 	EdgeCapabilityNginxFragments = "nginx_fragments_v1"
+	EdgeCapabilityNginxCapacity  = "nginx_capacity_v1"
 	EdgeCapabilityTCPMonitoring  = "tcp_monitoring_v1"
 )
 
@@ -106,13 +125,14 @@ type Site struct {
 	PrimaryOrigin Origin   `json:"primary_origin"`
 	BackupOrigin  *Origin  `json:"backup_origin,omitempty"`
 	// StreamPaths is retained as an empty compatibility field for older API clients.
-	StreamPaths             []string     `json:"stream_paths"`
-	Passthrough             bool         `json:"passthrough"`
-	ClientMaxBodySizeMB     int          `json:"client_max_body_size_mb"`
-	ReadWriteTimeoutSeconds int          `json:"read_write_timeout_seconds"`
-	DNSTTLSeconds           *int         `json:"dns_ttl_seconds"`
-	TCPOnly                 bool         `json:"tcp_only"`
-	TCPForwards             []TCPForward `json:"tcp_forwards"`
+	StreamPaths                   []string     `json:"stream_paths"`
+	Passthrough                   bool         `json:"passthrough"`
+	ClientMaxBodySizeMB           int          `json:"client_max_body_size_mb"`
+	ClientKeepaliveTimeoutSeconds int          `json:"client_keepalive_timeout_seconds"`
+	ReadWriteTimeoutSeconds       int          `json:"read_write_timeout_seconds"`
+	DNSTTLSeconds                 *int         `json:"dns_ttl_seconds"`
+	TCPOnly                       bool         `json:"tcp_only"`
+	TCPForwards                   []TCPForward `json:"tcp_forwards"`
 	// CacheMaxSizeGB is retained only for reading legacy database rows. Cache
 	// quotas are node-scoped and this value is no longer exposed or rendered.
 	CacheMaxSizeGB  *int      `json:"-"`
@@ -197,6 +217,8 @@ type DesiredState struct {
 	Version           int64                 `json:"version"`
 	NginxConfig       string                `json:"nginx_config"`
 	NginxStreamConfig string                `json:"nginx_stream_config,omitempty"`
+	NginxMainConfig   string                `json:"nginx_main_config,omitempty"`
+	NginxEventsConfig string                `json:"nginx_events_config,omitempty"`
 	NginxFragments    *NginxConfigFragments `json:"nginx_fragments,omitempty"`
 	PublicPorts       []int                 `json:"public_ports"`
 	CacheMaxBytes     int64                 `json:"cache_max_bytes,omitempty"`

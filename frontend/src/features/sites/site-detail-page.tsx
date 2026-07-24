@@ -84,6 +84,7 @@ interface SiteDraft {
   backup_sni: string;
   passthrough: boolean;
   client_max_body_size_mb: number;
+  client_keepalive_timeout_seconds: number;
   read_write_timeout_seconds: number;
   inherit_dns_ttl: boolean;
   dns_ttl_seconds: number;
@@ -559,7 +560,7 @@ function TrafficSettings({
               />
             ) : null}
             <Separator />
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 sm:grid-cols-3">
               <Field label="最大请求体（MiB）" id="body-size">
                 <Input
                   id="body-size"
@@ -572,6 +573,22 @@ function TrafficSettings({
                     setDraft({
                       ...draft,
                       client_max_body_size_mb: Number(event.target.value),
+                    })
+                  }
+                />
+              </Field>
+              <Field label="客户端保活（秒）" id="client-keepalive-timeout">
+                <Input
+                  id="client-keepalive-timeout"
+                  type="number"
+                  min={15}
+                  max={3600}
+                  required
+                  value={draft.client_keepalive_timeout_seconds}
+                  onChange={(event) =>
+                    setDraft({
+                      ...draft,
+                      client_keepalive_timeout_seconds: Number(event.target.value),
                     })
                   }
                 />
@@ -1500,7 +1517,8 @@ function emptyDraft(ttl: number): SiteDraft {
     backup_sni: "",
     passthrough: false,
     client_max_body_size_mb: 128,
-    read_write_timeout_seconds: 360,
+    client_keepalive_timeout_seconds: 120,
+    read_write_timeout_seconds: 120,
     inherit_dns_ttl: true,
     dns_ttl_seconds: ttl,
     tcp_only: false,
@@ -1535,7 +1553,9 @@ function draftFromSite(site: Site, ttl: number): SiteDraft {
     backup_sni: site.backup_origin?.tls_server_name || "",
     passthrough: site.passthrough,
     client_max_body_size_mb: site.client_max_body_size_mb ?? 128,
-    read_write_timeout_seconds: site.read_write_timeout_seconds ?? 360,
+    client_keepalive_timeout_seconds:
+      site.client_keepalive_timeout_seconds ?? 120,
+    read_write_timeout_seconds: site.read_write_timeout_seconds ?? 120,
     inherit_dns_ttl: site.dns_ttl_seconds == null,
     dns_ttl_seconds: site.dns_ttl_seconds ?? ttl,
     tcp_only: site.tcp_only,
@@ -1564,6 +1584,7 @@ function sitePayload(draft: SiteDraft) {
     },
     passthrough: draft.passthrough,
     client_max_body_size_mb: draft.client_max_body_size_mb,
+    client_keepalive_timeout_seconds: draft.client_keepalive_timeout_seconds,
     read_write_timeout_seconds: draft.read_write_timeout_seconds,
     dns_ttl_seconds: draft.inherit_dns_ttl ? null : draft.dns_ttl_seconds,
     tcp_only: draft.tcp_only,

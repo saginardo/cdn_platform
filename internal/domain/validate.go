@@ -19,6 +19,11 @@ func NormalizeAndValidateSite(site *Site) error {
 		return err
 	}
 	site.ClientMaxBodySizeMB = clientMaxBodySizeMB
+	clientKeepaliveTimeoutSeconds, err := NormalizeClientKeepaliveTimeoutSeconds(site.ClientKeepaliveTimeoutSeconds)
+	if err != nil {
+		return err
+	}
+	site.ClientKeepaliveTimeoutSeconds = clientKeepaliveTimeoutSeconds
 	readWriteTimeoutSeconds, err := NormalizeReadWriteTimeoutSeconds(site.ReadWriteTimeoutSeconds)
 	if err != nil {
 		return err
@@ -190,6 +195,23 @@ func ValidateClientMaxBodySizeMB(value int) error {
 	}
 }
 
+func NormalizeClientKeepaliveTimeoutSeconds(value int) (int, error) {
+	if value == 0 {
+		value = DefaultClientKeepaliveTimeoutSeconds
+	}
+	if err := ValidateClientKeepaliveTimeoutSeconds(value); err != nil {
+		return 0, err
+	}
+	return value, nil
+}
+
+func ValidateClientKeepaliveTimeoutSeconds(value int) error {
+	if value < 15 || value > 3600 {
+		return fmt.Errorf("client keepalive timeout must be between 15 and 3600 seconds")
+	}
+	return nil
+}
+
 func NormalizeReadWriteTimeoutSeconds(value int) (int, error) {
 	if value == 0 {
 		value = DefaultReadWriteTimeoutSeconds
@@ -202,11 +224,41 @@ func NormalizeReadWriteTimeoutSeconds(value int) (int, error) {
 
 func ValidateReadWriteTimeoutSeconds(value int) error {
 	switch value {
-	case 360, 900, 1800, 3600:
+	case 120, 360, 900, 1800, 3600:
 		return nil
 	default:
-		return fmt.Errorf("read/write timeout must be one of 360, 900, 1800, or 3600 seconds")
+		return fmt.Errorf("read/write timeout must be one of 120, 360, 900, 1800, or 3600 seconds")
 	}
+}
+
+func DefaultNginxCapacity() NginxCapacity {
+	return NginxCapacity{
+		WorkerProcesses:    DefaultNginxWorkerProcesses,
+		WorkerConnections:  DefaultNginxWorkerConnections,
+		WorkerRlimitNoFile: DefaultNginxWorkerRlimitNoFile,
+	}
+}
+
+func NormalizeNginxCapacity(value NginxCapacity) (NginxCapacity, error) {
+	if value.WorkerConnections == 0 {
+		value.WorkerConnections = DefaultNginxWorkerConnections
+	}
+	if value.WorkerRlimitNoFile == 0 {
+		value.WorkerRlimitNoFile = DefaultNginxWorkerRlimitNoFile
+	}
+	if value.WorkerProcesses < 0 || value.WorkerProcesses > MaxNginxWorkerProcesses {
+		return NginxCapacity{}, fmt.Errorf("Nginx worker processes must be auto or between 1 and %d", MaxNginxWorkerProcesses)
+	}
+	if value.WorkerConnections < MinNginxWorkerConnections || value.WorkerConnections > MaxNginxWorkerConnections {
+		return NginxCapacity{}, fmt.Errorf("Nginx worker connections must be between %d and %d", MinNginxWorkerConnections, MaxNginxWorkerConnections)
+	}
+	if value.WorkerRlimitNoFile < MinNginxWorkerRlimitNoFile || value.WorkerRlimitNoFile > MaxNginxWorkerRlimitNoFile {
+		return NginxCapacity{}, fmt.Errorf("Nginx worker file limit must be between %d and %d", MinNginxWorkerRlimitNoFile, MaxNginxWorkerRlimitNoFile)
+	}
+	if value.WorkerRlimitNoFile < value.WorkerConnections {
+		return NginxCapacity{}, fmt.Errorf("Nginx worker file limit must be at least the worker connection count")
+	}
+	return value, nil
 }
 
 func ValidateDNSTTLSeconds(value int) error {

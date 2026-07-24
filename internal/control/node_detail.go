@@ -167,7 +167,43 @@ func (s *Server) updateNodeCacheSettings(response http.ResponseWriter, request *
 		detail = fmt.Sprintf("cache_max_size_gb=%d", *node.CacheMaxSizeGB)
 	}
 	s.audit(request, adminID(request.Context()), "update_cache", "node", node.ID, detail)
+	if err := s.publishNodeConfiguration(node.ID); err != nil {
+		writeError(response, http.StatusConflict, fmt.Errorf("save cache quota but could not publish node configuration: %w", err))
+		return
+	}
 	writeJSON(response, http.StatusOK, settings)
+}
+
+func (s *Server) updateNodeNginxCapacity(response http.ResponseWriter, request *http.Request) {
+	var input domain.NginxCapacity
+	if !readJSON(response, request, &input) {
+		return
+	}
+	node, err := s.Store.SetNodeNginxCapacity(request.PathValue("id"), input)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeStoreError(response, err)
+		} else {
+			writeError(response, http.StatusBadRequest, err)
+		}
+		return
+	}
+	if err := s.publishNodeConfiguration(node.ID); err != nil {
+		writeError(response, http.StatusConflict, fmt.Errorf("save Nginx capacity but could not publish node configuration: %w", err))
+		return
+	}
+	s.audit(request, adminID(request.Context()), "update_nginx_capacity", "node", node.ID, fmt.Sprintf("worker_processes=%d worker_connections=%d worker_rlimit_nofile=%d", node.NginxCapacity.WorkerProcesses, node.NginxCapacity.WorkerConnections, node.NginxCapacity.WorkerRlimitNoFile))
+	writeJSON(response, http.StatusOK, node)
+}
+
+func (s *Server) publishNodeConfiguration(nodeID string) error {
+	if s.Publisher.Store == nil {
+		return nil
+	}
+	if s.Publisher.Cipher == nil {
+		return errors.New("node publisher is not configured")
+	}
+	return s.Publisher.PublishNode(nodeID)
 }
 
 func (s *Server) nodeMachineStatus(node domain.Node, at time.Time) nodeMachineStatusResponse {

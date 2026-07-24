@@ -168,6 +168,50 @@ func TestSiteClientMaxBodySizeAPI(t *testing.T) {
 	}
 }
 
+func TestSiteClientKeepaliveTimeoutAPI(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.CreateInitialAdmin("hash", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CreateSession("admin", "session-token", "csrf-token", time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("keepalive-edge", "203.0.113.11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database}
+	base := map[string]any{
+		"name": "keepalive", "zone_id": "zone", "domains": []string{"keepalive.example.test"}, "node_ids": []string{node.ID},
+		"primary_origin": map[string]any{"url": "https://origin.example.test", "enabled": true}, "enabled": true,
+	}
+	created := requestSite(t, server, http.MethodPost, "/api/sites", base)
+	if created.ClientKeepaliveTimeoutSeconds != domain.DefaultClientKeepaliveTimeoutSeconds {
+		t.Fatalf("default client keepalive = %d", created.ClientKeepaliveTimeoutSeconds)
+	}
+	base["client_keepalive_timeout_seconds"] = 240
+	updated := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+	if updated.ClientKeepaliveTimeoutSeconds != 240 {
+		t.Fatalf("configured client keepalive = %d", updated.ClientKeepaliveTimeoutSeconds)
+	}
+	delete(base, "client_keepalive_timeout_seconds")
+	preserved := requestSite(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+	if preserved.ClientKeepaliveTimeoutSeconds != 240 {
+		t.Fatalf("omitted update did not preserve client keepalive = %d", preserved.ClientKeepaliveTimeoutSeconds)
+	}
+	for _, value := range []int{14, 3601} {
+		base["client_keepalive_timeout_seconds"] = value
+		response := requestSiteResponse(t, server, http.MethodPut, "/api/sites/"+created.ID, base)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("client keepalive %d = %d %s", value, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestSiteDNSTTLAPIHandlesOverrideInheritanceAndOmission(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

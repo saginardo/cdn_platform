@@ -31,6 +31,7 @@ export interface Node {
   name: string;
   public_ipv4: string;
   cache_max_size_gb?: number;
+  nginx_capacity: NginxCapacity;
   status: NodeStatus;
   monitor_auto_paused: boolean;
   capabilities: string[];
@@ -47,6 +48,12 @@ export interface Node {
   can_upgrade: boolean;
   upgrade_blocker?: string;
   upgrade_task?: NodeUpgradeTask;
+}
+
+export interface NginxCapacity {
+  worker_processes: number;
+  worker_connections: number;
+  worker_rlimit_nofile: number;
 }
 
 export interface MonitoringTarget {
@@ -229,6 +236,7 @@ export interface Site {
   stream_paths: string[];
   passthrough: boolean;
   client_max_body_size_mb: number;
+  client_keepalive_timeout_seconds: number;
   read_write_timeout_seconds: number;
   dns_ttl_seconds: number | null;
   tcp_only: boolean;

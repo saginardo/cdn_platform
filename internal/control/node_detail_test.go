@@ -95,6 +95,55 @@ func TestNodeCacheSettingsOverrideGlobalDefault(t *testing.T) {
 	}
 }
 
+func TestNodeNginxCapacitySettingsPublishImmediately(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	node, err := database.CreateNode("capacity-settings-edge", "203.0.113.64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: database, Publisher: Publisher{Store: database, Cipher: cipher}}
+	request := httptest.NewRequest(http.MethodPut, "/api/nodes/"+node.ID+"/nginx-capacity", strings.NewReader(`{"worker_processes":4,"worker_connections":8192,"worker_rlimit_nofile":16384}`))
+	request.SetPathValue("id", node.ID)
+	response := httptest.NewRecorder()
+	server.updateNodeNginxCapacity(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("capacity response = %d %s", response.Code, response.Body.String())
+	}
+	var updated domain.Node
+	if err := json.Unmarshal(response.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.NginxCapacity.WorkerProcesses != 4 || updated.NginxCapacity.WorkerConnections != 8192 || updated.NginxCapacity.WorkerRlimitNoFile != 16384 {
+		t.Fatalf("updated capacity = %#v", updated.NginxCapacity)
+	}
+	state, _, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(state.NginxMainConfig, "worker_processes 4;") || !strings.Contains(state.NginxEventsConfig, "worker_connections 8192;") {
+		t.Fatalf("capacity was not published: %#v", state)
+	}
+	invalid := httptest.NewRequest(http.MethodPut, "/api/nodes/"+node.ID+"/nginx-capacity", strings.NewReader(`{"worker_processes":4,"worker_connections":8192,"worker_rlimit_nofile":4096}`))
+	invalid.SetPathValue("id", node.ID)
+	invalidResponse := httptest.NewRecorder()
+	server.updateNodeNginxCapacity(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("invalid capacity response = %d %s", invalidResponse.Code, invalidResponse.Body.String())
+	}
+}
+
 func (s nodeCacheLogStore) NodeCache(context.Context, string, time.Time, time.Time) ([]logstore.NodeCacheBucket, error) {
 	return s.buckets, s.err
 }

@@ -38,6 +38,8 @@ func TestApplyRollsBackConfigAndCertificatesOnFailedValidation(t *testing.T) {
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "nginx.conf")
 	streamConfigPath := filepath.Join(directory, "nginx-stream.conf")
+	mainConfigPath := filepath.Join(directory, "nginx-main.conf")
+	eventsConfigPath := filepath.Join(directory, "nginx-events.conf")
 	certificateDir := filepath.Join(directory, "certs")
 	if err := os.MkdirAll(certificateDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -48,26 +50,66 @@ func TestApplyRollsBackConfigAndCertificatesOnFailedValidation(t *testing.T) {
 	if err := os.WriteFile(streamConfigPath, []byte("old-stream-config"), 0o640); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(mainConfigPath, []byte("old-main-config"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(eventsConfigPath, []byte("old-events-config"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(certificateDir, "site.crt"), []byte("old-cert"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	runner := &fakeRunner{testErr: errors.New("invalid config")}
-	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: configPath, NginxStreamConfigPath: streamConfigPath, CertificateDir: certificateDir, Runner: runner})
+	agent, err := New(Config{ControlURL: "https://control.example.test", StateDir: directory, NginxConfigPath: configPath, NginxStreamConfigPath: streamConfigPath, NginxMainConfigPath: mainConfigPath, NginxEventsConfigPath: eventsConfigPath, CertificateDir: certificateDir, Runner: runner})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = agent.apply(domain.DesiredState{Version: 1, NginxConfig: "bad-config", NginxStreamConfig: "bad-stream-config", Certificates: map[string]domain.TLSBundle{"site": {CertificatePEM: "new-cert", PrivateKeyPEM: "new-key"}}})
+	err = agent.apply(domain.DesiredState{Version: 1, NginxConfig: "bad-config", NginxStreamConfig: "bad-stream-config", NginxMainConfig: "bad-main-config", NginxEventsConfig: "bad-events-config", Certificates: map[string]domain.TLSBundle{"site": {CertificatePEM: "new-cert", PrivateKeyPEM: "new-key"}}})
 	if err == nil {
 		t.Fatal("expected Nginx validation error")
 	}
 	config, _ := os.ReadFile(configPath)
 	streamConfig, _ := os.ReadFile(streamConfigPath)
+	mainConfig, _ := os.ReadFile(mainConfigPath)
+	eventsConfig, _ := os.ReadFile(eventsConfigPath)
 	certificate, _ := os.ReadFile(filepath.Join(certificateDir, "site.crt"))
-	if string(config) != "old-config" || string(streamConfig) != "old-stream-config" || string(certificate) != "old-cert" {
-		t.Fatalf("state was not restored: config=%q stream=%q certificate=%q", config, streamConfig, certificate)
+	if string(config) != "old-config" || string(streamConfig) != "old-stream-config" || string(mainConfig) != "old-main-config" || string(eventsConfig) != "old-events-config" || string(certificate) != "old-cert" {
+		t.Fatalf("state was not restored: config=%q stream=%q main=%q events=%q certificate=%q", config, streamConfig, mainConfig, eventsConfig, certificate)
 	}
 	if runner.applies != 0 {
 		t.Fatalf("apply should not run after failed validation")
+	}
+}
+
+func TestApplyWritesNginxCapacityConfigs(t *testing.T) {
+	directory := t.TempDir()
+	mainConfigPath := filepath.Join(directory, "nginx-main.conf")
+	eventsConfigPath := filepath.Join(directory, "nginx-events.conf")
+	agent, err := New(Config{
+		ControlURL: "https://control.example.test", StateDir: directory,
+		NginxConfigPath:       filepath.Join(directory, "nginx.conf"),
+		NginxStreamConfigPath: filepath.Join(directory, "nginx-stream.conf"),
+		NginxMainConfigPath:   mainConfigPath, NginxEventsConfigPath: eventsConfigPath,
+		CertificateDir: filepath.Join(directory, "certs"), Runner: &fakeRunner{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := domain.DesiredState{
+		Version: 2, NginxConfig: "HTTP config", NginxStreamConfig: "stream config", PublicPorts: []int{},
+		NginxMainConfig:   "worker_processes 4;\nworker_rlimit_nofile 16384;\n",
+		NginxEventsConfig: "worker_connections 8192;\n",
+	}
+	if err := agent.apply(state); err != nil {
+		t.Fatal(err)
+	}
+	mainConfig, err := os.ReadFile(mainConfigPath)
+	if err != nil || string(mainConfig) != state.NginxMainConfig {
+		t.Fatalf("main config = %q, %v", mainConfig, err)
+	}
+	eventsConfig, err := os.ReadFile(eventsConfigPath)
+	if err != nil || string(eventsConfig) != state.NginxEventsConfig {
+		t.Fatalf("events config = %q, %v", eventsConfig, err)
 	}
 }
 

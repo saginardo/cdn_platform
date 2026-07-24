@@ -94,6 +94,16 @@ func (s *Server) updateCacheSettings(response http.ResponseWriter, request *http
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
+	if s.Publisher.Store != nil {
+		if s.Publisher.Cipher == nil {
+			writeError(response, http.StatusConflict, errors.New("node publisher is not configured"))
+			return
+		}
+		if err := s.Publisher.PublishAll(); err != nil {
+			writeError(response, http.StatusConflict, fmt.Errorf("save cache default but could not publish node configurations: %w", err))
+			return
+		}
+	}
 	s.audit(request, adminID(request.Context()), "update_cache", "settings", "cache", fmt.Sprintf("default_size_gb=%d", input.DefaultSizeGB))
 	writeJSON(response, http.StatusOK, s.Settings.View().Cache)
 }

@@ -91,6 +91,85 @@ read_environment_value() {
   return 1
 }
 
+configure_nginx_capacity_includes() {
+  local source="$1" temporary
+  if [[ ! -f "$source" ]]; then
+    echo "Nginx main configuration is missing: $source" >&2
+    return 1
+  fi
+  temporary=$(mktemp "${source}.cdn-platform.XXXXXX")
+  if ! awk \
+    -v main_include='/opt/cdn-edge/config/nginx/cdn-platform-main.conf' \
+    -v events_include='/opt/cdn-edge/config/nginx/cdn-platform-events.conf' '
+      function restore_managed(line) {
+        sub(/# simple_cdn nginx capacity managed (worker_processes|worker_rlimit_nofile|worker_connections): /, "", line)
+        return line
+      }
+      {
+        line = $0
+        if (line ~ /^[ \t]*# simple_cdn nginx capacity main include begin[ \t]*$/) { skip_main = 1; next }
+        if (skip_main) {
+          if (line ~ /^[ \t]*# simple_cdn nginx capacity main include end[ \t]*$/) { skip_main = 0 }
+          next
+        }
+        if (line ~ /^[ \t]*# simple_cdn nginx capacity events include begin[ \t]*$/) { skip_events = 1; next }
+        if (skip_events) {
+          if (line ~ /^[ \t]*# simple_cdn nginx capacity events include end[ \t]*$/) { skip_events = 0 }
+          next
+        }
+        line = restore_managed(line)
+        if (!events_found && line ~ /^[ \t]*worker_processes[ \t]+/) {
+          match(line, /^[ \t]*/)
+          indent = substr(line, 1, RLENGTH)
+          body = substr(line, RLENGTH + 1)
+          print indent "# simple_cdn nginx capacity managed worker_processes: " body
+          next
+        }
+        if (!events_found && line ~ /^[ \t]*worker_rlimit_nofile[ \t]+/) {
+          match(line, /^[ \t]*/)
+          indent = substr(line, 1, RLENGTH)
+          body = substr(line, RLENGTH + 1)
+          print indent "# simple_cdn nginx capacity managed worker_rlimit_nofile: " body
+          next
+        }
+        if (!events_found && line ~ /^[ \t]*events[ \t]*\{/) {
+          print "# simple_cdn nginx capacity main include begin"
+          print "include " main_include ";"
+          print "# simple_cdn nginx capacity main include end"
+          print line
+          print "    # simple_cdn nginx capacity events include begin"
+          print "    include " events_include ";"
+          print "    # simple_cdn nginx capacity events include end"
+          events_found = 1
+          events_depth = 1
+          next
+        }
+        if (events_found && events_depth > 0 && line ~ /^[ \t]*worker_connections[ \t]+/) {
+          match(line, /^[ \t]*/)
+          indent = substr(line, 1, RLENGTH)
+          body = substr(line, RLENGTH + 1)
+          print indent "# simple_cdn nginx capacity managed worker_connections: " body
+          next
+        }
+        print line
+        if (events_found && events_depth > 0) {
+          opens = gsub(/\{/, "{", line)
+          closes = gsub(/\}/, "}", line)
+          events_depth += opens - closes
+        }
+      }
+      END {
+        if (skip_main || skip_events || !events_found) exit 1
+      }
+    ' "$source" >"$temporary"; then
+    rm -f "$temporary"
+    echo "could not add simple_cdn Nginx capacity includes to $source" >&2
+    return 1
+  fi
+  chmod --reference="$source" "$temporary" 2>/dev/null || chmod 0644 "$temporary"
+  mv "$temporary" "$source"
+}
+
 edge_root=$(root_path /opt/cdn-edge)
 marker="$edge_root/.layout-version"
 agent_unit=$(root_path /etc/systemd/system/cdn-edge-agent.service)
@@ -98,10 +177,14 @@ updater_unit=$(root_path /etc/systemd/system/cdn-edge-updater@.service)
 nginx_entry=$(root_path /etc/nginx/conf.d/cdn-platform.conf)
 nginx_stream_entry=$(root_path /etc/nginx/modules-enabled/99-cdn-platform-stream.conf)
 nginx_default=$(root_path /etc/nginx/sites-enabled/default)
+nginx_root_config=$(root_path /etc/nginx/nginx.conf)
 new_unit="$edge_root/systemd/cdn-edge-agent.service"
 new_updater_unit="$edge_root/systemd/cdn-edge-updater@.service"
 new_nginx_config="$edge_root/config/nginx/cdn-platform.conf"
 new_nginx_stream_config="$edge_root/config/nginx/cdn-platform-stream.conf"
+new_nginx_main_config="$edge_root/config/nginx/cdn-platform-main.conf"
+new_nginx_events_config="$edge_root/config/nginx/cdn-platform-events.conf"
+logrotate_config=$(root_path /etc/logrotate.d/cdn-edge-platform)
 old_binary=$(root_path /usr/local/bin/cdn-edge-agent)
 old_config_dir=$(root_path /etc/cdn-platform)
 old_state_dir=$(root_path /var/lib/cdn-platform)
@@ -155,7 +238,7 @@ if systemctl is-active --quiet nginx.service 2>/dev/null; then old_nginx_active=
 if [[ -z "$ROOT_PREFIX" ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends nginx libnginx-mod-stream libnginx-mod-http-lua ca-certificates curl iproute2 nftables
+  apt-get install -y --no-install-recommends nginx libnginx-mod-stream libnginx-mod-http-lua ca-certificates curl iproute2 nftables logrotate lz4
 fi
 
 transaction_dir=$(mktemp -d "$(root_path /tmp/cdn-edge-install.XXXXXX)")
@@ -196,19 +279,23 @@ old_agent_active=0
 old_agent_enabled=0
 if systemctl is-active --quiet cdn-edge-agent.service 2>/dev/null; then old_agent_active=1; fi
 if systemctl is-enabled --quiet cdn-edge-agent.service 2>/dev/null; then old_agent_enabled=1; fi
-for item in unit updater-unit nginx stream-entry stream-config default-site; do
+for item in unit updater-unit nginx stream-entry stream-config main-config events-config nginx-root logrotate default-site; do
   case "$item" in
     unit) source="$agent_unit" ;;
     updater-unit) source="$updater_unit" ;;
     nginx) source="$nginx_entry" ;;
     stream-entry) source="$nginx_stream_entry" ;;
     stream-config) source="$new_nginx_stream_config" ;;
+    main-config) source="$new_nginx_main_config" ;;
+    events-config) source="$new_nginx_events_config" ;;
+    nginx-root) source="$nginx_root_config" ;;
+    logrotate) source="$logrotate_config" ;;
     default-site) source="$nginx_default" ;;
   esac
   if path_exists "$source"; then cp -a "$source" "$transaction_dir/$item.backup"; fi
 done
 if ((new_layout == 1)); then
-  for item in bin/cdn-edge-agent config/edge.env systemd/cdn-edge-agent.service systemd/cdn-edge-updater@.service; do
+  for item in bin/cdn-edge-agent config/edge.env config/nginx/cdn-platform-main.conf config/nginx/cdn-platform-events.conf systemd/cdn-edge-agent.service systemd/cdn-edge-updater@.service; do
     if path_exists "$edge_root/$item"; then
       mkdir -p "$transaction_dir/new-layout/$(dirname "$item")"
       cp -a "$edge_root/$item" "$transaction_dir/new-layout/$item"
@@ -234,6 +321,23 @@ rollback() {
     else
       rm -f "$new_nginx_stream_config"
     fi
+    if path_exists "$transaction_dir/main-config.backup"; then
+      cp -a "$transaction_dir/main-config.backup" "$new_nginx_main_config"
+    else
+      rm -f "$new_nginx_main_config"
+    fi
+    if path_exists "$transaction_dir/events-config.backup"; then
+      cp -a "$transaction_dir/events-config.backup" "$new_nginx_events_config"
+    else
+      rm -f "$new_nginx_events_config"
+    fi
+    if path_exists "$transaction_dir/nginx-root.backup"; then cp -a "$transaction_dir/nginx-root.backup" "$nginx_root_config"; fi
+    if path_exists "$transaction_dir/logrotate.backup"; then
+      mkdir -p "$(dirname "$logrotate_config")"
+      cp -a "$transaction_dir/logrotate.backup" "$logrotate_config"
+    else
+      rm -f "$logrotate_config"
+    fi
     if path_exists "$transaction_dir/default-site.backup"; then cp -a "$transaction_dir/default-site.backup" "$nginx_default"; fi
     if ((log_moved == 1)) && path_exists "$edge_root/logs/access.json"; then
       mkdir -p "$old_log_dir"
@@ -242,7 +346,7 @@ rollback() {
     if ((new_layout == 0)); then
       rm -rf "$edge_root"
     else
-      for item in bin/cdn-edge-agent config/edge.env systemd/cdn-edge-agent.service systemd/cdn-edge-updater@.service; do
+      for item in bin/cdn-edge-agent config/edge.env config/nginx/cdn-platform-main.conf config/nginx/cdn-platform-events.conf systemd/cdn-edge-agent.service systemd/cdn-edge-updater@.service; do
         rm -f "$edge_root/$item"
         if path_exists "$transaction_dir/new-layout/$item"; then
           mkdir -p "$edge_root/$(dirname "$item")"
@@ -303,10 +407,12 @@ EDGE_POLL_SECONDS=${poll_seconds}
 EDGE_STATE_DIR=/opt/cdn-edge/data
 NGINX_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform.conf
 NGINX_STREAM_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-stream.conf
+NGINX_MAIN_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-main.conf
+NGINX_EVENTS_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-events.conf
 EDGE_CERT_DIR=/opt/cdn-edge/config/certs
 EDGE_ACCESS_LOG=/opt/cdn-edge/logs/access.json
 EDGE_SECURITY_LOG=/opt/cdn-edge/logs/security.json
-EDGE_CAPABILITIES=tcp_stream_v1,edge_rate_limit_v1
+EDGE_CAPABILITIES=tcp_stream_v1,edge_rate_limit_v1,nginx_capacity_v1
 EOF
 chmod 0600 "$edge_root/config/edge.env"
 
@@ -337,6 +443,23 @@ EOF
   chmod 0640 "$new_nginx_stream_config"
 fi
 
+if ! path_exists "$new_nginx_main_config"; then
+  cat >"$new_nginx_main_config" <<'EOF'
+# Generated by cdn-edge-agent. Do not edit.
+worker_processes auto;
+worker_rlimit_nofile 65536;
+EOF
+  chmod 0640 "$new_nginx_main_config"
+fi
+
+if ! path_exists "$new_nginx_events_config"; then
+  cat >"$new_nginx_events_config" <<'EOF'
+# Generated by cdn-edge-agent. Do not edit.
+worker_connections 4096;
+EOF
+  chmod 0640 "$new_nginx_events_config"
+fi
+
 cat >"$nginx_stream_entry" <<'EOF'
 # Managed by simple_cdn. Do not edit.
 stream {
@@ -344,6 +467,25 @@ stream {
 }
 EOF
 chmod 0644 "$nginx_stream_entry"
+
+configure_nginx_capacity_includes "$nginx_root_config"
+
+mkdir -p "$(dirname "$logrotate_config")"
+cat >"$logrotate_config" <<'EOF'
+/opt/cdn-edge/logs/access.json /opt/cdn-edge/logs/security.json {
+    size 32M
+    rotate 16
+    missingok
+    notifempty
+    compress
+    compresscmd /usr/bin/lz4
+    uncompresscmd /usr/bin/unlz4
+    compressoptions -q
+    compressext .lz4
+    copytruncate
+}
+EOF
+chmod 0644 "$logrotate_config"
 
 if ((legacy_layout == 1)) && [[ -f "$old_log_dir/access.json" ]]; then
   if [[ "$(stat -c %d "$old_log_dir/access.json")" != "$(stat -c %d "$edge_root/logs")" ]]; then

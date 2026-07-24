@@ -64,16 +64,16 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 - Agent 默认每 30 秒拉取一次状态；配置或证书写入采用原子替换，先执行 `nginx -t`，仅在成功时 reload，失败会恢复上一个已知可用版本。
 - Agent 上报自身 SHA-256 和 `online_upgrade_v1` 能力；主控可对单节点下发当前制品，独立 updater 在替换主进程后等待新 Agent 完成 mTLS 心跳，失败恢复旧二进制和 systemd/Nginx 集成。
 - 安全工作台管理全局请求路径策略、活动 IP 封禁和最近命中；Nginx 在回源前按正则返回 444，Agent 使用自有 nftables 表即时封禁 80/443，并通过 mTLS 在节点间同步和自动过期。
-- Nginx 为 HTTP 与 stream 分别生成共享 `00-base.conf` 和每站点 `site-<id>.conf`；Agent 使用版本与内容摘要目录同时暂存两个配置族，再原子切换稳定索引。每个站点仍拥有独立 `server` 和 `upstream`：80 强制跳转 HTTPS，443 使用 TLS 1.2/1.3，并通过独立的 `http2 on` 指令启用 HTTP/2。
-- CDN 业务 HTTPS server 显式使用 `keepalive_timeout 300s` 和 `keepalive_requests 1000`；每个 upstream、每个 worker 的空闲回源连接池为 `keepalive 30`，HTTP/gRPC 回源连接超时统一为 10 秒。普通 HTTP 代理显式清空 `Upgrade`/`Connection`，确保 HTTP/1.1 上游连接可以复用；WebSocket、SSE 和 POST 由请求特征自动进入独立无缓存分支。
+- Nginx 为 HTTP 与 stream 分别生成共享 `00-base.conf` 和每站点 `site-<id>.conf`；Agent 使用版本与内容摘要目录同时暂存两个配置族，再原子切换稳定索引。每个站点仍拥有独立 `server` 和 `upstream`：80 强制跳转 HTTPS，443 使用 TLS 1.2/1.3，并通过独立的 `http2 on` 指令启用 HTTP/2。节点级 `worker_processes`、`worker_connections` 和 `worker_rlimit_nofile` 分别由主配置与 `events` include 管理。
+- CDN 业务 HTTP/HTTPS server 默认显式使用 `keepalive_timeout 120s` 和 `keepalive_requests 1000`，并可按站点覆盖客户端保活秒数；每个 upstream、每个 worker 的空闲回源连接池为 `keepalive 30`，HTTP/gRPC 回源连接超时统一为 10 秒。普通 HTTP 代理显式清空 `Upgrade`/`Connection`，确保 HTTP/1.1 上游连接可以复用；WebSocket、SSE 和 POST 由请求特征自动进入独立无缓存分支。
 
 ### 3.3 请求处理策略
 
 - 普通 HTTP(S)：只缓存 GET/HEAD；缓存键包含 `site_id` 和 `cache_generation`。授权请求、非静态资源的 Cookie 请求和源站 `Set-Cookie` 响应不缓存；CSS、JavaScript、字体、图片等常见静态扩展在无 Authorization 时清空回源 Cookie，并允许不同浏览器会话共享缓存。
-- 磁盘缓存：所有站点共享节点缓存区，全局默认总上限为 1 GiB/节点，可在节点详情页单独覆写；7 天非活跃回收，并启用 cache lock、revalidate、后台刷新和上游错误时 stale 回退。
+- 磁盘缓存：所有站点共享节点缓存区，全局默认总上限为 1 GiB/节点，可在节点详情页单独覆写；`keys_zone` 大小按有效节点缓存上限和启用缓存的站点数计算，并限制在 16-512 MiB；7 天非活跃回收，并启用 cache lock、revalidate、后台刷新和上游错误时 stale 回退。
 - 整站透传：HTTP(S) 站点可选启用，关闭 Nginx 缓存、请求缓冲和响应缓冲，使用站点配置的读写空闲超时，并显式转发 `Range` / `If-Range`，适用于视频及其他按字节范围读取的流量。操作语义、已验证故障根因和验收命令见 [PASSTHROUGH_MODE.md](PASSTHROUGH_MODE.md)。
 - 请求体上限：业务站点默认 `128 MiB`，可按站点选择 `128 / 256 / 512 / 1024 MiB` 四个档位；修改后需重新发布才能进入边缘 Nginx 配置。
-- 回源读写空闲超时：HTTP/HTTPS/WS/WSS 默认 360 秒，可按站点选择 `360 / 900 / 1800 / 3600` 秒；按 [Nginx `proxy_read_timeout` / `proxy_send_timeout` 语义](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout)，它约束连续两次回源读写之间的空闲间隔，不限制持续有数据的连接总时长。主源、备用源、普通和流式分支使用同一值。
+- 回源读写空闲超时：HTTP/HTTPS/WS/WSS 默认 120 秒，可按站点选择 `120 / 360 / 900 / 1800 / 3600` 秒；已有站点的自定义值保持不变。按 [Nginx `proxy_read_timeout` / `proxy_send_timeout` 语义](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_read_timeout)，它约束连续两次回源读写之间的空闲间隔，不限制持续有数据的连接总时长。主源、备用源、普通和流式分支使用同一值。
 - WebSocket/SSE：无需配置路径。`Upgrade: websocket`、包含 `text/event-stream` 的 `Accept`、`X-CDN-Stream: 1` 以及所有 POST 请求会自动关闭缓存和响应缓冲；控制头不会转发到源站。POST 自动直通兼容在 JSON 请求体中使用 `stream: true`、但不发送 SSE Accept 头的 [OpenAI 流式接口](https://developers.openai.com/api/docs/guides/streaming-responses)。
 - 流式路径兼容：API 暂时保留 `stream_paths` 字段；旧客户端提交的值会被忽略，响应固定为空数组，SQLite 中的历史路径值会在打开数据库时清空，Nginx 不再生成路径专用 location。
 - gRPC：`grpc://`/`grpcs://` 源站使用 Nginx `grpc_pass`，客户端经 HTTP/2 接入，默认不缓存，支持 1 小时 gRPC 读写超时和可选备用源站。
@@ -178,9 +178,9 @@ edge-a 上的 cdn-edge-agent ── HTTPS ${CONTROL_MTLS_PORT} ──> cdn-contr
 
 ### P2：连接与容量调优
 
-- 参考边缘节点使用发行版 Nginx 全局默认的 `worker_connections 768`、`worker_processes auto`、`sendfile on`、`tcp_nopush on`。对少量连接足够，但 WebSocket/SSE 连接数增长后应按 VPS 的文件描述符、内存和源站能力调整 `worker_connections`、`worker_rlimit_nofile`、系统 `nofile` 和监控阈值。
+- 节点默认使用 `worker_processes auto`、`worker_connections 4096` 和 `worker_rlimit_nofile 65536`；Node 详情可按 VPS 的文件描述符、内存和源站能力调整三项值。`sendfile on`、`tcp_nopush on` 等发行版 HTTP 参数仍由 Debian Nginx 主配置管理。
 - 已启用 HTTP/2，但尚未在生成配置中启用 HTTP/3/QUIC；是否增加取决于客户端覆盖、UDP 443 防火墙和运维复杂度。
-- 可配置的 6-60 分钟空闲超时不能代替应用层保活。WebSocket 应发送 ping/pong，SSE 应定期发送注释或事件心跳；持续有数据的连接总时长不受该档位限制。
+- 可配置的客户端保活和 2-60 分钟回源读写空闲超时不能代替应用层保活。WebSocket 应发送 ping/pong，SSE 应定期发送注释或事件心跳；持续有数据的连接总时长不受该档位限制。
 
 ### P3：产品与安全边界
 

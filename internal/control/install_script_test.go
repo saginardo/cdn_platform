@@ -34,6 +34,9 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 		"opt/cdn-edge/bin/cdn-edge-agent",
 		"opt/cdn-edge/config/edge.env",
 		"opt/cdn-edge/config/nginx/cdn-platform-stream.conf",
+		"opt/cdn-edge/config/nginx/cdn-platform-main.conf",
+		"opt/cdn-edge/config/nginx/cdn-platform-events.conf",
+		"etc/logrotate.d/cdn-edge-platform",
 		"opt/cdn-edge/data/edge-client.key",
 		"opt/cdn-edge/data/edge-client.crt",
 		"opt/cdn-edge/data/edge-ca.crt",
@@ -45,6 +48,18 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 	harness.requireAbsent(t, "etc/nginx/sites-enabled/default")
 	harness.requireLink(t, "etc/nginx/conf.d/cdn-platform.conf", "opt/cdn-edge/config/nginx/cdn-platform.conf")
 	harness.requirePath(t, "etc/nginx/modules-enabled/99-cdn-platform-stream.conf")
+	nginxRoot := harness.read(t, "etc/nginx/nginx.conf")
+	for _, expected := range []string{"include /opt/cdn-edge/config/nginx/cdn-platform-main.conf;", "include /opt/cdn-edge/config/nginx/cdn-platform-events.conf;"} {
+		if !strings.Contains(nginxRoot, expected) {
+			t.Fatalf("nginx.conf does not include managed capacity config %q:\n%s", expected, nginxRoot)
+		}
+	}
+	logrotate := harness.read(t, "etc/logrotate.d/cdn-edge-platform")
+	for _, expected := range []string{"size 32M", "rotate 16", "compresscmd /usr/bin/lz4", "compressext .lz4", "copytruncate"} {
+		if !strings.Contains(logrotate, expected) {
+			t.Fatalf("logrotate policy does not contain %q:\n%s", expected, logrotate)
+		}
+	}
 	harness.requireLink(t, "etc/systemd/system/cdn-edge-agent.service", "opt/cdn-edge/systemd/cdn-edge-agent.service")
 	harness.requireLink(t, "etc/systemd/system/cdn-edge-updater@.service", "opt/cdn-edge/systemd/cdn-edge-updater@.service")
 	harness.requireContents(t, "opt/cdn-edge/bin/cdn-edge-agent", "edge-binary-v1")
@@ -58,10 +73,12 @@ func TestInstallEdgeScriptCreatesOptLayout(t *testing.T) {
 		"EDGE_STATE_DIR=/opt/cdn-edge/data",
 		"NGINX_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform.conf",
 		"NGINX_STREAM_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-stream.conf",
+		"NGINX_MAIN_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-main.conf",
+		"NGINX_EVENTS_CONFIG_PATH=/opt/cdn-edge/config/nginx/cdn-platform-events.conf",
 		"EDGE_CERT_DIR=/opt/cdn-edge/config/certs",
 		"EDGE_ACCESS_LOG=/opt/cdn-edge/logs/access.json",
 		"EDGE_SECURITY_LOG=/opt/cdn-edge/logs/security.json",
-		"EDGE_CAPABILITIES=tcp_stream_v1,edge_rate_limit_v1",
+		"EDGE_CAPABILITIES=tcp_stream_v1,edge_rate_limit_v1,nginx_capacity_v1",
 	} {
 		if !strings.Contains(environment, expected) {
 			t.Fatalf("edge.env does not contain %q:\n%s", expected, environment)
@@ -269,11 +286,12 @@ func newInstallHarness(t *testing.T) *installHarness {
 		servicePath:        filepath.Join(root, "download-service"),
 		updaterServicePath: filepath.Join(root, "download-updater-service"),
 	}
-	for _, directory := range []string{"tmp", "run", "mock-bin", "etc/nginx/conf.d", "etc/nginx/sites-enabled", "etc/systemd/system"} {
+	for _, directory := range []string{"tmp", "run", "mock-bin", "etc/nginx/conf.d", "etc/nginx/sites-enabled", "etc/logrotate.d", "etc/systemd/system"} {
 		if err := os.MkdirAll(filepath.Join(root, directory), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
+	harness.write("etc/nginx/nginx.conf", "worker_processes auto;\nevents {\n    worker_connections 768;\n}\nhttp {\n    include /etc/nginx/conf.d/*.conf;\n}\n")
 	if err := os.WriteFile(harness.servicePath, []byte(bootstrapEdgeService), 0o644); err != nil {
 		t.Fatal(err)
 	}

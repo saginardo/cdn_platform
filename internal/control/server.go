@@ -135,6 +135,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/nodes/{id}", s.requireAdmin(s.nodeDetail))
 	mux.HandleFunc("GET /api/nodes/{id}/cache-status", s.requireAdmin(s.nodeCacheStatus))
 	mux.HandleFunc("PUT /api/nodes/{id}/cache", s.requireAdmin(s.updateNodeCacheSettings))
+	mux.HandleFunc("PUT /api/nodes/{id}/nginx-capacity", s.requireAdmin(s.updateNodeNginxCapacity))
 	mux.HandleFunc("POST /api/nodes/{id}/enrollment-token", s.requireAdmin(s.createEnrollmentToken))
 	mux.HandleFunc("POST /api/nodes/{id}/status", s.requireAdmin(s.setNodeStatus))
 	mux.HandleFunc("GET /api/nodes/{id}/upgrade", s.requireAdmin(s.nodeUpgradeStatus))
@@ -603,20 +604,21 @@ func (input originRequest) origin(current *domain.Origin) domain.Origin {
 }
 
 type siteRequest struct {
-	Name                    string               `json:"name"`
-	ZoneID                  string               `json:"zone_id"`
-	Domains                 []string             `json:"domains"`
-	NodeIDs                 []string             `json:"node_ids"`
-	PrimaryOrigin           originRequest        `json:"primary_origin"`
-	BackupOrigin            *originRequest       `json:"backup_origin"`
-	StreamPaths             *[]string            `json:"stream_paths"`
-	Passthrough             *bool                `json:"passthrough"`
-	ClientMaxBodySizeMB     *int                 `json:"client_max_body_size_mb"`
-	ReadWriteTimeoutSeconds *int                 `json:"read_write_timeout_seconds"`
-	DNSTTLSeconds           optionalNullableInt  `json:"dns_ttl_seconds"`
-	TCPOnly                 *bool                `json:"tcp_only"`
-	TCPForwards             *[]domain.TCPForward `json:"tcp_forwards"`
-	Enabled                 *bool                `json:"enabled"`
+	Name                          string               `json:"name"`
+	ZoneID                        string               `json:"zone_id"`
+	Domains                       []string             `json:"domains"`
+	NodeIDs                       []string             `json:"node_ids"`
+	PrimaryOrigin                 originRequest        `json:"primary_origin"`
+	BackupOrigin                  *originRequest       `json:"backup_origin"`
+	StreamPaths                   *[]string            `json:"stream_paths"`
+	Passthrough                   *bool                `json:"passthrough"`
+	ClientMaxBodySizeMB           *int                 `json:"client_max_body_size_mb"`
+	ClientKeepaliveTimeoutSeconds *int                 `json:"client_keepalive_timeout_seconds"`
+	ReadWriteTimeoutSeconds       *int                 `json:"read_write_timeout_seconds"`
+	DNSTTLSeconds                 optionalNullableInt  `json:"dns_ttl_seconds"`
+	TCPOnly                       *bool                `json:"tcp_only"`
+	TCPForwards                   *[]domain.TCPForward `json:"tcp_forwards"`
+	Enabled                       *bool                `json:"enabled"`
 }
 
 func (input siteRequest) site(id string, current *domain.Site) domain.Site {
@@ -635,6 +637,10 @@ func (input siteRequest) site(id string, current *domain.Site) domain.Site {
 	clientMaxBodySizeMB := domain.DefaultClientMaxBodySizeMB
 	if input.ClientMaxBodySizeMB != nil {
 		clientMaxBodySizeMB = *input.ClientMaxBodySizeMB
+	}
+	clientKeepaliveTimeoutSeconds := domain.DefaultClientKeepaliveTimeoutSeconds
+	if input.ClientKeepaliveTimeoutSeconds != nil {
+		clientKeepaliveTimeoutSeconds = *input.ClientKeepaliveTimeoutSeconds
 	}
 	readWriteTimeoutSeconds := domain.DefaultReadWriteTimeoutSeconds
 	if input.ReadWriteTimeoutSeconds != nil {
@@ -670,7 +676,7 @@ func (input siteRequest) site(id string, current *domain.Site) domain.Site {
 	if input.TCPForwards != nil {
 		tcpForwards = append([]domain.TCPForward(nil), (*input.TCPForwards)...)
 	}
-	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, TCPOnly: tcpOnly, TCPForwards: tcpForwards, Enabled: enabled}
+	return domain.Site{ID: id, Name: input.Name, Domains: input.Domains, Nodes: input.NodeIDs, PrimaryOrigin: input.PrimaryOrigin.origin(currentPrimary), BackupOrigin: backupOrigin, StreamPaths: streamPaths, Passthrough: passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB, ClientKeepaliveTimeoutSeconds: clientKeepaliveTimeoutSeconds, ReadWriteTimeoutSeconds: readWriteTimeoutSeconds, DNSTTLSeconds: dnsTTLSeconds, TCPOnly: tcpOnly, TCPForwards: tcpForwards, Enabled: enabled}
 }
 
 func (input siteRequest) validateClientMaxBodySize() error {
@@ -687,6 +693,13 @@ func (input siteRequest) validateReadWriteTimeout() error {
 	return domain.ValidateReadWriteTimeoutSeconds(*input.ReadWriteTimeoutSeconds)
 }
 
+func (input siteRequest) validateClientKeepaliveTimeout() error {
+	if input.ClientKeepaliveTimeoutSeconds == nil {
+		return nil
+	}
+	return domain.ValidateClientKeepaliveTimeoutSeconds(*input.ClientKeepaliveTimeoutSeconds)
+}
+
 func (s *Server) createSite(response http.ResponseWriter, request *http.Request) {
 	var input siteRequest
 	if !readJSON(response, request, &input) {
@@ -697,6 +710,10 @@ func (s *Server) createSite(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	if err := input.validateReadWriteTimeout(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
+	if err := input.validateClientKeepaliveTimeout(); err != nil {
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
@@ -749,6 +766,10 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusBadRequest, err)
 		return
 	}
+	if err := input.validateClientKeepaliveTimeout(); err != nil {
+		writeError(response, http.StatusBadRequest, err)
+		return
+	}
 	siteInput := input.site(request.PathValue("id"), &current)
 	if input.Enabled == nil {
 		siteInput.Enabled = current.Enabled
@@ -758,6 +779,9 @@ func (s *Server) updateSite(response http.ResponseWriter, request *http.Request)
 	}
 	if input.ClientMaxBodySizeMB == nil {
 		siteInput.ClientMaxBodySizeMB = current.ClientMaxBodySizeMB
+	}
+	if input.ClientKeepaliveTimeoutSeconds == nil {
+		siteInput.ClientKeepaliveTimeoutSeconds = current.ClientKeepaliveTimeoutSeconds
 	}
 	if input.ReadWriteTimeoutSeconds == nil {
 		siteInput.ReadWriteTimeoutSeconds = current.ReadWriteTimeoutSeconds

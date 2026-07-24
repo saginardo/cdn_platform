@@ -130,6 +130,63 @@ func TestPublishUsesEachNodesEffectiveCacheLimit(t *testing.T) {
 	}
 }
 
+func TestPublishNodeUpdatesNginxCapacityState(t *testing.T) {
+	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	key, err := NewEncryptionKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := database.CreateNode("capacity-edge", "203.0.113.19")
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := Publisher{Store: database, Cipher: cipher}
+	if err := publisher.PublishNode(node.ID); err != nil {
+		t.Fatal(err)
+	}
+	initial, _, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(initial.NginxMainConfig, "worker_processes auto;") || !strings.Contains(initial.NginxEventsConfig, "worker_connections 4096;") {
+		t.Fatalf("default capacity state = %#v", initial)
+	}
+	if _, err := database.SetNodeNginxCapacity(node.ID, domain.NginxCapacity{
+		WorkerProcesses: 4, WorkerConnections: 8192, WorkerRlimitNoFile: 16384,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := publisher.PublishNode(node.ID); err != nil {
+		t.Fatal(err)
+	}
+	updated, _, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != initial.Version+1 || !strings.Contains(updated.NginxMainConfig, "worker_processes 4;") ||
+		!strings.Contains(updated.NginxMainConfig, "worker_rlimit_nofile 16384;") || !strings.Contains(updated.NginxEventsConfig, "worker_connections 8192;") {
+		t.Fatalf("updated capacity state = %#v", updated)
+	}
+	if err := publisher.PublishNode(node.ID); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, _, err := database.NodeState(node.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Version != updated.Version {
+		t.Fatalf("unchanged capacity state advanced version from %d to %d", updated.Version, unchanged.Version)
+	}
+}
+
 func TestPublishTCPOnlySiteBuildsStreamStateWithoutHTTPPorts(t *testing.T) {
 	database, err := store.Open(filepath.Join(t.TempDir(), "control.db"))
 	if err != nil {

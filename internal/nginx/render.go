@@ -21,7 +21,6 @@ type SiteConfig struct {
 const (
 	DefaultCachePath                          = "/opt/cdn-edge/cache"
 	DefaultCacheMaxBytes                int64 = 1 << 30
-	defaultClientKeepaliveTimeout             = "300s"
 	defaultClientKeepaliveRequests            = 1000
 	defaultUpstreamConnectTimeout             = "10s"
 	defaultUpstreamKeepaliveConnections       = 30
@@ -58,6 +57,8 @@ log_format cdn_json escape=json '{"request_id":"$request_id","timestamp":"$time_
 {{if .DefaultHTTP}}server {
     listen 80 default_server;
     server_name _;
+	keepalive_timeout {{.DefaultClientKeepaliveTimeout}};
+	keepalive_requests {{.ClientKeepaliveRequests}};
 {{if .SecurityEnabled}}    access_log /opt/cdn-edge/logs/security.json cdn_security_json if=$cdn_security_policy_id;
     if ($cdn_security_policy_id) { return 444; }
 {{end}}
@@ -81,6 +82,8 @@ log_format cdn_json escape=json '{"request_id":"$request_id","timestamp":"$time_
 server {
     listen 443 ssl default_server;
     ssl_reject_handshake on;
+    keepalive_timeout {{.DefaultClientKeepaliveTimeout}};
+    keepalive_requests {{.ClientKeepaliveRequests}};
 }
 {{end}}
 
@@ -106,6 +109,8 @@ upstream origin_{{.ID}} {
 server {
     listen 80;
     server_name {{.DomainList}};
+	keepalive_timeout {{.ClientKeepaliveTimeout}};
+	keepalive_requests {{$.ClientKeepaliveRequests}};
     {{if $.SecurityEnabled}}access_log /opt/cdn-edge/logs/security.json cdn_security_json if=$cdn_security_policy_id;
     if ($cdn_security_policy_id) { return 444; }
     {{end}}
@@ -128,7 +133,7 @@ server {
     http2 on;
     server_name {{.DomainList}};
     client_max_body_size {{.ClientMaxBodySizeMB}}m;
-    keepalive_timeout {{$.ClientKeepaliveTimeout}};
+    keepalive_timeout {{.ClientKeepaliveTimeout}};
     keepalive_requests {{$.ClientKeepaliveRequests}};
     {{if $.SecurityEnabled}}access_log /opt/cdn-edge/logs/security.json cdn_security_json if=$cdn_security_policy_id;
     if ($cdn_security_policy_id) { return 444; }
@@ -384,25 +389,26 @@ server {
 `
 
 type renderedSite struct {
-	ID                  string
-	DomainList          string
-	HealthBody          string
-	PrimaryHostPort     string
-	PrimaryTLSName      string
-	PrimaryScheme       string
-	UseTLS              bool
-	BackupHostPort      string
-	BackupTLSName       string
-	BackupHostHeader    string
-	HostHeader          string
-	CacheGeneration     int64
-	GRPC                bool
-	Passthrough         bool
-	ClientMaxBodySizeMB int
-	ReadWriteTimeout    string
-	CacheEnabled        bool
-	CacheZone           string
-	AlwaysUnbuffered    bool
+	ID                     string
+	DomainList             string
+	HealthBody             string
+	PrimaryHostPort        string
+	PrimaryTLSName         string
+	PrimaryScheme          string
+	UseTLS                 bool
+	BackupHostPort         string
+	BackupTLSName          string
+	BackupHostHeader       string
+	HostHeader             string
+	CacheGeneration        int64
+	GRPC                   bool
+	Passthrough            bool
+	ClientMaxBodySizeMB    int
+	ClientKeepaliveTimeout string
+	ReadWriteTimeout       string
+	CacheEnabled           bool
+	CacheZone              string
+	AlwaysUnbuffered       bool
 }
 
 type renderedCachePath struct {
@@ -413,19 +419,19 @@ type renderedCachePath struct {
 }
 
 type renderInput struct {
-	Sites                        []renderedSite
-	CachePaths                   []renderedCachePath
-	DefaultHTTP                  bool
-	SecurityEnabled              bool
-	SecurityConfig               string
-	RateLimitEnabled             bool
-	RateLimitBanEnabled          bool
-	RateLimitConfig              string
-	ClientKeepaliveTimeout       string
-	ClientKeepaliveRequests      int
-	UpstreamConnectTimeout       string
-	UpstreamKeepaliveConnections int
-	StaticAssetPathPattern       string
+	Sites                         []renderedSite
+	CachePaths                    []renderedCachePath
+	DefaultHTTP                   bool
+	SecurityEnabled               bool
+	SecurityConfig                string
+	RateLimitEnabled              bool
+	RateLimitBanEnabled           bool
+	RateLimitConfig               string
+	DefaultClientKeepaliveTimeout string
+	ClientKeepaliveRequests       int
+	UpstreamConnectTimeout        string
+	UpstreamKeepaliveConnections  int
+	StaticAssetPathPattern        string
 }
 
 func Render(sites []domain.Site) (string, error) {
@@ -478,6 +484,10 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 		if err != nil {
 			return "", fmt.Errorf("site %s: %w", site.Name, err)
 		}
+		clientKeepaliveTimeoutSeconds, err := domain.NormalizeClientKeepaliveTimeoutSeconds(site.ClientKeepaliveTimeoutSeconds)
+		if err != nil {
+			return "", fmt.Errorf("site %s: %w", site.Name, err)
+		}
 		primary, err := parseOrigin(site.PrimaryOrigin)
 		if err != nil {
 			return "", fmt.Errorf("site %s primary origin: %w", site.Name, err)
@@ -489,9 +499,10 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 			ID: site.ID, DomainList: strings.Join(site.Domains, " "), HealthBody: SiteHealthBody(site.ID), PrimaryHostPort: primary.Host, PrimaryTLSName: site.PrimaryOrigin.TLSServerName,
 			PrimaryScheme: domain.ProxyScheme(primary.Scheme), UseTLS: domain.OriginUsesTLS(primary.Scheme), HostHeader: site.PrimaryOrigin.HostHeader, CacheGeneration: site.CacheGeneration,
 			GRPC: domain.IsGRPCScheme(primary.Scheme), Passthrough: site.Passthrough, ClientMaxBodySizeMB: clientMaxBodySizeMB,
-			ReadWriteTimeout: fmt.Sprintf("%ds", readWriteTimeoutSeconds),
-			CacheEnabled:     primary.Scheme == "http" || primary.Scheme == "https",
-			AlwaysUnbuffered: site.Passthrough || domain.IsWebSocketScheme(primary.Scheme),
+			ClientKeepaliveTimeout: fmt.Sprintf("%ds", clientKeepaliveTimeoutSeconds),
+			ReadWriteTimeout:       fmt.Sprintf("%ds", readWriteTimeoutSeconds),
+			CacheEnabled:           primary.Scheme == "http" || primary.Scheme == "https",
+			AlwaysUnbuffered:       site.Passthrough || domain.IsWebSocketScheme(primary.Scheme),
 		}
 		item.CacheEnabled = item.CacheEnabled && !site.Passthrough
 		if item.CacheEnabled {
@@ -526,7 +537,7 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	if cacheEnabled {
-		cachePaths = append(cachePaths, renderedCachePath{Path: DefaultCachePath, Zone: "cdn_cache", ZoneSize: "100m", MaxSize: fmt.Sprintf("%dg", cacheSizeGB)})
+		cachePaths = append(cachePaths, renderedCachePath{Path: DefaultCachePath, Zone: "cdn_cache", ZoneSize: cacheZoneSize(cacheSizeGB, len(cacheEnabledItems(items))), MaxSize: fmt.Sprintf("%dg", cacheSizeGB)})
 	}
 	template, err := template.New("nginx").Parse(configTemplate)
 	if err != nil {
@@ -534,23 +545,63 @@ func renderWithCacheLayout(sites []domain.Site, securityPolicies []domain.Securi
 	}
 	var out bytes.Buffer
 	if err := template.Execute(&out, renderInput{
-		Sites:                        items,
-		CachePaths:                   cachePaths,
-		DefaultHTTP:                  !dedicatedTCP,
-		SecurityEnabled:              len(enabledSecurityPolicies(securityPolicies)) > 0 && !dedicatedTCP,
-		SecurityConfig:               renderSecurityConfig(securityPolicies, !dedicatedTCP),
-		RateLimitEnabled:             len(enabledRateLimitPolicies(rateLimitPolicies)) > 0 && !dedicatedTCP,
-		RateLimitBanEnabled:          hasEnabledRateLimitBanPolicy(rateLimitPolicies) && !dedicatedTCP,
-		RateLimitConfig:              renderRateLimitConfig(rateLimitPolicies, !dedicatedTCP),
-		ClientKeepaliveTimeout:       defaultClientKeepaliveTimeout,
-		ClientKeepaliveRequests:      defaultClientKeepaliveRequests,
-		UpstreamConnectTimeout:       defaultUpstreamConnectTimeout,
-		UpstreamKeepaliveConnections: defaultUpstreamKeepaliveConnections,
-		StaticAssetPathPattern:       staticAssetPathPattern,
+		Sites:                         items,
+		CachePaths:                    cachePaths,
+		DefaultHTTP:                   !dedicatedTCP,
+		SecurityEnabled:               len(enabledSecurityPolicies(securityPolicies)) > 0 && !dedicatedTCP,
+		SecurityConfig:                renderSecurityConfig(securityPolicies, !dedicatedTCP),
+		RateLimitEnabled:              len(enabledRateLimitPolicies(rateLimitPolicies)) > 0 && !dedicatedTCP,
+		RateLimitBanEnabled:           hasEnabledRateLimitBanPolicy(rateLimitPolicies) && !dedicatedTCP,
+		RateLimitConfig:               renderRateLimitConfig(rateLimitPolicies, !dedicatedTCP),
+		DefaultClientKeepaliveTimeout: fmt.Sprintf("%ds", domain.DefaultClientKeepaliveTimeoutSeconds),
+		ClientKeepaliveRequests:       defaultClientKeepaliveRequests,
+		UpstreamConnectTimeout:        defaultUpstreamConnectTimeout,
+		UpstreamKeepaliveConnections:  defaultUpstreamKeepaliveConnections,
+		StaticAssetPathPattern:        staticAssetPathPattern,
 	}); err != nil {
 		return "", err
 	}
 	return out.String(), nil
+}
+
+func cacheEnabledItems(items []renderedSite) []renderedSite {
+	result := make([]renderedSite, 0, len(items))
+	for _, item := range items {
+		if item.CacheEnabled {
+			result = append(result, item)
+		}
+	}
+	return result
+}
+
+func cacheZoneSize(cacheSizeGB, cacheSiteCount int) string {
+	const (
+		minZoneSizeMB = 16
+		maxZoneSizeMB = 512
+	)
+	// Cache metadata needs to grow with both the object budget and the number
+	// of independently assigned sites, while staying within a bounded RAM use.
+	zoneSizeMB := cacheSizeGB*8 + cacheSiteCount*4
+	if zoneSizeMB < minZoneSizeMB {
+		zoneSizeMB = minZoneSizeMB
+	}
+	if zoneSizeMB > maxZoneSizeMB {
+		zoneSizeMB = maxZoneSizeMB
+	}
+	return fmt.Sprintf("%dm", zoneSizeMB)
+}
+
+func RenderCapacity(capacity domain.NginxCapacity) (string, string, error) {
+	capacity, err := domain.NormalizeNginxCapacity(capacity)
+	if err != nil {
+		return "", "", err
+	}
+	workerProcesses := "auto"
+	if capacity.WorkerProcesses > 0 {
+		workerProcesses = fmt.Sprintf("%d", capacity.WorkerProcesses)
+	}
+	return fmt.Sprintf("# Generated by cdn-edge-agent. Do not edit.\nworker_processes %s;\nworker_rlimit_nofile %d;\n", workerProcesses, capacity.WorkerRlimitNoFile),
+		fmt.Sprintf("# Generated by cdn-edge-agent. Do not edit.\nworker_connections %d;\n", capacity.WorkerConnections), nil
 }
 
 func SplitHTTPConfig(configuration string) (string, []domain.NginxConfigFragment, error) {

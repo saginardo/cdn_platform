@@ -38,6 +38,8 @@ func main() {
 		ControlURL: os.Getenv("CONTROL_URL"), EnrollmentToken: os.Getenv("ENROLLMENT_TOKEN"),
 		StateDir: env("EDGE_STATE_DIR", "/opt/cdn-edge/data"), NginxConfigPath: env("NGINX_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform.conf"),
 		NginxStreamConfigPath: env("NGINX_STREAM_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform-stream.conf"),
+		NginxMainConfigPath:   env("NGINX_MAIN_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform-main.conf"),
+		NginxEventsConfigPath: env("NGINX_EVENTS_CONFIG_PATH", "/opt/cdn-edge/config/nginx/cdn-platform-events.conf"),
 		CertificateDir:        env("EDGE_CERT_DIR", "/opt/cdn-edge/config/certs"), AccessLogPath: env("EDGE_ACCESS_LOG", "/opt/cdn-edge/logs/access.json"), PollInterval: time.Duration(pollSeconds) * time.Second,
 		SecurityLogPath: env("EDGE_SECURITY_LOG", "/opt/cdn-edge/logs/security.json"),
 		Capabilities:    splitValues(os.Getenv("EDGE_CAPABILITIES")),
